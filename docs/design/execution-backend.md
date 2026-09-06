@@ -45,11 +45,15 @@ Renderer / Gateway
 
 ### 解析优先级
 
-1. `WORKMATE_AGENT_ENGINE` / `override`（运维强制，绕过 allowlist）
-2. `ChatRequest.engine` / 员工 prefs（须 ∈ `enabledEngines`）
-3. runtime-settings `defaultEngine`（须 ∈ allowlist）
-4. `preferCoding` → `dsh` / `preferProcessIsolation` → `agentscope`（须 ∈ allowlist）
-5. allowlist 中第一个已注册后端，否则 `pi`
+1. `override`（调用方强制）
+2. `WORKMATE_AGENT_ENGINE` **且** `WORKMATE_AGENT_ENGINE_FORCE=1`（运维强制，绕过 allowlist）
+3. `ChatRequest.engine` / 员工 prefs（须 ∈ `enabledEngines`）
+4. runtime-settings `defaultEngine`（须 ∈ allowlist）
+5. `preferCoding` → `dsh` / `preferProcessIsolation` → `agentscope`（须 ∈ allowlist）
+6. 软 `WORKMATE_AGENT_ENGINE`（无 FORCE 时仅作回退，须 ∈ allowlist）
+7. allowlist 中第一个已注册后端，否则 `pi`
+
+> 注意：桌面启动器**不再**默认注入 `WORKMATE_AGENT_ENGINE=pi`，否则会盖住员工配置的 dsh。
 
 ### 两层配置
 

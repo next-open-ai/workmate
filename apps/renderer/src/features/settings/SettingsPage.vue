@@ -563,7 +563,7 @@ function handleDefaultEmployeeChange(event: Event) {
           <div>
             <h3 class="text-[16px] font-bold">执行引擎</h3>
             <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">
-              选择本机可用引擎与默认引擎。数字员工可覆盖默认；环境变量 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE</code> 仍可强制覆盖。
+              选择本机可用引擎与默认引擎。数字员工可覆盖默认。运维强制请设 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE_FORCE=1</code> 并指定 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE</code>。
             </p>
           </div>
         </div>

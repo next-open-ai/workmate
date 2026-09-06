@@ -23,16 +23,49 @@ function exists(file: string): boolean {
   }
 }
 
+function isHarnessRoot(dir: string): boolean {
+  return exists(path.join(dir, 'pnpm-workspace.yaml'))
+    && (
+      exists(path.join(dir, 'packages/examples/jsonrpc-demo'))
+      || exists(path.join(dir, 'examples/jsonrpc-agent'))
+    );
+}
+
+/**
+ * Walk ancestors of `start` looking for a sibling `deepseek-harness` checkout.
+ * Works from agent-core source, agent-core dist, bundled api/dist, and
+ * Electron cwd (`apps/desktop`).
+ */
+function findSiblingHarness(start: string): string | null {
+  let dir = path.resolve(start);
+  for (let i = 0; i < 10; i += 1) {
+    const sibling = path.resolve(dir, '../deepseek-harness');
+    if (isHarnessRoot(sibling)) return sibling;
+    const nested = path.join(dir, 'deepseek-harness');
+    if (isHarnessRoot(nested)) return nested;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function moduleDir(): string {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return process.cwd();
+  }
+}
+
 function siblingHarnessRoot(): string | null {
   const fromEnv = process.env.WORKMATE_DSH_ROOT?.trim();
+  if (fromEnv && isHarnessRoot(fromEnv)) return path.resolve(fromEnv);
   if (fromEnv && exists(fromEnv)) return path.resolve(fromEnv);
-  // agent-core lives at workmate/packages/agent-core → ../../../deepseek-harness
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidate = path.resolve(here, '../../../../../deepseek-harness');
-  if (exists(path.join(candidate, 'pnpm-workspace.yaml'))) return candidate;
-  const fromCwd = path.resolve(process.cwd(), '../deepseek-harness');
-  if (exists(path.join(fromCwd, 'pnpm-workspace.yaml'))) return fromCwd;
-  return null;
+
+  return findSiblingHarness(moduleDir())
+    || findSiblingHarness(process.cwd())
+    || null;
 }
 
 function resolveCordis(harnessRoot: string | null): string | null {
@@ -69,8 +102,20 @@ function resolveBin(harnessRoot: string | null): { command: string; args: string
       return { command: process.execPath, args: [built], source: `sibling:${built}` };
     }
     const srcBin = path.join(harnessRoot, 'packages/examples/jsonrpc-demo/src/bin.ts');
-    const tsxBin = path.join(harnessRoot, 'node_modules/.bin/tsx');
-    if (exists(srcBin) && exists(tsxBin)) {
+    const tsxCandidates = [
+      path.join(harnessRoot, 'node_modules/.bin/tsx'),
+      path.join(harnessRoot, 'node_modules/tsx/dist/cli.mjs'),
+    ];
+    const tsxBin = tsxCandidates.find((item) => exists(item));
+    if (exists(srcBin) && tsxBin) {
+      // Prefer node + cli.mjs so we do not depend on a shell shim.
+      if (tsxBin.endsWith('.mjs') || tsxBin.endsWith('.js')) {
+        return {
+          command: process.execPath,
+          args: [tsxBin, srcBin],
+          source: `sibling-tsx:${srcBin}`,
+        };
+      }
       return {
         command: tsxBin,
         args: [srcBin],
@@ -104,7 +149,8 @@ export function resolveDshLaunch(options?: { cordisConfig?: string }): DshLaunch
   if (!bin) {
     throw new Error(
       'DeepSeek Harness runtime not found. Set WORKMATE_DSH_BIN to dsh-jsonrpc-agent '
-      + '(or node path to its bin). Optional: WORKMATE_DSH_ROOT=/path/to/deepseek-harness.',
+      + '(or node path to its bin). Optional: WORKMATE_DSH_ROOT=/path/to/deepseek-harness '
+      + `(looked relative to ${moduleDir()} and cwd ${process.cwd()}).`,
     );
   }
   if (!cordisConfig) {

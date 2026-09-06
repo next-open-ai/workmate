@@ -42,10 +42,14 @@ export interface ExecutionBackend {
 
 /**
  * Routing input for one turn.
- * Env `WORKMATE_AGENT_ENGINE` always wins when set (ops force).
+ *
+ * Ops force: pass `override`, or set `WORKMATE_AGENT_ENGINE` **and**
+ * `WORKMATE_AGENT_ENGINE_FORCE=1`. Plain `WORKMATE_AGENT_ENGINE` is only a
+ * soft fallback after employee / runtime default (so UI config is not
+ * permanently masked by desktop/dev launchers that inject `pi`).
  */
 export type BackendResolveInput = {
-  /** Explicit force (same tier as env when provided). */
+  /** Explicit force (highest priority). */
   override?: string | null;
   /** Deployment allowlist; empty/omit = all registered backends. */
   enabledEngines?: AgentEngineId[];
@@ -101,18 +105,23 @@ function pickRegistered(id: AgentEngineId | null | undefined, enabled: AgentEngi
  * Resolve which backend runs this turn.
  *
  * Priority:
- * 1. `WORKMATE_AGENT_ENGINE` / `override` (ops force; bypasses allowlist)
- * 2. `employeeEngine` when in allowlist + registered
- * 3. `defaultEngine` when in allowlist + registered
- * 4. `preferCoding` → `dsh` / `preferProcessIsolation` → `agentscope` (allowlist)
- * 5. first enabled registered backend, else `pi`
+ * 1. `override` (call-site force)
+ * 2. `WORKMATE_AGENT_ENGINE` when `WORKMATE_AGENT_ENGINE_FORCE=1` (ops force; bypasses allowlist)
+ * 3. `employeeEngine` when in allowlist + registered
+ * 4. `defaultEngine` when in allowlist + registered
+ * 5. `preferCoding` → `dsh` / `preferProcessIsolation` → `agentscope` (allowlist)
+ * 6. soft `WORKMATE_AGENT_ENGINE` (allowlist) — scripts / legacy launchers
+ * 7. first enabled registered backend, else `pi`
  */
 export function resolveExecutionBackend(input: BackendResolveInput = {}): ExecutionBackend {
   const enabled = input.enabledEngines?.length
     ? [...new Set(input.enabledEngines.map((id) => normalizeEngineId(id)).filter((id): id is AgentEngineId => Boolean(id)))]
     : undefined;
 
-  const forced = normalizeEngineId(input.override ?? process.env.WORKMATE_AGENT_ENGINE);
+  const forceEnv = String(process.env.WORKMATE_AGENT_ENGINE_FORCE || '').trim() === '1';
+  const forced = normalizeEngineId(
+    input.override ?? (forceEnv ? process.env.WORKMATE_AGENT_ENGINE : null),
+  );
   if (forced) {
     const backend = backends.get(forced);
     if (!backend) {
@@ -138,6 +147,9 @@ export function resolveExecutionBackend(input: BackendResolveInput = {}): Execut
     const isolated = pickRegistered('agentscope', enabled);
     if (isolated) return isolated;
   }
+
+  const fromEnv = pickRegistered(normalizeEngineId(process.env.WORKMATE_AGENT_ENGINE), enabled);
+  if (fromEnv) return fromEnv;
 
   if (enabled?.length) {
     for (const id of enabled) {

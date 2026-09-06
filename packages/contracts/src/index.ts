@@ -309,7 +309,8 @@ export const ChatRequestSchema = z.object({
   mcpToolTimeoutMs: z.number().int().min(3_000).max(300_000).optional(),
   /**
    * Per-employee / per-run execution backend. When omitted, routing uses
-   * runtime default (and optional prefer* hints). Env WORKMATE_AGENT_ENGINE still wins.
+   * runtime default (and optional prefer* hints). Ops force requires
+   * `WORKMATE_AGENT_ENGINE_FORCE=1` with `WORKMATE_AGENT_ENGINE`, or call-site override.
    */
   engine: AgentEngineIdSchema.optional(),
 });

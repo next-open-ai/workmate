@@ -62,7 +62,23 @@ export class DshJsonRpcClient {
     model: string;
     maxTokens?: number;
   }): Promise<void> {
-    await this.request('initialize', params);
+    const maxAttempts = 8;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await this.request('initialize', params);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error : new Error(message);
+        // Boot race: JSON-RPC server may accept frames before llm adapters register.
+        if (!/no adapter registered for provider/i.test(message) || attempt === maxAttempts) {
+          throw lastError;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+      }
+    }
+    throw lastError ?? new Error('dsh initialize failed.');
   }
 
   async prompt(sessionId: string, text: string): Promise<string> {

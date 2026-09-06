@@ -931,6 +931,14 @@ function bundledAgentscopeRoot() {
     : path.resolve(__dirname, '../../../../runtimes/agentscope-runtime');
 }
 
+/** Dev-time sibling checkout: tools/deepseek-harness next to workmate/. */
+function siblingDshRoot() {
+  if (process.env.WORKMATE_DSH_ROOT?.trim()) return process.env.WORKMATE_DSH_ROOT.trim();
+  const candidate = path.resolve(__dirname, '../../../../../deepseek-harness');
+  if (existsSync(path.join(candidate, 'pnpm-workspace.yaml'))) return candidate;
+  return '';
+}
+
 function bundledAgentscopePython(runtimeRoot = bundledAgentscopeRoot()) {
   if (process.env.WORKMATE_AGENTSCOPE_PYTHON?.trim()) return process.env.WORKMATE_AGENTSCOPE_PYTHON.trim();
   const candidates = process.platform === 'win32'
@@ -950,6 +958,7 @@ function bundledAgentscopePython(runtimeRoot = bundledAgentscopeRoot()) {
 
 function startApi() {
   const agentscopeRoot = process.env.WORKMATE_AGENTSCOPE_ROOT || bundledAgentscopeRoot();
+  const dshRoot = siblingDshRoot();
   apiProcess = fork(apiEntry(), [], {
     env: {
       ...process.env,
@@ -961,7 +970,13 @@ function startApi() {
       WORKMATE_WORKSPACES_DIR: path.join(storageRoot(), 'workspaces'),
       WORKMATE_KNOWLEDGE_DIR: path.join(storageRoot(), 'knowledge'),
       WORKMATE_EXPERIENCE_DIR: path.join(storageRoot(), 'experience'),
-      WORKMATE_AGENT_ENGINE: process.env.WORKMATE_AGENT_ENGINE || 'pi',
+      // Do NOT default-inject WORKMATE_AGENT_ENGINE=pi — that permanently
+      // overrides employee/runtime engine settings. Only forward when the
+      // parent process already set it (ops / explicit shell export).
+      ...(process.env.WORKMATE_AGENT_ENGINE
+        ? { WORKMATE_AGENT_ENGINE: process.env.WORKMATE_AGENT_ENGINE }
+        : {}),
+      ...(dshRoot ? { WORKMATE_DSH_ROOT: dshRoot } : {}),
       WORKMATE_AGENTSCOPE_ENABLED: process.env.WORKMATE_AGENTSCOPE_ENABLED || '0',
       WORKMATE_AGENTSCOPE_PYTHON: bundledAgentscopePython(agentscopeRoot),
       WORKMATE_AGENTSCOPE_ROOT: agentscopeRoot,

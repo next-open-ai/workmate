@@ -36,7 +36,7 @@ export {
  * Single product entry: resolve an ExecutionBackend then stream AgentEvents.
  *
  * Routing: runtime-settings allowlist/default + ChatRequest.engine + optional hints.
- * Ops force: `WORKMATE_AGENT_ENGINE` / `resolve.override`.
+ * Ops force: `resolve.override`, or `WORKMATE_AGENT_ENGINE` + `WORKMATE_AGENT_ENGINE_FORCE=1`.
  */
 export async function* streamAgentReply(
   input: ExecutionBackendStreamInput,
@@ -50,6 +50,11 @@ export async function* streamAgentReply(
     employeeEngine: resolve?.employeeEngine ?? input.engine ?? null,
     preferCoding: resolve?.preferCoding,
     preferProcessIsolation: resolve?.preferProcessIsolation,
+  });
+  console.info('[workmate] execution backend selected', {
+    engine: backend.id,
+    requestEngine: input.engine ?? null,
+    profileId: input.profile?.id ?? null,
   });
   yield* backend.stream(input);
 }

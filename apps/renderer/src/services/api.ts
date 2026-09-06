@@ -229,7 +229,7 @@ export async function saveServerRuntimeConfig(value: unknown) {
 
 export async function getRuntimeStatus(): Promise<RuntimeStatusResponse> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
-  const response = await fetch(`${apiBase}/api/runtime/status`);
+  const response = await fetch(`${apiBase}/api/orch/runtime/status`);
   const body = await response.json().catch(() => ({})) as RuntimeStatusResponse & { message?: string };
   if (!response.ok) throw new Error(body.message || `Runtime status failed: ${response.status}`);
   return body;
@@ -243,7 +243,7 @@ export function subscribeRuntimeStatus(handlers: {
   const token = getStoredSessionToken();
   const params = new URLSearchParams();
   if (token) params.set('sessionToken', token);
-  const source = new EventSource(`${apiBase}/api/runtime/status/stream${params.size ? `?${params.toString()}` : ''}`);
+  const source = new EventSource(`${apiBase}/api/orch/runtime/status/stream${params.size ? `?${params.toString()}` : ''}`);
   source.addEventListener('runtime-status', (event) => {
     if (!(event instanceof MessageEvent)) return;
     try {
