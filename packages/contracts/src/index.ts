@@ -17,6 +17,11 @@ export const AgentProfileSchema = z.object({
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 
+/** Pluggable agent execution backends (pi / agentscope / dsh). */
+export const AgentEngineIdSchema = z.enum(['pi', 'agentscope', 'dsh']);
+export type AgentEngineId = z.infer<typeof AgentEngineIdSchema>;
+export const AGENT_ENGINE_IDS = AgentEngineIdSchema.options;
+
 /**
  * A capability package made available to one agent run. Content is kept out
  * of the model prompt until the agent explicitly loads the skill (except for
@@ -302,5 +307,10 @@ export const ChatRequestSchema = z.object({
   runTimeoutMs: z.number().int().min(15_000).max(1_800_000).optional(),
   /** Per MCP tool call budget (ms). */
   mcpToolTimeoutMs: z.number().int().min(3_000).max(300_000).optional(),
+  /**
+   * Per-employee / per-run execution backend. When omitted, routing uses
+   * runtime default (and optional prefer* hints). Env WORKMATE_AGENT_ENGINE still wins.
+   */
+  engine: AgentEngineIdSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;

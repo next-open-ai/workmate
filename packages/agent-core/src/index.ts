@@ -12,14 +12,36 @@ export * from './experience/index.js';
 export * from './pi-model.js';
 export * from './pi-tools.js';
 export * from './pi-skills.js';
-export { streamAgentReply, DEFAULT_RUN_TIMEOUT_MS, resolveAgentEngine } from './stream-reply.js';
-export type { AgentEngineId } from './stream-reply.js';
+export {
+  streamAgentReply,
+  DEFAULT_RUN_TIMEOUT_MS,
+  resolveAgentEngine,
+  resolveExecutionBackend,
+  registerExecutionBackend,
+  unregisterExecutionBackend,
+  getExecutionBackend,
+  listExecutionBackends,
+  availableExecutionBackendIds,
+  registerBuiltinExecutionBackends,
+  resetExecutionBackendRegistryForTests,
+  loadExecutionRoutingConfig,
+} from './stream-reply.js';
+export type {
+  AgentEngineId,
+  ExecutionBackend,
+  ExecutionBackendCapabilities,
+  ExecutionBackendStreamInput,
+  BackendResolveInput,
+  ExecutionRoutingConfig,
+} from './stream-reply.js';
 export * from './agentscope/index.js';
+export * from './dsh/index.js';
 
 /**
  * Workmate agent boundary.
- * Default loop: pi-agent-core / pi-ai
- * Optional Sidecar: AgentScope via WebSocket JSON-RPC (`WORKMATE_AGENT_ENGINE=agentscope`)
+ * Execution backends (registry): default **pi**; optional **AgentScope** sidecar;
+ * **dsh** DeepSeek Harness coding sidecar (JSON-RPC; requires runtime install).
+ * Switch: `WORKMATE_AGENT_ENGINE=pi|agentscope|dsh` or `resolveExecutionBackend` hints.
  */
 export interface AgentRuntime {
   start(input: { profile: AgentProfile; prompt: string; tools: OpcaiTool[] }): AsyncIterable<AgentEvent>;

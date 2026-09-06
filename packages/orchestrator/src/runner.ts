@@ -2,8 +2,11 @@ import { streamAgentReply } from '@workmate/agent-core';
 import type { AgentEvent, ChatRequest } from '@workmate/contracts';
 
 /**
- * Abstraction over "execute one agent run" so the orchestration state machine
- * is testable without any live model provider (tests inject a FakeRunner).
+ * Orchestration-facing run handle. Testable without a live model
+ * (tests inject a FakeRunner). Production path delegates to agent-core
+ * `streamAgentReply`, which resolves an ExecutionBackend
+ * (pi / agentscope / dsh) from runtime-settings + ChatRequest.engine —
+ * backends are not selected here.
  */
 export interface AgentRunner {
   /**
@@ -13,7 +16,7 @@ export interface AgentRunner {
   start(request: ChatRequest, emit: (event: AgentEvent) => void, options?: { abortSignal?: AbortSignal }): Promise<void>;
 }
 
-/** Production runner: delegates to the single agent-core execution boundary. */
+/** Production runner: single agent-core boundary → ExecutionBackend registry. */
 export const agentCoreRunner: AgentRunner = {
   async start(request, emit, options) {
     for await (const event of streamAgentReply({

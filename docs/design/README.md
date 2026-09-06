@@ -8,6 +8,8 @@
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
 | [architecture.md](architecture.md) | 当前项目架构 / 进程与模块边界 / 主要逻辑（会话·滚动记忆·可续跑审批·**Plan/Run/ChangeSet 项目编排**·存储 keyring·通道） | ✅ 当前权威 |
+| [execution-backend.md](execution-backend.md) | 多引擎统一抽象：`ExecutionBackend` 注册表（pi / agentscope / dsh） | ✅ 当前实现 |
+| [dsh-sidecar.md](dsh-sidecar.md) | DeepSeek Harness 编码 Sidecar：JSON-RPC 桥、环境变量、事件映射 | ✅ Phase 1 |
 | [agentscope-abi.md](agentscope-abi.md) | AgentScope Sidecar：WebSocket JSON-RPC ABI + AgentEvent 映射 | ✅ P0 |
 | [concurrency-runtime.md](concurrency-runtime.md) | 多 session / 多用户 / dispatcher / sidecar 池 的并发执行机制、进程拓扑与隔离模型 | ✅ 当前实现 |
 | [concurrency-verification.md](concurrency-verification.md) | 并发压测与验收清单：限流、优先级、sidecar 池、自愈、观测一致性 | ✅ 当前实现 |

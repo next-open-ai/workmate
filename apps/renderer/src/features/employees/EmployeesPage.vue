@@ -24,6 +24,7 @@ import {
 import { useNotify } from '../../app/notify';
 import { mcpSummaryLine, useMcpConfig, isAssociableMcp } from '../../app/mcp-config';
 import { knowledgeProviderMeta, useKnowledgeConfig } from '../../app/kb-config';
+import { getServerRuntimeConfig } from '../../services/api';
 import {
   EMPLOYEE_COLOR_PRESETS,
   defaultEmployeeDraft,
@@ -33,6 +34,8 @@ import {
   isEditableEmployee,
   isPresetEmployee,
 } from '../../app/employees';
+
+type EmployeeEngineChoice = '' | 'pi' | 'agentscope' | 'dsh';
 
 const props = defineProps<{
   employees: Employee[];
@@ -68,6 +71,8 @@ const draftMcpToolTimeoutSec = ref(Math.round(DEFAULT_MCP_TOOL_TIMEOUT_MS / 1000
 const draftMcpIds = ref<string[]>([]);
 const draftKnowledgeProvider = ref<EmployeeKnowledgeProvider>('off');
 const draftKnowledgeBaseIds = ref<string[]>([]);
+const draftEngine = ref<EmployeeEngineChoice>('');
+const enabledEngines = ref<Array<'pi' | 'agentscope' | 'dsh'>>(['pi', 'agentscope', 'dsh']);
 const mcpPickerOpen = ref(false);
 const mcpPickerDraft = ref<string[]>([]);
 const skillPickerOpen = ref(false);
@@ -112,9 +117,27 @@ const availableKnowledgeBases = computed(() => {
   );
 });
 const canEditSelected = computed(() => selectedEmployee.value ? isEditableEmployee(selectedEmployee.value) : false);
+const engineOptions = computed(() => [
+  { value: '' as const, label: t('employee.engineInherit') },
+  ...enabledEngines.value.map((id) => ({
+    value: id,
+    label: t(`employee.engine.${id}`),
+  })),
+]);
 
 onMounted(async () => {
   await Promise.all([load(), loadModels(), loadSearch(), loadPrefs(), loadMcp(), loadKnowledge()]);
+  try {
+    const runtime = await getServerRuntimeConfig() as { enabledEngines?: string[] };
+    const list = Array.isArray(runtime.enabledEngines)
+      ? runtime.enabledEngines
+        .map((id) => String(id).trim().toLowerCase())
+        .filter((id): id is 'pi' | 'agentscope' | 'dsh' => id === 'pi' || id === 'agentscope' || id === 'dsh')
+      : [];
+    if (list.length) enabledEngines.value = [...new Set(list)];
+  } catch {
+    /* keep defaults */
+  }
 });
 
 watch(
@@ -128,6 +151,7 @@ watch(
     draftMaxSteps.value = prefs.maxSteps;
     draftRunTimeoutSec.value = Math.round((prefs.runTimeoutMs || DEFAULT_RUN_TIMEOUT_MS) / 1000);
     draftMcpToolTimeoutSec.value = Math.round((prefs.mcpToolTimeoutMs || DEFAULT_MCP_TOOL_TIMEOUT_MS) / 1000);
+    draftEngine.value = prefs.engine || '';
     draftMcpIds.value = [...(prefs.mcpIds || [])].filter((id) =>
       mcpConnections.value.some((item) => item.id === id && isAssociableMcp(item)),
     );
@@ -246,6 +270,7 @@ async function saveRuntime() {
       mcpIds: [...draftMcpIds.value],
       knowledgeProvider: draftKnowledgeProvider.value,
       knowledgeBaseIds: draftKnowledgeProvider.value === 'off' ? [] : [...draftKnowledgeBaseIds.value],
+      engine: draftEngine.value || null,
     });
     await setEmployeeDefaultModel(selected.value, modelId);
     notify.success('notify.employeeRuntimeSaved');
@@ -267,6 +292,7 @@ async function resetRuntime() {
   draftMcpIds.value = [];
   draftKnowledgeProvider.value = defaults.knowledgeProvider;
   draftKnowledgeBaseIds.value = [];
+  draftEngine.value = '';
   await resetPrefs(selected.value);
   await setEmployeeDefaultModel(selected.value, null);
   notify.success('notify.employeeRuntimeReset');
@@ -519,6 +545,14 @@ watch(employeeModelSupportsBuiltinSearch, (ok) => {
                 <option v-for="option in searchModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
               </select>
               <span class="font-normal text-[11px]">{{ t('employee.searchModeHelp') }}</span>
+            </label>
+
+            <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t('employee.engine') }}</span>
+              <select v-model="draftEngine" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal">
+                <option v-for="option in engineOptions" :key="option.value || 'inherit'" :value="option.value">{{ option.label }}</option>
+              </select>
+              <span class="font-normal text-[11px]">{{ t('employee.engineHelp') }}</span>
             </label>
 
             <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)] sm:col-span-2">

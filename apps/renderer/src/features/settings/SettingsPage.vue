@@ -44,7 +44,17 @@ const {
 } = useKnowledgeConfig();
 const notify = useNotify();
 const dirty = ref(false);
-const runtimeSettings = ref({ sidecarPoolSize: 1, sidecarSharedMaxRuns: 8 });
+const runtimeSettings = ref({
+  sidecarPoolSize: 1,
+  sidecarSharedMaxRuns: 8,
+  enabledEngines: ['pi', 'agentscope', 'dsh'] as Array<'pi' | 'agentscope' | 'dsh'>,
+  defaultEngine: 'pi' as 'pi' | 'agentscope' | 'dsh',
+});
+const ENGINE_OPTIONS = [
+  { id: 'pi' as const, label: 'pi（进程内默认）' },
+  { id: 'agentscope' as const, label: 'agentscope（Python Sidecar）' },
+  { id: 'dsh' as const, label: 'dsh（编码 Harness）' },
+];
 const runtimeStatus = ref<RuntimeStatusResponse | null>(null);
 const runtimeStatusLoading = ref(false);
 const runtimeStatusAutoRefresh = ref(true);
@@ -168,24 +178,80 @@ function resetSearchEndpoint(id: SearchProviderId) {
 
 async function loadRuntimeSettings() {
   try {
-    const value = await getServerRuntimeConfig() as { sidecarPoolSize?: number; sidecarSharedMaxRuns?: number };
+    const value = await getServerRuntimeConfig() as {
+      sidecarPoolSize?: number;
+      sidecarSharedMaxRuns?: number;
+      enabledEngines?: string[];
+      defaultEngine?: string;
+    };
     runtimeSettings.value.sidecarPoolSize = Math.max(1, Number(value.sidecarPoolSize) || 1);
     runtimeSettings.value.sidecarSharedMaxRuns = Math.max(1, Number(value.sidecarSharedMaxRuns) || 8);
+    const enabled = Array.isArray(value.enabledEngines)
+      ? value.enabledEngines
+        .map((id) => String(id).trim().toLowerCase())
+        .filter((id): id is 'pi' | 'agentscope' | 'dsh' => id === 'pi' || id === 'agentscope' || id === 'dsh')
+      : [];
+    runtimeSettings.value.enabledEngines = enabled.length ? [...new Set(enabled)] : ['pi', 'agentscope', 'dsh'];
+    const def = String(value.defaultEngine || 'pi').trim().toLowerCase();
+    runtimeSettings.value.defaultEngine =
+      (def === 'pi' || def === 'agentscope' || def === 'dsh') && runtimeSettings.value.enabledEngines.includes(def)
+        ? def
+        : runtimeSettings.value.enabledEngines[0] || 'pi';
   } catch {
     runtimeSettings.value.sidecarPoolSize = 1;
     runtimeSettings.value.sidecarSharedMaxRuns = 8;
+    runtimeSettings.value.enabledEngines = ['pi', 'agentscope', 'dsh'];
+    runtimeSettings.value.defaultEngine = 'pi';
+  }
+}
+
+function toggleEnabledEngine(id: 'pi' | 'agentscope' | 'dsh') {
+  const set = new Set(runtimeSettings.value.enabledEngines);
+  if (set.has(id)) {
+    if (set.size <= 1) return;
+    set.delete(id);
+  } else {
+    set.add(id);
+  }
+  runtimeSettings.value.enabledEngines = ENGINE_OPTIONS.map((item) => item.id).filter((item) => set.has(item));
+  if (!runtimeSettings.value.enabledEngines.includes(runtimeSettings.value.defaultEngine)) {
+    runtimeSettings.value.defaultEngine = runtimeSettings.value.enabledEngines[0] || 'pi';
   }
 }
 
 async function saveRuntimeSettings() {
   try {
+    const enabled = runtimeSettings.value.enabledEngines.length
+      ? runtimeSettings.value.enabledEngines
+      : ['pi'];
+    const defaultEngine = enabled.includes(runtimeSettings.value.defaultEngine)
+      ? runtimeSettings.value.defaultEngine
+      : enabled[0];
     const payload = {
       sidecarPoolSize: Math.max(1, Number(runtimeSettings.value.sidecarPoolSize) || 1),
       sidecarSharedMaxRuns: Math.max(1, Number(runtimeSettings.value.sidecarSharedMaxRuns) || 8),
+      enabledEngines: enabled,
+      defaultEngine,
     };
-    const saved = await saveServerRuntimeConfig(payload) as { sidecarPoolSize?: number; sidecarSharedMaxRuns?: number };
+    const saved = await saveServerRuntimeConfig(payload) as {
+      sidecarPoolSize?: number;
+      sidecarSharedMaxRuns?: number;
+      enabledEngines?: string[];
+      defaultEngine?: string;
+    };
     runtimeSettings.value.sidecarPoolSize = Math.max(1, Number(saved.sidecarPoolSize) || payload.sidecarPoolSize);
     runtimeSettings.value.sidecarSharedMaxRuns = Math.max(1, Number(saved.sidecarSharedMaxRuns) || payload.sidecarSharedMaxRuns);
+    const savedEnabled = Array.isArray(saved.enabledEngines)
+      ? saved.enabledEngines
+        .map((id) => String(id).trim().toLowerCase())
+        .filter((id): id is 'pi' | 'agentscope' | 'dsh' => id === 'pi' || id === 'agentscope' || id === 'dsh')
+      : payload.enabledEngines;
+    runtimeSettings.value.enabledEngines = savedEnabled.length ? savedEnabled : payload.enabledEngines;
+    const savedDefault = String(saved.defaultEngine || payload.defaultEngine).trim().toLowerCase();
+    runtimeSettings.value.defaultEngine =
+      (savedDefault === 'pi' || savedDefault === 'agentscope' || savedDefault === 'dsh')
+        ? savedDefault
+        : payload.defaultEngine;
     await loadRuntimeStatus();
     notify.success('notify.saved');
   } catch (cause) {
@@ -492,6 +558,53 @@ function handleDefaultEmployeeChange(event: Event) {
           <option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employeeDisplayName(employee, t) }}</option>
         </select>
       </label>
+      <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 class="text-[16px] font-bold">执行引擎</h3>
+            <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">
+              选择本机可用引擎与默认引擎。数字员工可覆盖默认；环境变量 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE</code> 仍可强制覆盖。
+            </p>
+          </div>
+        </div>
+        <div class="mt-4 grid gap-3 md:grid-cols-[1fr_220px] md:items-start">
+          <div class="grid gap-2">
+            <span class="text-sm font-medium text-[var(--muted)]">可用引擎</span>
+            <label
+              v-for="item in ENGINE_OPTIONS"
+              :key="item.id"
+              class="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm"
+            >
+              <input
+                type="checkbox"
+                class="h-4 w-4"
+                :checked="runtimeSettings.enabledEngines.includes(item.id)"
+                @change="toggleEnabledEngine(item.id)"
+              />
+              <span>{{ item.label }}</span>
+            </label>
+          </div>
+          <label class="grid gap-2 text-sm">
+            <span class="font-medium text-[var(--muted)]">默认引擎</span>
+            <select
+              v-model="runtimeSettings.defaultEngine"
+              class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-sm"
+            >
+              <option
+                v-for="id in runtimeSettings.enabledEngines"
+                :key="id"
+                :value="id"
+              >{{ ENGINE_OPTIONS.find((item) => item.id === id)?.label || id }}</option>
+            </select>
+            <span class="text-xs leading-relaxed text-[var(--muted)]">员工未指定引擎时使用此项。</span>
+          </label>
+        </div>
+        <div class="mt-4 flex justify-end">
+          <button class="rounded-xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white" type="button" @click="saveRuntimeSettings">
+            保存并立即生效
+          </button>
+        </div>
+      </div>
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>

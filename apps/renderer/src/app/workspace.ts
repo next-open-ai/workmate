@@ -168,12 +168,14 @@ export function useWorkspace() {
       runTimeoutMs: prefs.runTimeoutMs || DEFAULT_RUN_TIMEOUT_MS,
       mcpToolTimeoutMs: prefs.mcpToolTimeoutMs || DEFAULT_MCP_TOOL_TIMEOUT_MS,
     };
+    const engine = prefs.engine || undefined;
     if (!onlineSearch || prefs.searchMode === 'off') {
       return {
         searchProviders: [] as ReturnType<typeof runtimeProvidersFor>,
         enableBuiltinSearch: false,
         maxSteps: prefs.maxSteps || DEFAULT_MAX_STEPS,
         ...timeouts,
+        engine,
         mcpConnections: mcpRuntimePayload(prefs.mcpIds),
         knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
       };
@@ -184,6 +186,7 @@ export function useWorkspace() {
       enableBuiltinSearch,
       maxSteps: prefs.maxSteps || DEFAULT_MAX_STEPS,
       ...timeouts,
+      engine,
       mcpConnections: mcpRuntimePayload(prefs.mcpIds),
       knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
     };
@@ -406,6 +409,7 @@ export function useWorkspace() {
         maxSteps: opts.maxSteps,
         runTimeoutMs: opts.runTimeoutMs,
         mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
+        ...(opts.engine ? { engine: opts.engine } : {}),
       };
       if (!context.mcpConnections.length) {
         console.warn('[workmate] chat context has 0 MCP connectors; server may backfill from KV');
@@ -882,6 +886,7 @@ export function useWorkspace() {
               maxSteps: collabOpts.maxSteps,
               runTimeoutMs: collabOpts.runTimeoutMs,
               mcpToolTimeoutMs: collabOpts.mcpToolTimeoutMs,
+              ...(collabOpts.engine ? { engine: collabOpts.engine } : {}),
               signal: runAbort.signal,
             }, (delta) => { run.summary += delta; conversations.value = [...conversations.value]; }, (activity) => {
               const existing = run.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
@@ -1037,6 +1042,7 @@ export function useWorkspace() {
       maxSteps: opts.maxSteps,
       runTimeoutMs: opts.runTimeoutMs,
       mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
+      ...(opts.engine ? { engine: opts.engine } : {}),
     }, (delta) => { transcript.assistantContent += delta; onDelta?.(delta); }, (activity) => {
       const existing = transcript.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
       if (existing && activity.status !== 'running') Object.assign(existing, activity); else transcript.activities.push(activity);

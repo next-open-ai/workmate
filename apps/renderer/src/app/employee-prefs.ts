@@ -24,6 +24,11 @@ export interface EmployeeRuntimePrefs {
   knowledgeProvider: EmployeeKnowledgeProvider;
   /** Associated knowledge base ids (must belong to knowledgeProvider). */
   knowledgeBaseIds: string[];
+  /**
+   * Execution backend for this employee.
+   * `null` = inherit deployment defaultEngine from runtime-settings.
+   */
+  engine: 'pi' | 'agentscope' | 'dsh' | null;
 }
 
 export const DEFAULT_MAX_STEPS = 28;
@@ -47,6 +52,7 @@ export const defaultEmployeeRuntimePrefs = (): EmployeeRuntimePrefs => ({
   mcpIds: [],
   knowledgeProvider: 'off',
   knowledgeBaseIds: [],
+  engine: null,
 });
 
 const key = 'workspace.employee-runtime-prefs';
@@ -71,6 +77,12 @@ function normalizeKnowledgeProvider(value: unknown): EmployeeKnowledgeProvider {
     return value as KnowledgeProviderId;
   }
   return 'off';
+}
+
+function normalizeEngine(value: unknown): EmployeeRuntimePrefs['engine'] {
+  const id = String(value || '').trim().toLowerCase();
+  if (id === 'pi' || id === 'agentscope' || id === 'dsh') return id;
+  return null;
 }
 
 function normalizeOne(value: unknown): EmployeeRuntimePrefs {
@@ -99,6 +111,7 @@ function normalizeOne(value: unknown): EmployeeRuntimePrefs {
     mcpIds: Array.isArray(raw.mcpIds) ? raw.mcpIds.map((id) => String(id)).filter(Boolean).slice(0, 24) : [],
     knowledgeProvider: normalizeKnowledgeProvider(raw.knowledgeProvider),
     knowledgeBaseIds,
+    engine: normalizeEngine(raw.engine),
   };
 }
 

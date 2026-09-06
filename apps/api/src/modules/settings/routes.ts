@@ -300,10 +300,25 @@ function mergeMcpConnections(value: unknown) {
 
 function splitRuntimeSettings(value: unknown): SettingsEnvelope {
   const raw = asRecord(value);
+  const enabledRaw = Array.isArray(raw.enabledEngines) ? raw.enabledEngines : [];
+  const enabledEngines = [...new Set(
+    enabledRaw
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter((id) => id === 'pi' || id === 'agentscope' || id === 'dsh'),
+  )];
+  const defaultCandidate = String(raw.defaultEngine || '').trim().toLowerCase();
+  const defaultEngine =
+    (defaultCandidate === 'pi' || defaultCandidate === 'agentscope' || defaultCandidate === 'dsh')
+      ? defaultCandidate
+      : 'pi';
+  const enabled = enabledEngines.length ? enabledEngines : ['pi', 'agentscope', 'dsh'];
+  const resolvedDefault = enabled.includes(defaultEngine) ? defaultEngine : enabled[0];
   return {
     meta: {
       sidecarPoolSize: Math.max(1, Number(raw.sidecarPoolSize) || 1),
       sidecarSharedMaxRuns: Math.max(1, Number(raw.sidecarSharedMaxRuns) || 8),
+      enabledEngines: enabled,
+      defaultEngine: resolvedDefault,
     },
   };
 }
@@ -311,9 +326,20 @@ function splitRuntimeSettings(value: unknown): SettingsEnvelope {
 function mergeRuntimeSettings(value: unknown) {
   const envelope = isEnvelope(value) ? value : splitRuntimeSettings(value);
   const meta = asRecord(envelope.meta);
+  const enabledRaw = Array.isArray(meta.enabledEngines) ? meta.enabledEngines : [];
+  const enabledEngines = [...new Set(
+    enabledRaw
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter((id) => id === 'pi' || id === 'agentscope' || id === 'dsh'),
+  )];
+  const enabled = enabledEngines.length ? enabledEngines : ['pi', 'agentscope', 'dsh'];
+  const defaultCandidate = String(meta.defaultEngine || 'pi').trim().toLowerCase();
+  const defaultEngine = enabled.includes(defaultCandidate) ? defaultCandidate : enabled[0];
   return {
     sidecarPoolSize: Math.max(1, Number(meta.sidecarPoolSize) || 1),
     sidecarSharedMaxRuns: Math.max(1, Number(meta.sidecarSharedMaxRuns) || 8),
+    enabledEngines: enabled,
+    defaultEngine,
   };
 }
 

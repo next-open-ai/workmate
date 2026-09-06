@@ -61,6 +61,7 @@ interface PrefsRow {
   defaultModelId?: string | null; searchMode?: string; maxSteps?: number;
   runTimeoutMs?: number; mcpToolTimeoutMs?: number; mcpIds?: string[];
   knowledgeProvider?: string; knowledgeBaseIds?: string[];
+  engine?: string | null;
 }
 interface ModelSettings {
   providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; apiKey?: string; disableThinking?: boolean }>;
@@ -345,6 +346,11 @@ export async function resolveTaskContext(store: KeyValueStore, task: ProjectTask
   const maxSteps = prefs.maxSteps && prefs.maxSteps >= 4 ? prefs.maxSteps : 28;
   const runTimeoutMs = prefs.runTimeoutMs ?? 600_000;
   const mcpToolTimeoutMs = prefs.mcpToolTimeoutMs ?? 60_000;
+  const engineRaw = String(prefs.engine || '').trim().toLowerCase();
+  const engine =
+    engineRaw === 'pi' || engineRaw === 'agentscope' || engineRaw === 'dsh'
+      ? engineRaw
+      : undefined;
 
   return {
     profile: profileFor(task.employeeId, employees, overrides),
@@ -356,5 +362,6 @@ export async function resolveTaskContext(store: KeyValueStore, task: ProjectTask
     maxSteps,
     runTimeoutMs,
     mcpToolTimeoutMs,
+    ...(engine ? { engine } : {}),
   };
 }
