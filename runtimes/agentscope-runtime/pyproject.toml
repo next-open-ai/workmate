@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workmate-agentscope-runtime"
+version = "0.1.0"
+description = "Workmate AgentScope Sidecar (WebSocket JSON-RPC)"
+requires-python = ">=3.10"
+dependencies = [
+  "agentscope>=1.0.0",
+  "websockets>=12,<16",
+]
+
+[project.scripts]
+workmate-agentscope-runtime = "workmate_agentscope_runtime.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

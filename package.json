@@ -1,0 +1,86 @@
+{
+  "name": "@next-open-ai/workmate",
+  "version": "0.2.4",
+  "private": false,
+  "description": "Cross-platform local AI workspace.",
+  "packageManager": "pnpm@10.20.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "workmate": "./bin/workmate.mjs"
+  },
+  "files": [
+    "bin",
+    "apps/api/dist",
+    "apps/renderer/dist",
+    "scripts/start-web.mjs",
+    "scripts/lib",
+    "runtimes/agentscope-runtime/src",
+    "runtimes/agentscope-runtime/requirements.txt",
+    "runtimes/agentscope-runtime/pyproject.toml",
+    "README.md",
+    "README.zh-CN.md",
+    "docs/runtime-modes.md",
+    "docs/release-checklist.md",
+    "docs/dual-runtime-release-notes.md",
+    "docs/pr-template-dual-runtime.md",
+    "apps/gateway/package.json",
+    "apps/gateway/dist",
+    "packages/channel/package.json",
+    "packages/channel/dist"
+  ],
+  "dependencies": {
+    "@fastify/cors": "^11.0.0",
+    "@fastify/static": "^8.1.1",
+    "@lancedb/lancedb": "0.22.3",
+    "@larksuiteoapi/node-sdk": "^1.11.1",
+    "@workmate/channel": "file:./packages/channel",
+    "apache-arrow": "18.1.0",
+    "fastify": "^5.3.0",
+    "fflate": "^0.8.3",
+    "sql.js": "^1.14.2",
+    "ws": "^8.18.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "dev": "pnpm --filter @workmate/desktop dev",
+    "web:build": "pnpm build",
+    "web:start": "node scripts/start-web.mjs",
+    "workmate:start": "node bin/workmate.mjs start",
+    "workmate:init": "node bin/workmate.mjs init",
+    "workmate:doctor": "node bin/workmate.mjs doctor",
+    "build": "pnpm --filter @workmate/contracts build && pnpm --filter @workmate/tools build && pnpm --filter @workmate/storage build && pnpm --filter @workmate/channel build && pnpm --filter @workmate/gateway build && pnpm --filter @workmate/agent-core build && pnpm --filter @workmate/orchestrator build && pnpm --filter @workmate/api build && pnpm --filter @workmate/renderer build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "lint": "pnpm -r --if-present lint",
+    "package": "pnpm --filter @workmate/desktop package",
+    "size:check": "node scripts/check-size.mjs",
+    "orch:smoke": "node scripts/headless-gateway-smoke.mjs",
+    "orch:remote-confirm": "node scripts/remote-project-confirm.mjs",
+    "orch:remote-chat": "node scripts/remote-chat.mjs",
+    "gateway:stub": "node scripts/gateway-stub-smoke.mjs",
+    "gateway:config": "node scripts/gateway-config.mjs",
+    "gateway:feishu": "node scripts/gateway-feishu-smoke.mjs",
+    "gateway:relay": "node scripts/relay-smoke.mjs",
+    "agentscope:smoke": "node scripts/agentscope-smoke.mjs",
+    "concurrency:loadtest": "node scripts/concurrency-loadtest.mjs",
+    "concurrency:regression": "node scripts/concurrency-regression.mjs",
+    "owner:migrate:check": "node scripts/migrate-owner-fields.mjs",
+    "owner:migrate": "node scripts/migrate-owner-fields.mjs --write"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.0"
+  }
+}

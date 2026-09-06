@@ -1,0 +1,171 @@
+import type { AgentEvent, ChatRequest } from '@workmate/contracts';
+import { chatRequestToRunParams } from './client.js';
+import { prepareAgentscopeHostTools, type HostToolCall } from './host-tools.js';
+import { acquireSharedAgentscopeRunSlot, ensureSharedAgentscopeRuntime, markSharedAgentscopeHandleUnhealthy } from './process.js';
+
+/** Silence between sidecar events before we abort a hung provider stream. */
+export const DEFAULT_STREAM_IDLE_MS = 150_000;
+const MAX_SIDECAR_START_RETRIES = 1;
+
+const NETWORK_STALL_MESSAGE =
+  '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。';
+
+function asToolCalls(value: unknown): HostToolCall[] {
+  if (!Array.isArray(value)) return [];
+  const out: HostToolCall[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.id !== 'string' || typeof row.name !== 'string') continue;
+    out.push({
+      id: row.id,
+      name: row.name,
+      input: row.input && typeof row.input === 'object' && !Array.isArray(row.input)
+        ? (row.input as Record<string, unknown>)
+        : {},
+    });
+  }
+  return out;
+}
+
+function resolveStreamIdleMs(input: ChatRequest): number {
+  const runTimeoutMs = typeof input.runTimeoutMs === 'number' && input.runTimeoutMs > 0
+    ? input.runTimeoutMs
+    : 600_000;
+  // Keep idle below the whole-run timeout; floor at 90s for slow MCP tools.
+  return Math.max(90_000, Math.min(DEFAULT_STREAM_IDLE_MS, Math.floor(runTimeoutMs / 4)));
+}
+
+function friendlyStallMessage(raw: string): string {
+  const text = raw.trim() || 'Model request failed.';
+  if (/terminated|econnreset|econnrefused|broken pipe|network|ssl|tls|timed?\s*out|stream idle|remote end closed|temporarily unavailable/i.test(text)) {
+    return NETWORK_STALL_MESSAGE;
+  }
+  return text;
+}
+
+/**
+ * Stream a ChatRequest through the AgentScope Sidecar (WebSocket JSON-RPC).
+ * Phase 1+: real ReAct when model credentials are present; otherwise stub echo.
+ */
+export async function* streamAgentReplyViaAgentscope(input: ChatRequest & {
+  abortSignal?: AbortSignal;
+  runId?: string;
+  sessionSummary?: string;
+}): AsyncGenerator<AgentEvent> {
+  const hostTools = await prepareAgentscopeHostTools(input);
+  const streamIdleMs = resolveStreamIdleMs(input);
+  const params = {
+    ...chatRequestToRunParams(input),
+    ...hostTools.runtimePatch,
+    streamIdleMs,
+    ...(input.sessionSummary ? { sessionSummary: input.sessionSummary } : {}),
+  };
+  const runId = params.runId;
+  const queue: AgentEvent[] = [];
+  let done = false;
+  let wake: (() => void) | null = null;
+  let lastEventAt = Date.now();
+  let emittedEvents = 0;
+  const bump = () => { wake?.(); wake = null; };
+  try {
+    for (let attempt = 0; attempt <= MAX_SIDECAR_START_RETRIES; attempt += 1) {
+      const lease = await acquireSharedAgentscopeRunSlot({
+        runId,
+        signal: input.abortSignal,
+      });
+      const handle = lease.handle;
+      handle.client.setHostRequestHandler(runId, async (method, params) => {
+        if (method !== 'host.tool.invoke') throw new Error(`Unsupported host method: ${method}`);
+        const runId = String(params.runId || '');
+        const results = await hostTools.executeHostToolCalls(runId, asToolCalls(params.toolCalls));
+        return { executionResults: results };
+      });
+
+      const offEvent = handle.client.onEvent((payload) => {
+        if (payload.runId !== runId) return;
+        lastEventAt = Date.now();
+        queue.push(payload.event);
+        bump();
+      });
+      const offFinished = handle.client.onFinished((payload) => {
+        if (payload.runId !== runId) return;
+        lastEventAt = Date.now();
+        done = true;
+        bump();
+      });
+      const onAbort = () => {
+        void handle.client.abortRun(runId, 'user').catch(() => undefined);
+        bump();
+      };
+      input.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        await handle.client.startRun(params);
+        while (!done || queue.length) {
+          if (input.abortSignal?.aborted) {
+            yield {
+              type: 'run.cancelled',
+              runId,
+              reason: 'user',
+              message: '已由用户中止当前执行。',
+            };
+            return;
+          }
+          if (queue.length) {
+            const event = queue.shift()!;
+            emittedEvents += 1;
+            if (event.type === 'run.failed' && 'message' in event && typeof event.message === 'string') {
+              yield { ...event, message: friendlyStallMessage(event.message) };
+            } else {
+              yield event;
+            }
+            continue;
+          }
+          if (done) break;
+
+          const idleFor = Date.now() - lastEventAt;
+          const waitMs = Math.max(250, streamIdleMs - idleFor);
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+            setTimeout(resolve, waitMs);
+          });
+
+          if (queue.length || done || input.abortSignal?.aborted) continue;
+          if (Date.now() - lastEventAt < streamIdleMs) continue;
+
+          void handle.client.abortRun(runId, 'timeout').catch(() => undefined);
+          yield {
+            type: 'run.failed',
+            runId,
+            message: NETWORK_STALL_MESSAGE,
+          };
+          return;
+        }
+        return;
+      } catch (error) {
+        markSharedAgentscopeHandleUnhealthy(handle, error);
+        const canRetry = attempt < MAX_SIDECAR_START_RETRIES && emittedEvents === 0 && !done;
+        if (!canRetry) throw error;
+      } finally {
+        lease.release();
+        handle.client.setHostRequestHandler(runId, null);
+        offEvent();
+        offFinished();
+        input.abortSignal?.removeEventListener('abort', onAbort);
+      }
+    }
+  } finally {
+    await hostTools.close();
+  }
+}
+
+/** Resume a Sidecar run paused on approval. */
+export async function resumeAgentscopeRun(input: {
+  runId: string;
+  confirmed?: boolean;
+  grants?: Array<{ skillId: string; capability: string }>;
+}): Promise<void> {
+  const handle = await ensureSharedAgentscopeRuntime();
+  await handle.client.resumeRun(input);
+}

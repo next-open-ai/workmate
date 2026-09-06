@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+release/
+stage/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+.stage/
+runtimes/**/.venv/
+__pycache__/
+*.pyc

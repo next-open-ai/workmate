@@ -1,0 +1,315 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { getHealth } from '../services/api';
+import AppSidebar from './AppSidebar.vue';
+import ChatWorkspace from '../features/chat/ChatWorkspace.vue';
+import EmployeesPage from '../features/employees/EmployeesPage.vue';
+import SettingsPage from '../features/settings/SettingsPage.vue';
+import CapabilitiesPage from '../features/capabilities/CapabilitiesPage.vue';
+import KnowledgePage from '../features/knowledge/KnowledgePage.vue';
+import AssetsPage from '../features/assets/AssetsPage.vue';
+import AutomationsPage from '../features/automations/AutomationsPage.vue';
+import ProjectsPage from '../features/projects/ProjectsPage.vue';
+import RemoteOfficePage from '../features/remote/RemoteOfficePage.vue';
+import EnvironmentPage from '../features/environment/EnvironmentPage.vue';
+import { runEnvironmentCheck } from '../services/environment';
+import AppToastHost from '../features/common/AppToastHost.vue';
+import EnvironmentCheckDialog from '../features/common/EnvironmentCheckDialog.vue';
+import LoginPage from '../features/auth/LoginPage.vue';
+import { useI18n } from './i18n';
+import { useAuth } from './auth';
+import { useWorkspace } from './workspace';
+import { useModelConfig } from './model-config';
+import { useTheme } from './theme';
+import { readStored, writeStored } from './storage';
+import { useCapabilities } from './capabilities';
+import { useAutomations, type Automation } from './automations';
+import { useEmployeeRuntimePrefs } from './employee-prefs';
+import { useSearchConfig } from './search-config';
+import { useMcpConfig } from './mcp-config';
+import { useNotify } from './notify';
+import { isDesktopShell, isViewAvailable } from './platform';
+
+const { t, loadLocale } = useI18n();
+const {
+  user,
+  ready: authReady,
+  needsSetup,
+  bootstrapOrgId,
+  users: localUsers,
+  isAdmin,
+  load: loadAuth,
+  login,
+  setupFirstAdmin,
+  logout,
+  createUser,
+  updateUser,
+  deleteUser,
+} = useAuth();
+const { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load: loadWorkspace, setView, startChat, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride } = useWorkspace();
+const serviceReady = ref(false);
+const sidebarCollapsed = ref(false);
+const authBusy = ref(false);
+const { loadTheme } = useTheme();
+const { activeConfig: modelConfig, availableChatModels, configured, load: loadModelConfig, selectChatEndpoint, chatEndpointToken, modelForProvider, modelById } = useModelConfig();
+const { load: loadCapabilities } = useCapabilities();
+const { load: loadAutomations, startScheduler } = useAutomations();
+const { load: loadEmployeePrefs } = useEmployeeRuntimePrefs();
+const { load: loadSearchConfig } = useSearchConfig();
+const { load: loadMcpConfig, probeStartupMcps } = useMcpConfig();
+const notify = useNotify();
+const showEnvCheckDialog = ref(false);
+const activeChatEmployee = computed(() =>
+  (activeConversation.value && employees.value.find((item) => item.id === activeConversation.value?.employeeId))
+  || currentEmployee.value,
+);
+let stopScheduler: (() => void) | undefined;
+let initialized = false;
+
+watch(() => user.value?.id ?? null, async (next, prev) => {
+  if (!next && prev) {
+    stopScheduler?.();
+    stopScheduler = undefined;
+    initialized = false;
+    return;
+  }
+  if (next && next !== prev) {
+    stopScheduler?.();
+    stopScheduler = undefined;
+    initialized = false;
+    await initializeWorkspace();
+  }
+});
+
+async function initializeWorkspace() {
+  if (initialized || !user.value) return;
+  initialized = true;
+  await Promise.all([
+    loadModelConfig(),
+    loadWorkspace(),
+    loadTheme(),
+    loadLocale(),
+    loadCapabilities(),
+    loadAutomations(),
+    loadEmployeePrefs(),
+    loadSearchConfig(),
+    loadMcpConfig(),
+  ]);
+  stopScheduler = startScheduler(runScheduledAutomation);
+  sidebarCollapsed.value = (await readStored('ui.sidebar-collapsed')) === 'true';
+  if (!isViewAvailable(view.value)) setView('chat');
+  try {
+    await getHealth();
+    serviceReady.value = true;
+    void probeStartupMcps()
+      .then((summary) => {
+        if (summary.total > 0) {
+          notify.info(
+            'capabilities.mcpStartupProbeTitle',
+            t('capabilities.mcpStartupProbe', {
+              total: summary.total,
+              passed: summary.passed,
+              failed: summary.failed,
+            }),
+          );
+        }
+      })
+      .catch(() => undefined);
+  } catch {
+    serviceReady.value = false;
+  }
+  void setupEnvironmentCheck();
+}
+const runScheduledAutomation = async (automation: Automation) => {
+  const model = (automation.modelId ? modelById(automation.modelId) : undefined) ?? modelForProvider(automation.provider);
+  if (!model) {
+    const message = notify.errorMessage('model missing');
+    notify.error(new Error(message));
+    throw new Error(message);
+  }
+  return runAutomation(automation, model);
+};
+async function openProjectFromAssets(projectId: string) {
+  await writeStored('projects.focus-id', projectId);
+  setView('projects');
+}
+onMounted(async () => {
+  await Promise.all([loadTheme(), loadLocale()]);
+  try {
+    await getHealth();
+    serviceReady.value = true;
+  } catch {
+    serviceReady.value = false;
+  }
+  await loadAuth();
+  await initializeWorkspace();
+});
+/** 打开带实时进度的环境检查弹窗并执行。keepOpenOnClean=true 时即使全部通过也保留结果。 */
+async function runCheckInDialog(keepOpenOnClean: boolean) {
+  showEnvCheckDialog.value = true;
+  const report = await runEnvironmentCheck();
+  if (!keepOpenOnClean && report && report.summary.error === 0 && report.summary.warn === 0) {
+    setTimeout(() => { showEnvCheckDialog.value = false; }, 900);
+  }
+  return report;
+}
+/** 启动时静默体检：全程不弹窗；仅当发现 error/warn 时再打开结果弹窗。 */
+async function runStartupEnvironmentCheck() {
+  const report = await runEnvironmentCheck();
+  if (!report) return;
+  if (report.summary.error > 0 || report.summary.warn > 0) {
+    showEnvCheckDialog.value = true;
+  }
+}
+async function setupEnvironmentCheck() {
+  try {
+    // 安装后首次启动无论如何都执行一次环境检查；之后遵循“每次启动检查”开关。
+    const firstRun = !(await readStored('env.first-run-done'));
+    if (firstRun) await writeStored('env.first-run-done', '1');
+    // 缺省为“每次启动检查”：从未设置过时显式落为 '1'，不覆盖用户已关闭('0')的选择。
+    const stored = await readStored('env.check-on-startup');
+    if (stored == null) await writeStored('env.check-on-startup', '1');
+    const startupEnabled = stored !== '0';
+    if (!firstRun && !startupEnabled) return;
+    void runStartupEnvironmentCheck();
+  } catch { /* 环境检查失败不应阻塞启动 */ }
+}
+function openEnvDetails() {
+  showEnvCheckDialog.value = false;
+  setView('env');
+}
+onUnmounted(() => stopScheduler?.());
+function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value; void writeStored('ui.sidebar-collapsed', String(sidebarCollapsed.value)); }
+async function handleLogin(payload: { username: string; password: string }) {
+  authBusy.value = true;
+  try {
+    await login(payload);
+    await initializeWorkspace();
+    notify.success('notify.saved', '登录成功');
+  } catch (cause) {
+    notify.error(cause, '登录失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+async function handleBootstrap(payload: { orgId: string; username: string; displayName: string; password: string }) {
+  authBusy.value = true;
+  try {
+    await setupFirstAdmin(payload);
+    await initializeWorkspace();
+    notify.success('notify.saved', '初始化完成');
+  } catch (cause) {
+    notify.error(cause, '初始化失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+async function handleCreateLocalUser(payload: { username: string; displayName: string; password: string; role: 'admin' | 'member' }) {
+  authBusy.value = true;
+  try {
+    await createUser(payload);
+    notify.success('notify.saved', '已新增本地用户');
+  } catch (cause) {
+    notify.error(cause, '新增用户失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+async function handleUpdateLocalUser(payload: { userId: string; displayName?: string; password?: string; role?: 'admin' | 'member'; disabled?: boolean }) {
+  authBusy.value = true;
+  try {
+    await updateUser(payload.userId, payload);
+    notify.success('notify.saved', '用户已更新');
+  } catch (cause) {
+    notify.error(cause, '更新用户失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+async function handleDeleteLocalUser(userId: string) {
+  authBusy.value = true;
+  try {
+    await deleteUser(userId);
+    notify.success('notify.saved', '用户已删除');
+  } catch (cause) {
+    notify.error(cause, '删除用户失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+async function handleLogout() {
+  authBusy.value = true;
+  try {
+    stopScheduler?.();
+    stopScheduler = undefined;
+    initialized = false;
+    await logout();
+    notify.success('notify.saved', '已退出登录');
+  } catch (cause) {
+    notify.error(cause, '退出登录失败');
+  } finally {
+    authBusy.value = false;
+  }
+}
+</script>
+
+<template>
+  <LoginPage
+    v-if="authReady && !user"
+    :needs-setup="needsSetup"
+    :org-id="bootstrapOrgId"
+    :busy="authBusy"
+    @login="handleLogin"
+    @bootstrap="handleBootstrap"
+  />
+  <div v-else-if="!authReady" class="grid h-screen place-items-center bg-[var(--background)] text-sm text-[var(--muted)]">正在恢复登录状态…</div>
+  <div v-else class="flex h-screen min-h-[600px] overflow-hidden bg-[var(--background)] text-[var(--text)]">
+    <AppSidebar :collapsed="sidebarCollapsed" :view="view" :conversations="conversations" :active-conversation-id="activeConversation?.id ?? null" :service-ready="serviceReady" :current-user="user" @toggle="toggleSidebar" @navigate="setView" @new-chat="startChat()" @select-conversation="selectConversation" @delete-conversation="deleteConversation" @logout="handleLogout" />
+    <main :class="['relative min-w-0 flex-1 bg-[var(--background)]', view === 'chat' || view === 'capabilities' || view === 'knowledge' || view === 'assets' || view === 'automations' || view === 'projects' ? 'overflow-hidden' : 'overflow-auto']">
+      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-settings="setView('settings')" />
+      <EmployeesPage
+        v-else-if="view === 'employees'"
+        :employees="employees"
+        :selected-employee-id="currentEmployeeId"
+        :create-employee="createEmployee"
+        :update-employee="updateEmployee"
+        :remove-employee="removeEmployee"
+        :reset-employee="resetEmployee"
+        :has-employee-override="hasEmployeeOverride"
+        @start-chat="startChat"
+      />
+      <CapabilitiesPage v-else-if="view === 'capabilities'" />
+      <KnowledgePage v-else-if="view === 'knowledge'" @open-settings="setView('settings')" />
+      <AssetsPage v-else-if="view === 'assets'" :conversations="conversations" @open-conversation="(id) => { selectConversation(id); setView('chat'); }" @open-project="openProjectFromAssets" />
+      <AutomationsPage
+        v-else-if="view === 'automations'"
+        :employees="employees"
+        :models="availableChatModels"
+        :conversations="conversations"
+        :run-automation="runScheduledAutomation"
+        :open-conversation="(id) => { selectConversation(id); setView('chat'); }"
+      />
+      <ProjectsPage v-else-if="view === 'projects'" :employees="employees" :models="availableChatModels" :generate-draft="generateProjectDraft" :run-task="runProjectTask" />
+      <RemoteOfficePage v-else-if="view === 'remote'" />
+      <EnvironmentPage v-else-if="view === 'env'" />
+      <SettingsPage
+        v-else
+        :employees="employees"
+        :default-employee-id="currentEmployeeId"
+        :current-user="user"
+        :local-users="localUsers"
+        :is-admin="isAdmin"
+        :auth-busy="authBusy"
+        @set-default-employee="setDefaultEmployee"
+        @open-environment="setView('env')"
+        @open-check="runCheckInDialog(true)"
+        @create-local-user="handleCreateLocalUser"
+        @update-local-user="handleUpdateLocalUser"
+        @delete-local-user="handleDeleteLocalUser"
+      />
+    </main>
+    <AppToastHost />
+    <EnvironmentCheckDialog v-if="showEnvCheckDialog" @close="showEnvCheckDialog = false" @go="openEnvDetails" />
+    <p class="sr-only" role="status">{{ serviceReady ? t('common.statusReady') : t('common.statusOffline') }}</p>
+  </div>
+</template>

@@ -1,0 +1,32 @@
+{
+  "name": "@workmate/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@workmate/contracts": "workspace:*",
+    "@workmate/tools": "workspace:*",
+    "@lancedb/lancedb": "0.22.3",
+    "@mariozechner/pi-agent-core": "^0.51.2",
+    "@mariozechner/pi-ai": "^0.51.2",
+    "@mariozechner/pi-coding-agent": "^0.51.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@sinclair/typebox": "^0.34.41",
+    "apache-arrow": "18.1.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
+  }
+}

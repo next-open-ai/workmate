@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Enable Corepack (uses packageManager-pinned pnpm)
+        run: corepack enable
+      - name: Verify pnpm version
+        run: pnpm --version
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - name: AgentScope smoke
+        run: pnpm agentscope:smoke
+        env:
+          WORKMATE_AGENTSCOPE_PYTHON: python
+      - name: Concurrency regression
+        run: pnpm concurrency:regression
+        env:
+          WORKMATE_AGENTSCOPE_PYTHON: python3
+      - run: pnpm size:check
+
+  desktop-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: macos-arm64
+            expected_extension: dmg
+            max_package_mb: 200
+          - os: windows-latest
+            artifact: windows-x64
+            expected_extension: exe
+            max_package_mb: 220
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Enable Corepack (uses packageManager-pinned pnpm)
+        run: corepack enable
+      - name: Verify pnpm version
+        run: pnpm --version
+      - run: pnpm install --frozen-lockfile
+      - name: AgentScope smoke
+        run: pnpm agentscope:smoke
+        env:
+          WORKMATE_AGENTSCOPE_PYTHON: python
+      - name: Package ${{ matrix.artifact }}
+        run: pnpm package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Verify platform artifacts
+        shell: bash
+        run: |
+          find apps/desktop/release -type f -name "*.${{ matrix.expected_extension }}" -print -quit | grep -q .
+      - name: Report and enforce package-size budget
+        run: node scripts/report-package-size.mjs apps/desktop/release ${{ matrix.max_package_mb }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-package-${{ matrix.artifact }}
+          path: apps/desktop/release/**
+          if-no-files-found: warn

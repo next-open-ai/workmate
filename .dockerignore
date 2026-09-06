@@ -1,0 +1,13 @@
+.git
+.cursor
+node_modules
+apps/*/node_modules
+packages/*/node_modules
+**/.DS_Store
+**/.venv
+**/__pycache__
+**/*.pyc
+release
+dist
+stage
+workmate-*.tgz

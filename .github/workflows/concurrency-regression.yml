@@ -1,0 +1,50 @@
+name: Concurrency Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      global:
+        description: Global concurrent run limit
+        required: false
+        default: '2'
+      perUser:
+        description: Per-user concurrent run limit
+        required: false
+        default: '1'
+      poolSize:
+        description: Sidecar pool size
+        required: false
+        default: '2'
+      sidecarMaxRuns:
+        description: Max concurrent runs per sidecar
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Verify pnpm version
+        run: pnpm --version
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run concurrency regression
+        run: pnpm concurrency:regression
+        env:
+          WORKMATE_AGENTSCOPE_PYTHON: python3
+          WORKMATE_MAX_CONCURRENT_RUNS_GLOBAL: ${{ inputs.global }}
+          WORKMATE_MAX_CONCURRENT_RUNS_PER_USER: ${{ inputs.perUser }}
+          WORKMATE_AGENTSCOPE_POOL_SIZE: ${{ inputs.poolSize }}
+          WORKMATE_AGENTSCOPE_SHARED_MAX_RUNS: ${{ inputs.sidecarMaxRuns }}
