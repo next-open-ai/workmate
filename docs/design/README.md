@@ -3,6 +3,41 @@
 > 与实现同源维护。**当前权威架构**见 [architecture.md](architecture.md)；
 > 通道网关各里程碑记录实现、验收与真机步骤。
 
+运行形态与当前退化说明见 [../runtime-modes.md](../runtime-modes.md)。
+
+## 安装与使用
+
+桌面安装包可从发布页下载安装。当前 macOS 安装包未签名，首次下载后如果系统阻止启动，可在终端执行：
+
+```bash
+xattr -cr "/Applications/Workmate.app"
+```
+
+如果你尚未把应用拖入 `Applications`，也可以对下载目录中的 `.app` 执行同样命令，然后再手动打开。
+
+如需通过 npm 安装并使用 CLI / Web Launcher：
+
+```bash
+npm install -g @next-open-ai/workmate
+workmate doctor
+workmate init
+workmate start
+```
+
+本地源码方式：
+
+```bash
+pnpm install
+pnpm dev
+```
+
+常见使用入口：
+
+1. 桌面版：安装后直接启动应用，在界面内完成模型、员工、知识库、自动化与通道配置。
+2. npm / CLI：适合本地拉起 Web Launcher，常用入口为 `workmate doctor`、`workmate init`、`workmate start`。
+3. 源码开发：在仓库根目录执行 `pnpm dev`，用于联调 desktop + api + renderer。
+4. Runtime 模式差异：能力矩阵与当前限制统一见 `../runtime-modes.md`。
+
 ## 文档列表
 
 | 文档 | 内容 | 状态 |
