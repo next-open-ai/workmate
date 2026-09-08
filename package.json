@@ -24,7 +24,7 @@
     "runtimes/agentscope-runtime/requirements.txt",
     "runtimes/agentscope-runtime/pyproject.toml",
     "README.md",
-    "README.zh-CN.md",
+    "README-EN.md",
     "docs/runtime-modes.md",
     "docs/release-checklist.md",
     "docs/dual-runtime-release-notes.md",

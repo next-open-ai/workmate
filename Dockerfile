@@ -13,7 +13,7 @@ ENV NODE_ENV=production \
 WORKDIR /opt/workmate
 
 COPY package.docker.json ./package.json
-COPY README.md README.zh-CN.md ./
+COPY README.md README-EN.md ./
 COPY bin ./bin
 COPY scripts/lib ./scripts/lib
 COPY apps/api/dist ./apps/api/dist

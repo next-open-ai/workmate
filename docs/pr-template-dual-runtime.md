@@ -115,7 +115,7 @@
 更新：
 
 - `README.md`
-- `README.zh-CN.md`
+- `README-EN.md`
 - `docs/agentscope-migration.md`
 
 ### 验证
