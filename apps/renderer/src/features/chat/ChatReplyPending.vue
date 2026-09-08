@@ -19,6 +19,12 @@ function formatElapsed(ms: number) {
 
 const elapsedMs = computed(() => Math.max(0, now.value - origin.value));
 const elapsedLabel = computed(() => formatElapsed(elapsedMs.value));
+const phase = computed(() => {
+  const seconds = elapsedMs.value / 1000;
+  if (seconds < 2) return '正在准备智能体资源';
+  if (seconds < 8) return '正在连接模型服务';
+  return '正在等待模型返回首字';
+});
 
 onMounted(() => {
   if (props.startedAt && props.startedAt > 0) origin.value = props.startedAt;
@@ -54,6 +60,7 @@ onBeforeUnmount(() => {
         <div class="mt-2 flex items-center gap-1.5">
           <span v-for="i in 4" :key="i" class="thinking-bar" :style="{ animationDelay: `${(i - 1) * 0.14}s`, background: accent || 'var(--accent)' }" />
         </div>
+        <p class="mt-1 text-[11px] text-[var(--muted)]">{{ phase }}</p>
       </div>
     </div>
   </div>

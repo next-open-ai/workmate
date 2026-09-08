@@ -550,7 +550,15 @@ export function createSkillExecutionTools(input: {
         const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
         const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
         const startedAtMs = Date.now();
-        const result = await runProcess(command, [script, ...(args ?? [])], workspaceRoot);
+        // Dependencies installed by install_python_dependency are deliberately
+        // isolated under this run workspace.  Skill scripts must receive the
+        // same PYTHONPATH as workspace scripts; otherwise a successful install
+        // is invisible to the bundled renderer and agents fall back to copying
+        // the renderer into the workspace.
+        const dependencyRoot = path.join(workspaceRoot, '.python-packages');
+        const result = await runProcess(command, [script, ...(args ?? [])], workspaceRoot, {
+          env: { ...process.env, PYTHONPATH: dependencyRoot },
+        });
         const declared = result.stdout
           .split(/\r?\n/)
           .map((line) => line.trim())

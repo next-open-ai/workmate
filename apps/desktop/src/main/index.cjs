@@ -41,6 +41,19 @@ const databaseFile = () => path.join(storageRoot(), 'workmate.sqlite');
 /** @type {Map<string, string>} */
 const previewRoots = new Map();
 
+// A second packaged launch used to start another API on 4328, fail with
+// EADDRINUSE, and leave a visually live but non-functional window.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
 async function initializeDatabase() {
   mkdirSync(storageRoot(), { recursive: true, mode: 0o700 });
   const sqlJsRoot = app.isPackaged ? path.join(app.getAppPath(), 'stage', 'sqljs') : path.dirname(require.resolve('sql.js/dist/sql-wasm.js'));
