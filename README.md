@@ -62,6 +62,31 @@ AgentScope 迁移说明见 `docs/agentscope-migration.md`；协议 ABI 见 `docs
 
 当前完整架构与模块职责见 [docs/design/architecture.md](docs/design/architecture.md)。
 
+## 安装与使用
+
+桌面安装包可从发布页下载安装。当前 macOS 安装包未签名，首次下载后如果系统阻止启动，可在终端执行：
+
+```bash
+xattr -cr "/Applications/Workmate.app"
+```
+
+如果你尚未把应用拖入 `Applications`，也可以对下载目录中的 `.app` 执行同样命令，然后再手动打开。
+
+如需通过 npm 安装并使用 CLI / Web Launcher：
+
+```bash
+npm install -g @next-open-ai/workmate
+workmate doctor
+workmate init
+workmate start
+```
+
+常见使用入口：
+
+1. 桌面版：安装后直接启动应用，在界面内完成模型、员工、知识库、自动化与通道配置。
+2. npm / CLI：适合本地拉起 Web Launcher，常用入口为 `workmate doctor`、`workmate init`、`workmate start`。
+3. 源码开发：在仓库根目录执行 `pnpm install && pnpm dev`，用于联调 desktop + api + renderer。
+
 ## 快速开始
 
 要求：Node.js ≥ 22、pnpm ≥ 10（`packageManager` 已固定）。  
