@@ -6,6 +6,7 @@ import { useI18n } from './i18n';
 import { useTheme, themeIconNames } from './theme';
 import { isViewAvailable } from './platform';
 import SidebarIcon from './SidebarIcon.vue';
+import BrandLogo from './BrandLogo.vue';
 
 const props = defineProps<{ collapsed: boolean; view: View; conversations: Conversation[]; activeConversationId: string | null; serviceReady: boolean; currentUser?: AuthUser | null }>();
 const emit = defineEmits<{ toggle: []; navigate: [view: View]; newChat: []; selectConversation: [id: string]; deleteConversation: [id: string]; logout: [] }>();
@@ -73,7 +74,7 @@ const currentUserInitial = computed(() => {
   <aside :class="['flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--sidebar)] transition-[width] duration-200', collapsed ? 'w-[72px] px-2 py-3' : 'w-[248px] p-3']">
     <div :class="['mb-5 flex items-center', collapsed ? 'justify-center' : 'justify-between px-1']">
       <div class="flex items-center gap-2.5">
-        <span class="grid h-8 w-8 place-items-center rounded-[10px] bg-[var(--accent)] text-sm font-extrabold text-white">O</span>
+        <BrandLogo />
         <span v-if="!collapsed" class="text-sm font-extrabold tracking-[.06em]">Workmate</span>
       </div>
       <button v-if="!collapsed" class="grid h-8 w-8 place-items-center rounded-[10px] text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]" type="button" title="收起侧栏" @click="emit('toggle')">

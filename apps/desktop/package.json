@@ -21,8 +21,10 @@
     "appId": "com.workmate.desktop",
     "productName": "Workmate",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
+    "icon": "build/icon.png",
     "files": [
       "src/main/**",
       "src/preload/**",
@@ -41,17 +43,20 @@
     ],
     "asar": true,
     "mac": {
+      "icon": "build/icon.icns",
       "target": [
         "dmg"
       ],
       "category": "public.app-category.productivity"
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis"
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         "AppImage"
       ],

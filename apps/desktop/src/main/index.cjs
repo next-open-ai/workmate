@@ -964,13 +964,28 @@ async function migrateDomainKvToApi() {
   return migrated;
 }
 
+/** Pending secret-push timers; cleared when the API child exits. */
+const apiSecretPushTimers = [];
+
+function clearApiSecretPushTimers() {
+  while (apiSecretPushTimers.length) {
+    clearTimeout(apiSecretPushTimers.pop());
+  }
+}
+
 function pushSecretsToApi() {
-  if (!apiProcess || apiProcess.killed) return;
+  // `killed` stays false when the child exits on its own; `connected` is the
+  // reliable gate. Prefer send(callback) so a closed channel never becomes an
+  // uncaught Exception in packaged Electron builds.
+  if (!apiProcess || apiProcess.killed || apiProcess.connected !== true) return;
   try {
-    apiProcess.send?.({
-      type: 'workmate:secrets',
-      payload: { model: readModelConfig(), search: readSearchConfig() },
-    });
+    apiProcess.send(
+      {
+        type: 'workmate:secrets',
+        payload: { model: readModelConfig(), search: readSearchConfig() },
+      },
+      () => { /* ignore mid-exit races */ },
+    );
   } catch (_) {
     /* child may not be ready yet */
   }
@@ -1047,9 +1062,17 @@ function startApi() {
     if (payload.type !== 'workmate:secrets:request') return;
     pushSecretsToApi();
   });
+  apiProcess.on('error', (error) => {
+    console.warn('[api] process error:', error instanceof Error ? error.message : String(error));
+  });
+  apiProcess.on('exit', (code, signal) => {
+    clearApiSecretPushTimers();
+    console.warn(`[api] process exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+  });
   apiProcess.once('spawn', () => pushSecretsToApi());
-  setTimeout(() => pushSecretsToApi(), 300);
-  setTimeout(() => pushSecretsToApi(), 1500);
+  clearApiSecretPushTimers();
+  apiSecretPushTimers.push(setTimeout(() => pushSecretsToApi(), 300));
+  apiSecretPushTimers.push(setTimeout(() => pushSecretsToApi(), 1500));
 }
 
 function gatewayEntry() {
@@ -1145,6 +1168,7 @@ async function createWindow() {
     fullscreenable: true,
     fullscreen: false,
     show: false,
+    icon: path.join(__dirname, '../../build/icon.png'),
     webPreferences: { preload: path.join(__dirname, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   // After the user finishes dragging, only rescue a fully off-screen window.

@@ -550,11 +550,11 @@ onBeforeUnmount(() => {
               :class="
                 runtimePreview.engine === 'dsh'
                   ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                  : 'bg-[var(--surface)] text-[var(--foreground)]'
+                  : 'bg-[var(--surface)] text-[var(--text)]'
               "
               :title="t('chat.engineHelp')"
             >{{ t('chat.engine') }}：{{ runtimePreview.engineLabel }}<template v-if="runtimePreview.engineInherited"> · {{ t('chat.engineInheritShort') }}</template></span>
-            <span class="rounded-full bg-[var(--surface)] px-2.5 py-1 font-semibold text-[var(--foreground)]">权限：{{ tiers.find((item) => item.value === permissionTier)?.label ?? permissionTier }}</span>
+            <span class="rounded-full bg-[var(--surface)] px-2.5 py-1 font-semibold text-[var(--text)]">权限：{{ tiers.find((item) => item.value === permissionTier)?.label ?? permissionTier }}</span>
             <span class="rounded-full bg-[var(--surface)] px-2.5 py-1">Skills：{{ runtimePreview.skillCount }}</span>
             <span class="rounded-full bg-[var(--surface)] px-2.5 py-1">MCP：{{ runtimePreview.mcpCount }}</span>
           </div>
@@ -579,17 +579,17 @@ onBeforeUnmount(() => {
               <span>{{ message.role === "user" ? t("chat.you") : t("chat.assistant") }}</span>
               <span
                 v-if="message.role === 'assistant' && message.engine"
-                class="rounded-full bg-[var(--surface)] px-1.5 py-0.5 font-medium text-[10px] text-[var(--foreground)]"
+                class="rounded-full bg-[var(--surface)] px-1.5 py-0.5 font-medium text-[10px] text-[var(--text)]"
                 :title="t('chat.engineTurnHelp')"
               >{{ t('chat.engine') }} · {{ t(`employee.engine.${message.engine}`) }}</span>
             </small>
             <p
               v-if="message.content"
               :class="[
-                'mt-1 max-w-none whitespace-pre-wrap border px-4 py-3.5 leading-7 shadow-[0_10px_30px_rgba(15,23,42,0.04)]',
+                'mt-1 max-w-none whitespace-pre-wrap border px-4 py-3.5 leading-7 text-[var(--text)] shadow-[0_10px_30px_rgba(15,23,42,0.04)]',
                 message.role === 'user'
-                  ? 'rounded-[18px_6px_18px_18px] border-[var(--accent)]/10 bg-[linear-gradient(180deg,var(--accent-soft),rgba(255,255,255,0.92))] text-[var(--foreground)]'
-                  : 'rounded-[8px_18px_18px_18px] border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))] text-[var(--foreground)] dark:bg-[linear-gradient(180deg,rgba(17,24,39,0.96),rgba(15,23,42,0.92))]',
+                  ? 'rounded-[18px_6px_18px_18px] border-[var(--accent)]/15 bg-[var(--accent-soft)]'
+                  : 'rounded-[8px_18px_18px_18px] border-[var(--border)] bg-[var(--surface)]',
               ]"
             >
               {{ message.content }}
@@ -597,6 +597,7 @@ onBeforeUnmount(() => {
             <ChatReplyPending
               v-else-if="isAwaitingReply(message)"
               :accent="employee.color"
+              :started-at="message.startedAt"
             />
             <details
               v-if="

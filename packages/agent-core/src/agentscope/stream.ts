@@ -8,7 +8,7 @@ export const DEFAULT_STREAM_IDLE_MS = 150_000;
 const MAX_SIDECAR_START_RETRIES = 1;
 
 const NETWORK_STALL_MESSAGE =
-  '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。';
+  '网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。';
 
 function asToolCalls(value: unknown): HostToolCall[] {
   if (!Array.isArray(value)) return [];
@@ -38,7 +38,7 @@ function resolveStreamIdleMs(input: ChatRequest): number {
 
 function friendlyStallMessage(raw: string): string {
   const text = raw.trim() || 'Model request failed.';
-  if (/terminated|econnreset|econnrefused|broken pipe|network|ssl|tls|timed?\s*out|stream idle|remote end closed|temporarily unavailable/i.test(text)) {
+  if (/connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR/i.test(text)) {
     return NETWORK_STALL_MESSAGE;
   }
   return text;

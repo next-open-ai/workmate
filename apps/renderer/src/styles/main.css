@@ -13,6 +13,7 @@
   --surface: #ffffff;
   --surface-muted: #f1f3f8;
   --text: #171b27;
+  --foreground: var(--text);
   --muted: #72798a;
   --accent: #4566db;
   --accent-soft: #ebefff;

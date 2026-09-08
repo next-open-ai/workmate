@@ -40,7 +40,7 @@ T = TypeVar("T")
 # between model/tool stream events so the run can settle instead of hanging.
 DEFAULT_STREAM_IDLE_SECONDS = 120.0
 NETWORK_STALL_MESSAGE = (
-    "模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。"
+    "网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。"
 )
 
 
@@ -64,10 +64,14 @@ def _friendly_stream_error(exc: BaseException) -> str:
     if any(
         token in lowered
         for token in (
+            "connection error",
+            "failed to fetch",
+            "fetch failed",
             "terminated",
             "connection reset",
             "econnreset",
             "econnrefused",
+            "enotfound",
             "broken pipe",
             "network",
             "ssl",
@@ -76,6 +80,7 @@ def _friendly_stream_error(exc: BaseException) -> str:
             "timeout",
             "temporarily unavailable",
             "remote end closed",
+            "socket hang up",
         )
     ):
         return NETWORK_STALL_MESSAGE

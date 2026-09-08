@@ -15,7 +15,13 @@ import { employeeDisplayName } from "../../app/employees";
 import { isDesktopShell } from "../../app/platform.js";
 import { downloadAssetBestEffort } from "../../app/platform-actions.js";
 import { readStored, writeStored } from "../../app/storage.js";
+import { useTheme } from "../../app/theme.js";
 import { exportWorkspaceZip, importWorkspaceZip, listWorkspaceFiles, materializeWorkspaceAssets, readWorkspaceFile, syncWorkspaceRun, writeWorkspaceFile } from "../../services/api.js";
+
+const { resolvedTheme } = useTheme();
+function monacoTheme() {
+  return resolvedTheme.value === "light" ? "vs" : "vs-dark";
+}
 
 const props = defineProps<{
   project: Project;
@@ -429,8 +435,8 @@ async function selectFile(entry: FileEntry) {
   membersDockOpen.value = false;
   await nextTick();
   if (!editorHost.value) return;
-  if (!editor) editor = monaco.editor.create(editorHost.value, { value: file.content, language: language(entry.relative), theme: 'vs', automaticLayout: true, minimap: { enabled: false }, fontSize: 13, lineHeight: 21, wordWrap: 'on', scrollBeyondLastLine: false, padding: { top: 16 } });
-  else { monaco.editor.setModelLanguage(editor.getModel()!, language(entry.relative)); editor.setValue(file.content); }
+  if (!editor) editor = monaco.editor.create(editorHost.value, { value: file.content, language: language(entry.relative), theme: monacoTheme(), automaticLayout: true, minimap: { enabled: false }, fontSize: 13, lineHeight: 21, wordWrap: 'on', scrollBeyondLastLine: false, padding: { top: 16 } });
+  else { monaco.editor.setModelLanguage(editor.getModel()!, language(entry.relative)); editor.setValue(file.content); monaco.editor.setTheme(monacoTheme()); }
 }
 function closeEditor() {
   selectedFile.value = '';
@@ -614,6 +620,9 @@ watch(
   },
   { immediate: true },
 );
+watch(resolvedTheme, () => {
+  if (editor) monaco.editor.setTheme(monacoTheme());
+});
 onBeforeUnmount(() => {
   if (fileRefreshTimer) clearInterval(fileRefreshTimer);
   clearTimeout(pathCopiedTimer);
@@ -884,12 +893,12 @@ onBeforeUnmount(() => {
                 </div>
                 <p
                   :class="[
-                    'whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6',
+                    'whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 text-[var(--text)]',
                     message.role === 'user'
                       ? 'rounded-tr-md bg-[var(--accent-soft)]'
                       : message.role === 'system'
                         ? 'border border-[var(--border)] bg-[var(--surface-muted)] text-[var(--muted)]'
-                        : 'rounded-tl-md bg-[var(--surface)] shadow-sm',
+                        : 'rounded-tl-md border border-[var(--border)] bg-[var(--surface)] shadow-sm',
                   ]"
                 >{{ message.content || "正在生成项目任务结果…" }}</p>
                 <details

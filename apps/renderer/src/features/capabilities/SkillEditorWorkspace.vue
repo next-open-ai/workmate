@@ -1,16 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
 import type { SkillRecord } from '../../app/capabilities';
 import { listSkillFiles, readSkillFile, streamChat, writeSkillDraft, writeSkillFile } from '../../services/api';
 import { useModelConfig, toModelPayload } from '../../app/model-config';
+import { useTheme } from '../../app/theme.js';
 
 type FileEntry = { path: string; relative: string; type: 'directory' | 'file' };
 const props = defineProps<{ skill: SkillRecord; initialContent?: string; initialRequest?: string }>();
 const emit = defineEmits<{ close: []; saved: [skill: SkillRecord] }>();
 const { activeConfig, configured, load: loadModels } = useModelConfig();
+const { resolvedTheme } = useTheme();
+function monacoTheme() {
+  return resolvedTheme.value === 'light' ? 'vs' : 'vs-dark';
+}
 const editorHost = ref<HTMLElement>(); const diffHost = ref<HTMLElement>();
 const current = ref(''); const selectedFile = ref('SKILL.md'); const selectedPath = ref(''); const files = ref<FileEntry[]>([]);
 const prompt = ref(''); const messages = ref<Array<{ role: 'user' | 'assistant'; content: string }>>([]); const busy = ref(false); const error = ref(''); const saving = ref(false);
@@ -45,7 +50,7 @@ function fileDepth(entry: FileEntry) { return Math.max(0, entry.relative.split('
 function toggleDirectory(entry: FileEntry) { const next = new Set(collapsedDirectories.value); if (next.has(entry.relative)) next.delete(entry.relative); else next.add(entry.relative); collapsedDirectories.value = next; }
 function createEditor() {
   if (!editorHost.value) return;
-  editor = monaco.editor.create(editorHost.value, { value: current.value, language: language(selectedFile.value), theme: 'vs', automaticLayout: true, minimap: { enabled: false }, fontSize: 13, lineHeight: 21, wordWrap: 'on', padding: { top: 16 }, scrollBeyondLastLine: false });
+  editor = monaco.editor.create(editorHost.value, { value: current.value, language: language(selectedFile.value), theme: monacoTheme(), automaticLayout: true, minimap: { enabled: false }, fontSize: 13, lineHeight: 21, wordWrap: 'on', padding: { top: 16 }, scrollBeyondLastLine: false });
   editor.onDidChangeModelContent(() => { current.value = editor?.getValue() || ''; });
 }
 function setEditorContent(value: string, file = selectedFile.value) { current.value = value; selectedFile.value = file; if (editor) { monaco.editor.setModelLanguage(editor.getModel()!, language(file)); editor.setValue(value); } }
@@ -54,8 +59,11 @@ async function selectFile(entry: FileEntry) {
   if (entry.type === 'directory' || entry.relative === selectedFile.value || !entry.path) return;
   try { const result = await readSkillFile(entry.path); selectedPath.value = result.path; setEditorContent(result.content, entry.relative); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
 }
-async function openDiff() { await nextTick(); if (!diffHost.value) return; diff?.dispose(); diff = monaco.editor.createDiffEditor(diffHost.value, { theme: 'vs', automaticLayout: true, readOnly: true, minimap: { enabled: false }, renderSideBySide: true }); diff.setModel({ original: monaco.editor.createModel(current.value, language(selectedFile.value)), modified: monaco.editor.createModel(proposed.value, language(selectedFile.value)) }); }
+async function openDiff() { await nextTick(); if (!diffHost.value) return; diff?.dispose(); diff = monaco.editor.createDiffEditor(diffHost.value, { theme: monacoTheme(), automaticLayout: true, readOnly: true, minimap: { enabled: false }, renderSideBySide: true }); diff.setModel({ original: monaco.editor.createModel(current.value, language(selectedFile.value)), modified: monaco.editor.createModel(proposed.value, language(selectedFile.value)) }); }
 async function restoreEditor() { showDiff.value = false; await nextTick(); editor?.dispose(); editor = undefined; createEditor(); }
+watch(resolvedTheme, () => {
+  monaco.editor.setTheme(monacoTheme());
+});
 async function generateInitial() {
   if (!props.initialRequest) return;
   await loadModels(); if (!configured.value) { error.value = '请先在设置中配置可用的对话模型。'; return; }

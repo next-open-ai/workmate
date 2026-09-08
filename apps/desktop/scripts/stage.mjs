@@ -20,9 +20,15 @@ for (const source of sources) {
   cpSync(source.from, source.to, { recursive: true, dereference: true });
 }
 
+// pi-coding-agent resolves its package root by walking up from main.cjs and
+// reading package.json. Packaged API lives under Resources/api/, so the
+// manifest must sit next to the bundle or the child exits on startup.
+const apiPackageJson = path.join(appsRoot, 'api', 'package.json');
+cpSync(apiPackageJson, path.join(stageRoot, 'api', 'package.json'));
+
 // Electron Builder must never follow pnpm workspace links into the repository
 // root. Stage the API's production dependency closure explicitly instead.
-const apiManifest = JSON.parse(readFileSync(path.join(appsRoot, 'api', 'package.json'), 'utf8'));
+const apiManifest = JSON.parse(readFileSync(apiPackageJson, 'utf8'));
 const stagedDeps = path.join(stageRoot, 'api', 'node_deps');
 const seen = new Set();
 

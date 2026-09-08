@@ -96,8 +96,8 @@ function friendlyModelError(raw: string) {
   if (/reasoning_content/i.test(raw)) {
     return 'DeepSeek 思考模式在工具多轮调用中要求回传 reasoning_content，当前链路已自动关闭 thinking。请重试本轮以生成最终结论。';
   }
-  if (/terminated|econnreset|econnrefused|broken pipe|network|ssl|tls|timed?\s*out|stream idle|remote end closed|temporarily unavailable/i.test(raw)) {
-    return '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。';
+  if (/connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR/i.test(raw)) {
+    return '网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。';
   }
   return raw;
 }

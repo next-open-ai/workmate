@@ -115,9 +115,27 @@ function appendAssistantNotice(message: Message, notice: string) {
   message.content = `${message.content.trim()}\n\n${normalized}`;
 }
 
+const NETWORK_ERROR_RE =
+  /connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR|模型流已中断|网络连接超时/i;
+
+const FRIENDLY_NETWORK_ERROR =
+  '网络连接超时或中断了，这次没能完成回答，也还没有生成最终文件。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。';
+
+const UNFINISHED_DELIVERABLE_NOTICE =
+  '本轮还没有生成最终文件。重新发送后通常可以继续完成。';
+
+function friendlyAssistantError(raw: string) {
+  const text = raw.trim();
+  if (!text) return '请求失败，请稍后重试。';
+  if (NETWORK_ERROR_RE.test(text)) return FRIENDLY_NETWORK_ERROR;
+  return text;
+}
+
 function appendUnfinishedDeliverableNotice(message: Message) {
   if ((message.assets?.length ?? 0) > 0) return;
-  appendAssistantNotice(message, '⚠ 本轮已结束，但尚未生成最终交付文件；如需继续完成，请重试。');
+  // Network-friendly copy already covers the missing deliverable.
+  if (message.content.includes(FRIENDLY_NETWORK_ERROR) || /网络连接超时或中断/.test(message.content)) return;
+  appendAssistantNotice(message, `⚠ ${UNFINISHED_DELIVERABLE_NOTICE}`);
 }
 
 const catalog = useEmployeeCatalog();
@@ -505,17 +523,12 @@ export function useWorkspace() {
       }
       if (!assistantMessage.content.trim()) {
         if (run?.error) {
-          const friendly = /terminated|econnreset|network|ssl|tls|stream idle|timeout/i.test(run.error)
-            ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
-            : run.error;
-          appendAssistantNotice(assistantMessage, `⚠ ${friendly}`);
+          appendAssistantNotice(assistantMessage, `⚠ ${friendlyAssistantError(run.error)}`);
           appendUnfinishedDeliverableNotice(assistantMessage);
           serverBump();
         }
       } else if (run && (run.status === 'failed' || run.status === 'cancelled') && run.error) {
-        const friendly = /terminated|econnreset|network|ssl|tls|stream idle|timeout/i.test(run.error)
-          ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
-          : run.error;
+        const friendly = friendlyAssistantError(run.error);
         if (!assistantMessage.content.includes(friendly)) {
           appendAssistantNotice(assistantMessage, `⚠ ${friendly}`);
           appendUnfinishedDeliverableNotice(assistantMessage);
@@ -713,7 +726,7 @@ export function useWorkspace() {
           lastProgressAt = Date.now();
         } else if (run?.status === 'running' && Date.now() - lastProgressAt >= STREAM_IDLE_MS) {
           await orch.cancelChatRun(sessionId).catch(() => undefined);
-          abort.abort(new Error('模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'));
+          abort.abort(new Error(FRIENDLY_NETWORK_ERROR));
           return;
         }
       } else if (assistantMessage.content.trim()) {
@@ -927,7 +940,7 @@ export function useWorkspace() {
           appendUnfinishedDeliverableNotice(assistantMessage);
           markActivitiesInterrupted(assistantMessage.activities);
         } else {
-          appendAssistantNotice(assistantMessage, cause instanceof Error ? `⚠ ${cause.message}` : '⚠ Model request failed.');
+          appendAssistantNotice(assistantMessage, cause instanceof Error ? `⚠ ${friendlyAssistantError(cause.message)}` : '⚠ 请求失败，请稍后重试。');
           appendUnfinishedDeliverableNotice(assistantMessage);
         }
         void persist();
@@ -1101,7 +1114,7 @@ export function useWorkspace() {
         appendAssistantNotice(assistantMessage, `⏹ ${message}`);
         appendUnfinishedDeliverableNotice(assistantMessage);
       } else {
-        appendAssistantNotice(assistantMessage, error instanceof Error ? `⚠ ${error.message}` : '⚠ Model request failed.');
+        appendAssistantNotice(assistantMessage, error instanceof Error ? `⚠ ${friendlyAssistantError(error.message)}` : '⚠ 请求失败，请稍后重试。');
         appendUnfinishedDeliverableNotice(assistantMessage);
       }
       conversations.value = [...conversations.value];

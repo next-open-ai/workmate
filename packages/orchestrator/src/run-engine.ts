@@ -320,8 +320,8 @@ export class RunEngine {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model request failed.';
-      const friendly = /terminated|econnreset|econnrefused|broken pipe|network|ssl|tls|timed?\s*out|stream idle|remote end closed|temporarily unavailable/i.test(message)
-        ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
+      const friendly = /connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR/i.test(message)
+        ? '网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。'
         : message;
       if (!abortController.signal.aborted) {
         run.status = 'failed';
