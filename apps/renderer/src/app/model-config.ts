@@ -24,6 +24,12 @@ export interface ConfiguredModel {
   capability: ModelCapability;
   modelId: string;
   label?: string;
+  meta?: {
+    dimension?: number;
+    normalize?: boolean;
+    maxBatch?: number;
+    maxInputChars?: number;
+  };
   /**
    * Chat models that support provider-native web search (e.g. Bailian/Qwen `enable_search`).
    * Only meaningful for qwen / openai-compatible connections.
@@ -66,6 +72,19 @@ export interface ModelSettings {
   activeEmbeddingModelId: string | null;
   /** Per digital-employee default when acting as sub-agent / collaborator. */
   employeeDefaultModelIds: Record<string, string>;
+}
+
+export interface LocalEmbeddingProviderDraft {
+  suggestedProviderName: string;
+  providerType: 'openai-compatible';
+  baseUrl: string;
+  embeddingModel: string;
+  meta?: {
+    dimension?: number;
+    normalize?: boolean;
+    maxBatch?: number;
+    maxInputChars?: number;
+  };
 }
 
 export const providerSuggestedChatModels: Partial<Record<ProviderId, string[]>> = {
@@ -140,7 +159,7 @@ export function providerCanBuiltinWebSearch(provider: ProviderId) {
 }
 
 export function providerNeedsApiKey(provider: ProviderId) {
-  return provider !== 'ollama';
+  return provider !== 'ollama' && provider !== 'openai-compatible';
 }
 
 export function providerSupportsOpenAiModelList(provider: ProviderId) {
@@ -324,6 +343,16 @@ function normalize(value: unknown): ModelSettings {
           capability: (modelCapabilities.includes(item.capability) ? item.capability : 'chat') as ModelCapability,
           modelId: String(item.modelId || '').trim(),
           label: item.label ? String(item.label) : undefined,
+          meta: item.meta && typeof item.meta === 'object'
+            ? {
+                dimension: Number((item.meta as { dimension?: unknown }).dimension) || undefined,
+                normalize: typeof (item.meta as { normalize?: unknown }).normalize === 'boolean'
+                  ? Boolean((item.meta as { normalize?: unknown }).normalize)
+                  : undefined,
+                maxBatch: Number((item.meta as { maxBatch?: unknown }).maxBatch) || undefined,
+                maxInputChars: Number((item.meta as { maxInputChars?: unknown }).maxInputChars) || undefined,
+              }
+            : undefined,
           supportsBuiltinWebSearch: supportsBuiltinWebSearch || undefined,
         };
       })
@@ -365,11 +394,13 @@ export function apiKeyForRequest(config: ProviderConfig) {
 
 /** Resolve the system-wide embedding / vector model from Settings. */
 export function resolveActiveEmbeddingConfig(settingsValue = settings.value): {
+  label?: string;
   modelId: string;
   provider: ProviderId;
   baseUrl: string;
   apiKey: string;
   configuredModelId: string;
+  meta?: ConfiguredModel['meta'];
 } | null {
   const id = settingsValue.activeEmbeddingModelId;
   if (!id) return null;
@@ -378,11 +409,13 @@ export function resolveActiveEmbeddingConfig(settingsValue = settings.value): {
   const resolved = resolveConfiguredModel(model, settingsValue.providerInstances);
   if (!resolved?.embeddingModel.trim()) return null;
   return {
+    label: model.label,
     modelId: resolved.embeddingModel,
     provider: resolved.provider,
     baseUrl: resolved.baseUrl,
     apiKey: apiKeyForRequest(resolved),
     configuredModelId: model.id,
+    meta: model.meta,
   };
 }
 
@@ -423,6 +456,63 @@ export function providerConfigured(config: ProviderConfig) {
   if (!config.chatModel.trim()) return false;
   if (!providerNeedsApiKey(config.provider)) return true;
   return Boolean(config.apiKey.trim());
+}
+
+function localEmbeddingLabel(draft: LocalEmbeddingProviderDraft) {
+  return draft.suggestedProviderName.trim() || 'Local Embedding (System)';
+}
+
+export function upsertLocalEmbeddingRegistration(
+  value: ModelSettings,
+  draft: LocalEmbeddingProviderDraft,
+  options: { makeDefault?: boolean } = {},
+): ModelSettings {
+  const next = normalize(JSON.parse(JSON.stringify(value))) as ModelSettings;
+  const baseUrl = draft.baseUrl.trim();
+  const modelId = draft.embeddingModel.trim();
+  if (!baseUrl || !modelId) return next;
+
+  let provider = next.providerInstances.find((item) =>
+    item.type === 'openai-compatible' && item.baseUrl.trim() === baseUrl,
+  );
+  if (!provider) {
+    provider = {
+      id: newId(),
+      type: 'openai-compatible',
+      name: localEmbeddingLabel(draft),
+      baseUrl,
+      apiKey: '',
+      disableThinking: false,
+    };
+    next.providerInstances.push(provider);
+  } else {
+    provider.name = localEmbeddingLabel(draft);
+    provider.baseUrl = baseUrl;
+  }
+
+  let model = next.models.find((item) =>
+    item.providerInstanceId === provider!.id
+      && item.capability === 'embedding'
+      && item.modelId.trim() === modelId,
+  );
+  if (!model) {
+    model = {
+      id: newId(),
+      providerInstanceId: provider.id,
+      capability: 'embedding',
+      modelId,
+      label: localEmbeddingLabel(draft),
+    };
+    next.models.push(model);
+  }
+  model.meta = draft.meta ? { ...draft.meta } : undefined;
+  if (!model.label?.trim()) model.label = localEmbeddingLabel(draft);
+
+  if (options.makeDefault !== false) {
+    next.activeEmbeddingModelId = model.id;
+  }
+
+  return sanitizeModelSettings(next);
 }
 
 export function useModelConfig() {
@@ -500,6 +590,15 @@ export function useModelConfig() {
     await save(settings.value);
   };
 
+  const registerLocalEmbeddingProvider = async (
+    draft: LocalEmbeddingProviderDraft,
+    options?: { makeDefault?: boolean },
+  ) => {
+    const next = upsertLocalEmbeddingRegistration(settings.value, draft, options);
+    await save(next);
+    return next;
+  };
+
   return {
     settings,
     activeConfig,
@@ -515,6 +614,7 @@ export function useModelConfig() {
     modelById,
     modelForEmployee,
     setEmployeeDefaultModel,
+    registerLocalEmbeddingProvider,
     resolveConfiguredModel,
   };
 }

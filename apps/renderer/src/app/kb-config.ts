@@ -31,6 +31,19 @@ export interface KnowledgeBase {
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  embeddingMeta?: {
+    dimension?: number;
+    normalize?: boolean;
+    maxBatch?: number;
+    maxInputChars?: number;
+  };
+  indexState?: {
+    status: 'ready' | 'stale' | 'rebuilding';
+    signature?: string;
+    lastBuildAt?: number;
+    lastBuildModel?: string;
+    lastBuildError?: string;
+  };
   /** Local document count hint (updated on ingest). */
   documentCount?: number;
   updatedAt: number;
@@ -139,6 +152,35 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
     embeddingBaseUrl: raw.embeddingBaseUrl ? String(raw.embeddingBaseUrl).trim() : '',
     embeddingApiKey: raw.embeddingApiKey ? String(raw.embeddingApiKey) : '',
     embeddingModel: raw.embeddingModel ? String(raw.embeddingModel).trim() : '',
+    embeddingMeta: raw.embeddingMeta && typeof raw.embeddingMeta === 'object'
+      ? {
+          dimension: Number((raw.embeddingMeta as { dimension?: unknown }).dimension) || undefined,
+          normalize: typeof (raw.embeddingMeta as { normalize?: unknown }).normalize === 'boolean'
+            ? Boolean((raw.embeddingMeta as { normalize?: unknown }).normalize)
+            : undefined,
+          maxBatch: Number((raw.embeddingMeta as { maxBatch?: unknown }).maxBatch) || undefined,
+          maxInputChars: Number((raw.embeddingMeta as { maxInputChars?: unknown }).maxInputChars) || undefined,
+        }
+      : undefined,
+    indexState: raw.indexState && typeof raw.indexState === 'object'
+      ? {
+          status: (raw.indexState as { status?: unknown }).status === 'stale'
+            ? 'stale'
+            : (raw.indexState as { status?: unknown }).status === 'rebuilding'
+              ? 'rebuilding'
+              : 'ready',
+          signature: (raw.indexState as { signature?: unknown }).signature
+            ? String((raw.indexState as { signature?: unknown }).signature)
+            : undefined,
+          lastBuildAt: Number((raw.indexState as { lastBuildAt?: unknown }).lastBuildAt) || undefined,
+          lastBuildModel: (raw.indexState as { lastBuildModel?: unknown }).lastBuildModel
+            ? String((raw.indexState as { lastBuildModel?: unknown }).lastBuildModel)
+            : undefined,
+          lastBuildError: (raw.indexState as { lastBuildError?: unknown }).lastBuildError
+            ? String((raw.indexState as { lastBuildError?: unknown }).lastBuildError)
+            : undefined,
+        }
+      : undefined,
     documentCount: Number(raw.documentCount) || 0,
     updatedAt: Number(raw.updatedAt) || Date.now(),
   };
@@ -147,6 +189,24 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
 function normalizeAll(value: unknown): KnowledgeBase[] {
   if (!Array.isArray(value)) return [];
   return value.map(normalizeOne).filter((item): item is KnowledgeBase => Boolean(item));
+}
+
+function sameEmbeddingMeta(
+  left?: KnowledgeBase['embeddingMeta'],
+  right?: KnowledgeBase['embeddingMeta'],
+) {
+  return (left?.dimension || 0) === (right?.dimension || 0)
+    && Boolean(left?.normalize) === Boolean(right?.normalize)
+    && (left?.maxBatch || 0) === (right?.maxBatch || 0)
+    && (left?.maxInputChars || 0) === (right?.maxInputChars || 0);
+}
+
+function shouldMarkStale(previous: KnowledgeBase | undefined, next: KnowledgeBase) {
+  if (!previous || (previous.documentCount || 0) <= 0) return false;
+  return previous.embeddingModel !== next.embeddingModel
+    || previous.embeddingBaseUrl !== next.embeddingBaseUrl
+    || previous.embeddingApiKey !== next.embeddingApiKey
+    || !sameEmbeddingMeta(previous.embeddingMeta, next.embeddingMeta);
 }
 
 function isReady(item: KnowledgeBase) {
@@ -204,6 +264,8 @@ function toRuntime(item: KnowledgeBase) {
     embeddingBaseUrl: item.embeddingBaseUrl?.trim() || undefined,
     embeddingApiKey: item.embeddingApiKey?.trim() || undefined,
     embeddingModel: item.embeddingModel?.trim() || undefined,
+    embeddingMeta: item.embeddingMeta,
+    indexState: item.indexState,
   };
 }
 
@@ -337,9 +399,21 @@ export function useKnowledgeConfig() {
       embeddingBaseUrl: String(input.embeddingBaseUrl || '').trim(),
       embeddingApiKey: String(input.embeddingApiKey || ''),
       embeddingModel: String(input.embeddingModel || '').trim(),
+      embeddingMeta: input.embeddingMeta ? { ...input.embeddingMeta } : undefined,
       documentCount: Number(input.documentCount) || 0,
+      indexState: undefined,
       updatedAt: Date.now(),
     };
+    const existing = bases.value.find((item) => item.id === id);
+    next.indexState = shouldMarkStale(existing, next)
+      ? {
+          status: 'stale',
+          signature: existing?.indexState?.signature,
+          lastBuildAt: existing?.indexState?.lastBuildAt,
+          lastBuildModel: existing?.indexState?.lastBuildModel,
+          lastBuildError: existing?.indexState?.lastBuildError,
+        }
+      : existing?.indexState;
     const index = bases.value.findIndex((item) => item.id === id);
     if (index >= 0) bases.value[index] = next;
     else bases.value = [next, ...bases.value];
@@ -371,6 +445,15 @@ export function useKnowledgeConfig() {
     await persist();
   };
 
+  const setIndexState = async (id: string, indexState: KnowledgeBase['indexState'] | undefined) => {
+    const item = bases.value.find((entry) => entry.id === id);
+    if (!item) return;
+    item.indexState = indexState ? { ...indexState } : undefined;
+    item.updatedAt = Date.now();
+    bases.value = [...bases.value];
+    await persist();
+  };
+
   const byIds = (ids: string[]) => {
     const wanted = new Set(ids);
     return bases.value.filter((item) => wanted.has(item.id) && isReady(item) && isProviderEnabled(item.provider));
@@ -396,6 +479,7 @@ export function useKnowledgeConfig() {
     remove,
     setEnabled,
     setDocumentCount,
+    setIndexState,
     byIds,
     byProvider,
     runtimePayload,

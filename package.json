@@ -73,6 +73,7 @@
     "gateway:feishu": "node scripts/gateway-feishu-smoke.mjs",
     "gateway:relay": "node scripts/relay-smoke.mjs",
     "agentscope:smoke": "node scripts/agentscope-smoke.mjs",
+    "dsh:regression": "node scripts/dsh-mcp-skills-regression.mjs",
     "concurrency:loadtest": "node scripts/concurrency-loadtest.mjs",
     "concurrency:regression": "node scripts/concurrency-regression.mjs",
     "owner:migrate:check": "node scripts/migrate-owner-fields.mjs",

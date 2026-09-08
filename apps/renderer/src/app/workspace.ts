@@ -8,10 +8,6 @@ import { DEFAULT_MAX_STEPS, DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_RUN_TIMEOUT_MS,
 import { useMcpConfig } from './mcp-config.js';
 import { useKnowledgeConfig } from './kb-config.js';
 import { readStored, writeStored } from './storage.js';
-import {
-  BASELINE_WORKSPACE_SKILL_ID,
-  mergeRuntimeSkills,
-} from './baseline-skills.js';
 import { useCapabilities, type ExecutionLevel } from './capabilities.js';
 import { useAssets, type Asset } from './assets.js';
 import type { Automation } from './automations.js';
@@ -26,7 +22,7 @@ export type { Employee, EmployeeDraft, EmployeeId } from './employees.js';
 export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
 export type CollaborationDelivery = 'synthesize' | 'direct';
 export interface CollaborationRun { employeeId: EmployeeId; task: string; status: 'running' | 'completed' | 'failed'; summary: string; activities: ToolActivity[]; error?: string; }
-export interface Message { id: string; role: 'user' | 'assistant'; content: string; activities?: ToolActivity[]; approvals?: ToolApproval[]; assets?: Asset[]; sources?: Array<SearchSource & { provider: string }>; collaborations?: CollaborationRun[]; collaborationDelivery?: CollaborationDelivery; }
+export interface Message { id: string; role: 'user' | 'assistant'; content: string; activities?: ToolActivity[]; approvals?: ToolApproval[]; assets?: Asset[]; sources?: Array<SearchSource & { provider: string }>; collaborations?: CollaborationRun[]; collaborationDelivery?: CollaborationDelivery; /** Resolved execution engine for this assistant turn. */ engine?: 'pi' | 'agentscope' | 'dsh'; startedAt?: number; elapsedMs?: number; }
 export interface Conversation { id: string; title: string; employeeId: EmployeeId; messages: Message[]; updatedAt: number; serverSessionId?: string; }
 export interface ProjectTaskDraft { title: string; objective: string; employeeId: EmployeeId; skillIds: string[]; dependsOn?: number[]; contract?: { outputs?: string[]; acceptance?: string; timeoutMs?: number; maxAttempts?: number } };
 export interface ProjectTaskTranscript {
@@ -95,6 +91,35 @@ function markActivitiesInterrupted(activities?: ToolActivity[]) {
   }
 }
 
+/** Close out leftover `running` rows after a successful settle (lost tool.completed, etc.). */
+function markActivitiesSettled(activities?: ToolActivity[]) {
+  if (!activities?.length) return;
+  for (const activity of activities) {
+    if (activity.status === 'running') {
+      activity.status = 'completed';
+      if (!/完成|completed|已中止/i.test(activity.summary)) {
+        activity.summary = activity.summary ? `${activity.summary}（已完成）` : '已完成';
+      }
+    }
+  }
+}
+
+function appendAssistantNotice(message: Message, notice: string) {
+  const normalized = notice.trim();
+  if (!normalized) return;
+  if (!message.content.trim()) {
+    message.content = normalized;
+    return;
+  }
+  if (message.content.includes(normalized)) return;
+  message.content = `${message.content.trim()}\n\n${normalized}`;
+}
+
+function appendUnfinishedDeliverableNotice(message: Message) {
+  if ((message.assets?.length ?? 0) > 0) return;
+  appendAssistantNotice(message, '⚠ 本轮已结束，但尚未生成最终交付文件；如需继续完成，请重试。');
+}
+
 const catalog = useEmployeeCatalog();
 const employees = catalog.employees;
 
@@ -153,7 +178,8 @@ export function useWorkspace() {
   const { runtimeProviders, runtimeProvidersFor, load: loadSearchConfig } = useSearchConfig();
   void loadSearchConfig();
   const { get: getEmployeePrefs, load: loadEmployeePrefs } = useEmployeeRuntimePrefs();
-  void loadEmployeePrefs();
+  // Do not eager-load prefs here: auth namespace may not be set yet, and a sticky
+  // empty load would drop employee engine overrides (falling back to pi).
   const { runtimePayload: mcpRuntimePayload, load: loadMcpConfig, connections: mcpConnectionsState } = useMcpConfig();
   void loadMcpConfig();
   const { runtimePayload: kbRuntimePayload, load: loadKnowledgeConfig } = useKnowledgeConfig();
@@ -260,7 +286,7 @@ export function useWorkspace() {
       const asset = await archiveArtifact({
         runId,
         relativePath: normalized,
-        conversationId: conversation.id,
+        conversationId: conversation.serverSessionId,
         employeeId: conversation.employeeId,
       });
       if (!assistantMessage.assets?.some((item) => item.id === asset.id)) assistantMessage.assets?.push(asset as Asset);
@@ -291,6 +317,11 @@ export function useWorkspace() {
       // Adopt the durable final text. This is what makes the reply appear even
       // when deltas were missed (SSE gap) or the run outlived the subscription.
       if (serverAssistant.content && assistantMessage.content !== serverAssistant.content) assistantMessage.content = serverAssistant.content;
+    }
+    if (!assistantMessage.engine) {
+      const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
+      const run = runs.find((item) => item.id === runId);
+      if (run?.engine) assistantMessage.engine = run.engine;
     }
     conversation.updatedAt = session.updatedAt;
     serverBump();
@@ -329,18 +360,35 @@ export function useWorkspace() {
     const applyServerEvent = (event: orch.OrcEvent) => {
       if (event.runId && currentRunId && event.runId !== currentRunId) return;
       if (event.type === 'run.settled') {
+        if (event.status === 'failed' || event.status === 'cancelled') {
+          markActivitiesInterrupted(assistantMessage.activities);
+          serverBump();
+        } else if (event.status === 'completed') {
+          markActivitiesSettled(assistantMessage.activities);
+          serverBump();
+        }
         settleRun?.({ status: event.status, error: event.error });
         settleRun = null;
         return;
       }
-      if (event.type === 'run.delta' && event.text) {
+      if (event.type === 'run.engine' && event.engine) {
+        assistantMessage.engine = event.engine;
+        serverBump();
+      } else if (event.type === 'run.delta' && event.text) {
         assistantMessage.content += event.text;
         serverBump();
       } else if (event.type === 'run.activity' && event.activity) {
         const activity = event.activity;
         const existing = assistantMessage.activities?.find((item) => item.toolName === activity.toolName && item.status === 'running');
-        if (existing && activity.status !== 'running') Object.assign(existing, activity);
-        else assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
+        if (existing && activity.status !== 'running') {
+          // Preserve the richer started summary (command/args); only settle status.
+          existing.status = activity.status;
+          if (activity.status === 'failed' && activity.summary && !existing.summary.includes(activity.summary)) {
+            existing.summary = `${existing.summary} — ${activity.summary}`;
+          }
+        } else {
+          assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
+        }
         serverBump();
       } else if (event.type === 'run.approval' && event.approval) {
         const approval = event.approval;
@@ -388,10 +436,16 @@ export function useWorkspace() {
     try {
       // Prefer renderer-assembled context (includes employee MCP prefs). Server
       // KV fallback alone misses unsynced / never-saved runtime prefs.
+      await loadEmployeePrefs();
       await loadMcpConfig({ force: mcpConnectionsState.value.length === 0 });
       const employee = employees.value.find((item) => item.id === conversation.employeeId) ?? currentEmployee.value;
       const onlineSearch = getEmployeePrefs(employee.id).searchMode !== 'off';
       const opts = runOptionsFor(employee.id, onlineSearch);
+      if (opts.engine) {
+        console.info(`[workmate] chat context engine override: ${opts.engine}`);
+      } else {
+        console.info('[workmate] chat context engine: inherit global default');
+      }
       const skills = await skillRuntimeFor(employee.id, skillIds);
       const runModel = modelForEmployee(employee.id, model) ?? model;
       const context = {
@@ -440,25 +494,31 @@ export function useWorkspace() {
       throw Object.assign(new Error(reason || '已由用户中止当前执行。'), { name: 'AbortError' });
     }
     await syncServerTurnToMirror(conversation, userMessage, assistantMessage, sessionId, currentRunId);
-    if (!assistantMessage.content.trim()) {
+    {
       const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
       const run = runs.find((item) => item.id === currentRunId);
-      if (run?.error) {
-        const friendly = /terminated|econnreset|network|ssl|tls|stream idle|timeout/i.test(run.error)
-          ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
-          : run.error;
-        assistantMessage.content = `⚠ ${friendly}`;
-        serverBump();
+      if (run && (run.status === 'failed' || run.status === 'cancelled')) {
+        markActivitiesInterrupted(assistantMessage.activities);
+        appendUnfinishedDeliverableNotice(assistantMessage);
+      } else if (run?.status === 'completed') {
+        markActivitiesSettled(assistantMessage.activities);
       }
-    } else {
-      const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
-      const run = runs.find((item) => item.id === currentRunId);
-      if (run && (run.status === 'failed' || run.status === 'cancelled') && run.error) {
+      if (!assistantMessage.content.trim()) {
+        if (run?.error) {
+          const friendly = /terminated|econnreset|network|ssl|tls|stream idle|timeout/i.test(run.error)
+            ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
+            : run.error;
+          appendAssistantNotice(assistantMessage, `⚠ ${friendly}`);
+          appendUnfinishedDeliverableNotice(assistantMessage);
+          serverBump();
+        }
+      } else if (run && (run.status === 'failed' || run.status === 'cancelled') && run.error) {
         const friendly = /terminated|econnreset|network|ssl|tls|stream idle|timeout/i.test(run.error)
           ? '模型流已中断（长时间无响应，常见于 VPN/网络切换）。已自动结束本轮，请重试。'
           : run.error;
         if (!assistantMessage.content.includes(friendly)) {
-          assistantMessage.content = `${assistantMessage.content.trim()}\n\n⚠ ${friendly}`;
+          appendAssistantNotice(assistantMessage, `⚠ ${friendly}`);
+          appendUnfinishedDeliverableNotice(assistantMessage);
           serverBump();
         }
       }
@@ -534,6 +594,10 @@ export function useWorkspace() {
               serverBump();
             }
           }
+          if (run?.engine && assistantMessage.engine !== run.engine) {
+            assistantMessage.engine = run.engine;
+            serverBump();
+          }
           const contentReady = Boolean(assistant?.content.trim()) || Boolean(run?.transcript?.trim()) || Boolean(assistantMessage.content.trim());
           const errored = run?.status === 'failed' || run?.status === 'cancelled';
           const parked = run?.status === 'waiting-approval';
@@ -578,21 +642,52 @@ export function useWorkspace() {
             }
           }
         }
+        if (run?.engine && assistantMessage.engine !== run.engine) {
+          assistantMessage.engine = run.engine;
+          serverBump();
+        }
         if (run?.activities?.length) {
           let activitiesChanged = false;
           for (const activity of run.activities) {
-            const existing = assistantMessage.activities?.find(
-              (item) => item.toolName === activity.toolName && item.summary === activity.summary,
-            );
-            if (existing) {
-              if (existing.status !== activity.status) {
-                existing.status = activity.status;
-                activitiesChanged = true;
+            if (activity.status === 'running') {
+              // Prefer in-place update of an open row; ignore stale running rows from older storage.
+              const existingRunning = assistantMessage.activities?.find(
+                (item) => item.toolName === activity.toolName && item.status === 'running',
+              );
+              if (existingRunning) {
+                if (existingRunning.summary !== activity.summary) {
+                  existingRunning.summary = activity.summary;
+                  activitiesChanged = true;
+                }
+                continue;
               }
-            } else {
+              const alreadyDone = assistantMessage.activities?.some(
+                (item) => item.toolName === activity.toolName && item.status !== 'running'
+                  && (item.summary === activity.summary || item.summary.startsWith(activity.toolName)),
+              );
+              if (alreadyDone) continue;
               assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
               activitiesChanged = true;
+              continue;
             }
+            const existing = assistantMessage.activities?.find(
+              (item) => item.toolName === activity.toolName && item.status === 'running',
+            );
+            if (existing) {
+              existing.status = activity.status;
+              // Do not clobber started summary with generic "bash completed".
+              if (activity.status === 'failed' && activity.summary && !existing.summary.includes(activity.summary)) {
+                existing.summary = `${existing.summary} — ${activity.summary}`;
+              }
+              activitiesChanged = true;
+              continue;
+            }
+            const duplicate = assistantMessage.activities?.find(
+              (item) => item.toolName === activity.toolName && item.summary === activity.summary && item.status === activity.status,
+            );
+            if (duplicate) continue;
+            assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
+            activitiesChanged = true;
           }
           if (activitiesChanged) serverBump();
         }
@@ -601,6 +696,8 @@ export function useWorkspace() {
           const contentReady = Boolean(assistant?.content.trim()) || Boolean(run.transcript?.trim()) || Boolean(assistantMessage.content.trim());
           const errored = run.status === 'failed' || run.status === 'cancelled';
           const parked = run.status === 'waiting-approval';
+          if (errored) markActivitiesInterrupted(assistantMessage.activities);
+          else if (run.status === 'completed') markActivitiesSettled(assistantMessage.activities);
           if (contentReady || errored || parked) return;
         }
 
@@ -680,15 +777,20 @@ export function useWorkspace() {
         execution: { ...skill.execution },
       }));
     }
-    const authorized = allowedSkillsFor(employeeId).filter((skill) => skill.id !== BASELINE_WORKSPACE_SKILL_ID && (!onlySkillIds?.length || onlySkillIds.includes(skill.id))).sort((left, right) => (policyFor(employeeId, right.id)?.mode === 'default' ? 1 : 0) - (policyFor(employeeId, left.id)?.mode === 'default' ? 1 : 0));
+    const authorized = allowedSkillsFor(employeeId).filter((skill) => !onlySkillIds?.length || onlySkillIds.includes(skill.id)).sort((left, right) => (policyFor(employeeId, right.id)?.mode === 'default' ? 1 : 0) - (policyFor(employeeId, left.id)?.mode === 'default' ? 1 : 0));
     const userSkills = await Promise.all(authorized.map(async (skill) => {
       const mode = policyFor(employeeId, skill.id)?.mode === 'default' ? 'default' as const : 'available' as const;
       let instructions: string | undefined;
       let resources: RuntimeSkill['resources'] = [];
       const rootPath = skill.path?.replace(/[\\/][^\\/]+$/, '');
-      // Progressive disclosure: only hydrate full SKILL.md (+ resources) for
-      // default-mode skills. Available skills stay metadata-only until load_skill.
-      if (mode === 'default' && skill.path) {
+      // Pre-hydrate associated skills before the first model turn so the agent can
+      // reason with domain-specific instructions immediately instead of racing
+      // with a later load_skill call.
+      const engine = getEmployeePrefs(employeeId).engine;
+      const hydrateForDsh = engine === 'dsh';
+      const hydrateForPi = engine === 'pi';
+      const shouldHydrateSkillBody = mode === 'default' || hydrateForDsh || hydrateForPi;
+      if (shouldHydrateSkillBody && skill.path) {
         try {
           const api = await import('../services/api');
           instructions = (await api.readSkillFile(skill.path)).content.slice(0, 24_000);
@@ -697,9 +799,12 @@ export function useWorkspace() {
           resources = (await Promise.all(readable.map(async (file) => {
             try { const result = await api.readSkillFile(file.path); return result ? { path: file.relative, content: result.content.slice(0, 48_000) } : null; } catch { return null; }
           }))).filter((item): item is { path: string; content: string } => item !== null);
-        } catch { /* Metadata-only Skills remain safely usable in the catalog. */ }
-      } else if (mode === 'default' && skill.instructions) {
+        } catch { /* Fall back to embedded instructions / description below. */ }
+      }
+      if (!instructions && shouldHydrateSkillBody && skill.instructions) {
         instructions = skill.instructions.slice(0, 24_000);
+      } else if (!instructions && shouldHydrateSkillBody && skill.description) {
+        instructions = skill.description.slice(0, 24_000);
       }
       return {
         id: skill.id, name: skill.name, description: skill.description, mode, ...(rootPath ? { rootPath } : {}), ...(instructions ? { instructions } : {}), resources,
@@ -713,7 +818,7 @@ export function useWorkspace() {
         },
       };
     }));
-    const merged = mergeRuntimeSkills(tier, userSkills).map((skill) => ({
+    const merged = userSkills.map((skill) => ({
       ...skill,
       execution: {
         ...skill.execution,
@@ -800,7 +905,7 @@ export function useWorkspace() {
     conversations.value = [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt);
     void persist();
     const employee = currentEmployee.value;
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', activities: [], approvals: [], assets: [], collaborations: [] };
+    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', activities: [], approvals: [], assets: [], collaborations: [], startedAt: Date.now() };
     conversation.messages.push(assistantMessage);
     const plannedCollaborators = [...new Set(options.collaboratorIds ?? [])].filter((cid) => cid !== employee.id).slice(0, 3);
     if (serverChatActive() && !plannedCollaborators.length) {
@@ -811,16 +916,19 @@ export function useWorkspace() {
       activeRunAbort = runAbortCtl;
       try {
         const outcome = await serverChatTurn(conversation, userMessage, assistantMessage, text, model, options.skillIds);
+        assistantMessage.elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
+        conversations.value = [...conversations.value];
         return outcome;
       } catch (cause) {
+        assistantMessage.elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
         if (isAbortError(cause)) {
           const reason = cause instanceof Error ? cause.message : '已由用户中止当前执行。';
-          assistantMessage.content = assistantMessage.content.trim()
-            ? `${assistantMessage.content.trim()}\n\n⏹ ${reason}`
-            : `⏹ ${reason}`;
+          appendAssistantNotice(assistantMessage, `⏹ ${reason}`);
+          appendUnfinishedDeliverableNotice(assistantMessage);
           markActivitiesInterrupted(assistantMessage.activities);
         } else {
-          assistantMessage.content = cause instanceof Error ? `⚠ ${cause.message}` : '⚠ Model request failed.';
+          appendAssistantNotice(assistantMessage, cause instanceof Error ? `⚠ ${cause.message}` : '⚠ Model request failed.');
+          appendUnfinishedDeliverableNotice(assistantMessage);
         }
         void persist();
         return {
@@ -955,7 +1063,12 @@ export function useWorkspace() {
         const normalized = artifact.path.replace(/\\/g, '/').replace(/^\/+/, '');
         if (!isUserFacingDeliverablePath(normalized) || alreadyHasAsset(assistantMessage.assets, artifact.runId, normalized)) return;
         try {
-          const asset = await archiveArtifact({ runId: artifact.runId, relativePath: normalized, conversationId: conversation.id, employeeId: employee.id });
+          const asset = await archiveArtifact({
+            runId: artifact.runId,
+            relativePath: normalized,
+            conversationId: conversation.serverSessionId,
+            employeeId: employee.id,
+          });
           if (!assistantMessage.assets?.some((item) => item.id === asset.id)) assistantMessage.assets?.push(asset);
           conversations.value = [...conversations.value];
         } catch (error) {
@@ -985,11 +1098,11 @@ export function useWorkspace() {
       for (const run of assistantMessage.collaborations ?? []) markActivitiesInterrupted(run.activities);
       if (isAbortError(error)) {
         const message = error instanceof Error ? error.message : '已中止当前执行。';
-        assistantMessage.content = assistantMessage.content.trim()
-          ? `${assistantMessage.content.trim()}\n\n⏹ ${message}`
-          : `⏹ ${message}`;
+        appendAssistantNotice(assistantMessage, `⏹ ${message}`);
+        appendUnfinishedDeliverableNotice(assistantMessage);
       } else {
-        assistantMessage.content = error instanceof Error ? `⚠ ${error.message}` : '⚠ Model request failed.';
+        appendAssistantNotice(assistantMessage, error instanceof Error ? `⚠ ${error.message}` : '⚠ Model request failed.');
+        appendUnfinishedDeliverableNotice(assistantMessage);
       }
       conversations.value = [...conversations.value];
       void persist();
@@ -1191,7 +1304,8 @@ export function useWorkspace() {
       // resumed run is settled and its content persisted before re-aligning.
       if (resolved?.resumedRunId) {
         const resumeAbort = new AbortController();
-        await waitForServerSettled(sessionId, resolved.resumedRunId, resumeAbort);
+        const resumedAssistant = conversation?.messages[conversation.messages.length - 1];
+        if (resumedAssistant) await waitForServerSettled(sessionId, resolved.resumedRunId, resumeAbort, resumedAssistant);
       }
       await waitForServerApprovalResume(sessionId, conversation);
       if (conversation) {

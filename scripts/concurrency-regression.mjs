@@ -11,6 +11,43 @@ import { ensureAgentscopeRuntime } from './lib/agentscope-runtime.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+async function runDshMcpSkillsCase() {
+  const entry = path.join(projectRoot, 'scripts', 'dsh-mcp-skills-regression.mjs');
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [entry], {
+      cwd: projectRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        const jsonLine = stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .reverse()
+          .find((line) => line.startsWith('{'));
+        try {
+          resolve(jsonLine ? JSON.parse(jsonLine) : { mode: 'dsh-mcp-skills-regression', ok: true });
+        } catch {
+          resolve({ mode: 'dsh-mcp-skills-regression', ok: true, raw: stdout.slice(-500) });
+        }
+        return;
+      }
+      reject(new Error(stderr || stdout || `dsh MCP/Skills regression exited with code ${code}.`));
+    });
+  });
+}
+
 async function waitForServer(baseUrl, timeoutMs = 20_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -26,6 +63,8 @@ async function waitForServer(baseUrl, timeoutMs = 20_000) {
 }
 
 async function main() {
+  const dshMcpSkills = await runDshMcpSkillsCase();
+
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'workmate-concurrency-regression-'));
   const runtime = ensureAgentscopeRuntime(projectRoot, { dataDir: tempRoot });
   const port = await choosePort(Number(process.env.WORKMATE_API_PORT || '4333'));
@@ -98,19 +137,25 @@ async function main() {
     });
 
     process.stdout.write(JSON.stringify({
-      mode: 'agentscope-sidecar-regression',
-      baseUrl,
-      dataDir: runtime.dataDir,
-      env: {
-        global: Number(process.env.WORKMATE_MAX_CONCURRENT_RUNS_GLOBAL || '2'),
-        perUser: Number(process.env.WORKMATE_MAX_CONCURRENT_RUNS_PER_USER || '1'),
-        dispatcherQueueWaitMs: Number(process.env.WORKMATE_MAX_QUEUE_WAIT_MS || '120000'),
-        sidecarPoolSize: Number(process.env.WORKMATE_AGENTSCOPE_POOL_SIZE || '2'),
-        sidecarMaxRuns: Number(process.env.WORKMATE_AGENTSCOPE_SHARED_MAX_RUNS || '1'),
-        sidecarQueueWaitMs: Number(process.env.WORKMATE_AGENTSCOPE_QUEUE_WAIT_MS || '120000'),
-        sidecarRestartCooldownMs: Number(process.env.WORKMATE_AGENTSCOPE_RESTART_COOLDOWN_MS || '15000'),
+      mode: 'workmate-regression',
+      cases: {
+        dshMcpSkills,
+        agentscopeSidecar: {
+          mode: 'agentscope-sidecar-regression',
+          baseUrl,
+          dataDir: runtime.dataDir,
+          env: {
+            global: Number(process.env.WORKMATE_MAX_CONCURRENT_RUNS_GLOBAL || '2'),
+            perUser: Number(process.env.WORKMATE_MAX_CONCURRENT_RUNS_PER_USER || '1'),
+            dispatcherQueueWaitMs: Number(process.env.WORKMATE_MAX_QUEUE_WAIT_MS || '120000'),
+            sidecarPoolSize: Number(process.env.WORKMATE_AGENTSCOPE_POOL_SIZE || '2'),
+            sidecarMaxRuns: Number(process.env.WORKMATE_AGENTSCOPE_SHARED_MAX_RUNS || '1'),
+            sidecarQueueWaitMs: Number(process.env.WORKMATE_AGENTSCOPE_QUEUE_WAIT_MS || '120000'),
+            sidecarRestartCooldownMs: Number(process.env.WORKMATE_AGENTSCOPE_RESTART_COOLDOWN_MS || '15000'),
+          },
+          result,
+        },
       },
-      result,
     }, null, 2));
     process.stdout.write('\n');
   } finally {

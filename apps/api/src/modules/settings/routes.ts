@@ -74,7 +74,26 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
       meta: {
         version: Number(raw.version) || 2,
         providerInstances,
-        models: Array.isArray(raw.models) ? raw.models : [],
+        models: arrayOfRecords(raw.models).map((model) => ({
+          id: String(model.id || ''),
+          providerInstanceId: String(model.providerInstanceId || ''),
+          capability: String(model.capability || ''),
+          modelId: String(model.modelId || ''),
+          ...(model.label ? { label: String(model.label) } : {}),
+          ...(model.meta && typeof model.meta === 'object'
+            ? {
+                meta: {
+                  ...(Number(asRecord(model.meta).dimension) ? { dimension: Number(asRecord(model.meta).dimension) } : {}),
+                  ...(typeof asRecord(model.meta).normalize === 'boolean' ? { normalize: Boolean(asRecord(model.meta).normalize) } : {}),
+                  ...(Number(asRecord(model.meta).maxBatch) ? { maxBatch: Number(asRecord(model.meta).maxBatch) } : {}),
+                  ...(Number(asRecord(model.meta).maxInputChars) ? { maxInputChars: Number(asRecord(model.meta).maxInputChars) } : {}),
+                },
+              }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(model, 'supportsBuiltinWebSearch')
+            ? { supportsBuiltinWebSearch: Boolean(model.supportsBuiltinWebSearch) }
+            : {}),
+        })),
         activeChatModelId: raw.activeChatModelId ? String(raw.activeChatModelId) : null,
         activeEmbeddingModelId: raw.activeEmbeddingModelId ? String(raw.activeEmbeddingModelId) : null,
         employeeDefaultModelIds: asRecord(raw.employeeDefaultModelIds),
@@ -229,6 +248,27 @@ function splitKnowledgeBases(value: unknown): SettingsEnvelope {
       accessKeyId: String(item.accessKeyId || ''),
       embeddingBaseUrl: String(item.embeddingBaseUrl || ''),
       embeddingModel: String(item.embeddingModel || ''),
+      ...(item.embeddingMeta && typeof item.embeddingMeta === 'object'
+        ? {
+            embeddingMeta: {
+              ...(Number(asRecord(item.embeddingMeta).dimension) ? { dimension: Number(asRecord(item.embeddingMeta).dimension) } : {}),
+              ...(typeof asRecord(item.embeddingMeta).normalize === 'boolean' ? { normalize: Boolean(asRecord(item.embeddingMeta).normalize) } : {}),
+              ...(Number(asRecord(item.embeddingMeta).maxBatch) ? { maxBatch: Number(asRecord(item.embeddingMeta).maxBatch) } : {}),
+              ...(Number(asRecord(item.embeddingMeta).maxInputChars) ? { maxInputChars: Number(asRecord(item.embeddingMeta).maxInputChars) } : {}),
+            },
+          }
+        : {}),
+      ...(item.indexState && typeof item.indexState === 'object'
+        ? {
+            indexState: {
+              status: String(asRecord(item.indexState).status || 'ready'),
+              ...(asRecord(item.indexState).signature ? { signature: String(asRecord(item.indexState).signature) } : {}),
+              ...(Number(asRecord(item.indexState).lastBuildAt) ? { lastBuildAt: Number(asRecord(item.indexState).lastBuildAt) } : {}),
+              ...(asRecord(item.indexState).lastBuildModel ? { lastBuildModel: String(asRecord(item.indexState).lastBuildModel) } : {}),
+              ...(asRecord(item.indexState).lastBuildError ? { lastBuildError: String(asRecord(item.indexState).lastBuildError) } : {}),
+            },
+          }
+        : {}),
       documentCount: Number(item.documentCount) || 0,
       updatedAt: Number(item.updatedAt) || Date.now(),
     })),

@@ -12,7 +12,8 @@ import {
   type ModelCapability,
   type ProviderInstance,
 } from '../../app/model-config';
-import { listProviderModels } from '../../services/api.js';
+import { listProviderModels, testEmbeddingConnection } from '../../services/api.js';
+import { useNotify } from '../../app/notify';
 
 const props = defineProps<{
   instances: ProviderInstance[];
@@ -29,6 +30,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const notify = useNotify();
 
 const draftProviderId = ref('');
 const draftCapability = ref<ModelCapability>('chat');
@@ -38,6 +40,8 @@ const remoteModels = ref<string[]>([]);
 const remoteLoading = ref(false);
 const remoteError = ref('');
 const search = ref('');
+const testingEmbeddingId = ref('');
+const embeddingTestMessage = ref<Record<string, { ok: boolean; text: string }>>({});
 
 const instanceById = computed(() => Object.fromEntries(props.instances.map((item) => [item.id, item])));
 const readyInstances = computed(() => props.instances.filter((item) => providerInstanceReady(item)));
@@ -121,6 +125,27 @@ function removeModel(id: string) {
   emitModels(next, activeChatId, activeEmbeddingId);
 }
 
+function patchModel(id: string, patchValue: Partial<ConfiguredModel>) {
+  emitModels(props.models.map((item) => (item.id === id ? { ...item, ...patchValue } : item)));
+}
+
+function patchEmbeddingMeta(
+  model: ConfiguredModel,
+  key: 'dimension' | 'maxBatch' | 'maxInputChars' | 'normalize',
+  rawValue: string | boolean,
+) {
+  const prev = model.meta ?? {};
+  const next = { ...prev };
+  if (key === 'normalize') {
+    next.normalize = Boolean(rawValue);
+  } else {
+    const num = Math.max(0, Math.round(Number(rawValue) || 0));
+    if (num > 0) (next as Record<string, number>)[key] = num;
+    else delete (next as Record<string, number | boolean | undefined>)[key];
+  }
+  patchModel(model.id, { meta: Object.keys(next).length ? next : undefined });
+}
+
 function setDefaultChat(id: string) {
   emit('update:activeChatModelId', id);
   emit('dirty');
@@ -148,8 +173,44 @@ function modelSupportsBuiltinToggle(model: ConfiguredModel) {
   return model.capability === 'chat' && Boolean(instance && providerCanBuiltinWebSearch(instance.type));
 }
 
+async function testEmbeddingModel(model: ConfiguredModel) {
+  const instance = instanceById.value[model.providerInstanceId];
+  if (!instance) return;
+  testingEmbeddingId.value = model.id;
+  embeddingTestMessage.value = { ...embeddingTestMessage.value, [model.id]: { ok: false, text: t('settings.providerTesting') } };
+  try {
+    const result = await testEmbeddingConnection({
+      type: instance.type,
+      baseUrl: instance.baseUrl,
+      apiKey: instance.apiKey,
+      model: model.modelId,
+    });
+    const dimension = Number(result.detail.dimension) || model.meta?.dimension || 0;
+    const nextMeta = {
+      ...(model.meta ?? {}),
+      ...(dimension > 0 ? { dimension } : {}),
+    };
+    patchModel(model.id, { meta: Object.keys(nextMeta).length ? nextMeta : undefined });
+    embeddingTestMessage.value = {
+      ...embeddingTestMessage.value,
+      [model.id]: { ok: true, text: `${result.message} [${result.status}]` },
+    };
+    notify.success('notify.providerTestOk', result.message);
+  } catch (cause) {
+    const text = notify.errorMessage(cause);
+    embeddingTestMessage.value = { ...embeddingTestMessage.value, [model.id]: { ok: false, text } };
+    notify.error(cause, 'notify.providerTestFailed');
+  } finally {
+    testingEmbeddingId.value = '';
+  }
+}
+
 function eventChecked(event: Event): boolean {
   return Boolean((event.target as HTMLInputElement | null)?.checked);
+}
+
+function eventInputValue(event: Event): string {
+  return String((event.target as HTMLInputElement | null)?.value ?? '');
 }
 
 async function fetchRemoteModels() {
@@ -215,35 +276,87 @@ function modelRowLabel(model: ConfiguredModel) {
         <span>{{ t('settings.systemDefaultColumn') }}</span>
         <span></span>
       </div>
-      <div
-        v-for="model in visibleModels"
-        :key="model.id"
-        class="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-t border-[var(--border)] px-3 py-2.5"
-      >
-        <div class="min-w-0">
-          <p class="truncate text-sm font-medium">{{ modelRowLabel(model) }}</p>
-          <p class="truncate text-[11px] text-[var(--muted)]">{{ instanceById[model.providerInstanceId]?.type }}</p>
+      <div v-for="model in visibleModels" :key="model.id" class="border-t border-[var(--border)]">
+        <div class="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 px-3 py-2.5">
+          <div class="min-w-0">
+            <p class="truncate text-sm font-medium">{{ modelRowLabel(model) }}</p>
+            <p class="truncate text-[11px] text-[var(--muted)]">{{ instanceById[model.providerInstanceId]?.type }}</p>
+          </div>
+          <span class="rounded-full bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
+          <label v-if="modelSupportsBuiltinToggle(model)" class="flex cursor-pointer items-center gap-1.5 text-xs" :title="t('settings.builtinSearchHelp')">
+            <input
+              :checked="Boolean(model.supportsBuiltinWebSearch)"
+              type="checkbox"
+              @change="toggleBuiltinWebSearch(model, eventChecked($event))"
+            />
+            <span class="text-[var(--muted)]">{{ t('settings.builtinSearch') }}</span>
+          </label>
+          <span v-else class="text-[11px] text-[var(--muted)]">—</span>
+          <label v-if="model.capability === 'chat'" class="flex cursor-pointer items-center gap-1.5 text-xs">
+            <input :checked="activeChatModelId === model.id" name="default-chat-model" type="radio" @change="setDefaultChat(model.id)" />
+            <span class="text-[var(--muted)]">{{ t('settings.activeChatModel') }}</span>
+          </label>
+          <label v-else-if="model.capability === 'embedding'" class="flex cursor-pointer items-center gap-1.5 text-xs">
+            <input :checked="activeEmbeddingModelId === model.id" name="default-embedding-model" type="radio" @change="setDefaultEmbedding(model.id)" />
+            <span class="text-[var(--muted)]">{{ t('settings.activeEmbeddingModel') }}</span>
+          </label>
+          <span v-else class="text-[11px] text-[var(--muted)]">—</span>
+          <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
         </div>
-        <span class="rounded-full bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
-        <label v-if="modelSupportsBuiltinToggle(model)" class="flex cursor-pointer items-center gap-1.5 text-xs" :title="t('settings.builtinSearchHelp')">
-          <input
-            :checked="Boolean(model.supportsBuiltinWebSearch)"
-            type="checkbox"
-            @change="toggleBuiltinWebSearch(model, eventChecked($event))"
-          />
-          <span class="text-[var(--muted)]">{{ t('settings.builtinSearch') }}</span>
-        </label>
-        <span v-else class="text-[11px] text-[var(--muted)]">—</span>
-        <label v-if="model.capability === 'chat'" class="flex cursor-pointer items-center gap-1.5 text-xs">
-          <input :checked="activeChatModelId === model.id" name="default-chat-model" type="radio" @change="setDefaultChat(model.id)" />
-          <span class="text-[var(--muted)]">{{ t('settings.activeChatModel') }}</span>
-        </label>
-        <label v-else-if="model.capability === 'embedding'" class="flex cursor-pointer items-center gap-1.5 text-xs">
-          <input :checked="activeEmbeddingModelId === model.id" name="default-embedding-model" type="radio" @change="setDefaultEmbedding(model.id)" />
-          <span class="text-[var(--muted)]">{{ t('settings.activeEmbeddingModel') }}</span>
-        </label>
-        <span v-else class="text-[11px] text-[var(--muted)]">—</span>
-        <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
+
+        <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-4">
+          <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
+            <span>Dimension</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
+              type="number"
+              min="1"
+              :value="model.meta?.dimension ?? ''"
+              @input="patchEmbeddingMeta(model, 'dimension', eventInputValue($event))"
+            />
+          </label>
+          <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
+            <span>Max Batch</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
+              type="number"
+              min="1"
+              :value="model.meta?.maxBatch ?? ''"
+              @input="patchEmbeddingMeta(model, 'maxBatch', eventInputValue($event))"
+            />
+          </label>
+          <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
+            <span>Max Input Chars</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
+              type="number"
+              min="1"
+              :value="model.meta?.maxInputChars ?? ''"
+              @input="patchEmbeddingMeta(model, 'maxInputChars', eventInputValue($event))"
+            />
+          </label>
+          <label class="flex items-center gap-2 text-[11px] font-semibold text-[var(--muted)]">
+            <input
+              type="checkbox"
+              :checked="Boolean(model.meta?.normalize)"
+              @change="patchEmbeddingMeta(model, 'normalize', eventChecked($event))"
+            />
+            <span>Normalize</span>
+          </label>
+          <div class="sm:col-span-4 flex flex-wrap items-center gap-3">
+            <button
+              class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:border-[var(--accent)] disabled:opacity-50"
+              type="button"
+              :disabled="testingEmbeddingId === model.id"
+              @click="testEmbeddingModel(model)"
+            >
+              {{ testingEmbeddingId === model.id ? 'Testing…' : '测试 Embedding' }}
+            </button>
+            <p v-if="embeddingTestMessage[model.id]" :class="['text-xs', embeddingTestMessage[model.id].ok ? 'text-emerald-600' : 'text-rose-600']">
+              {{ embeddingTestMessage[model.id].text }}
+            </p>
+          </div>
+        </div>
       </div>
     </div>
     <p v-if="visibleModels.length && !activeEmbeddingModelId" class="mt-2 text-[11px] text-[var(--muted)]">

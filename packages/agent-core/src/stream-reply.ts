@@ -9,6 +9,7 @@ import {
   type ExecutionBackendStreamInput,
 } from './execution-backend.js';
 import { loadExecutionRoutingConfig } from './execution-routing-config.js';
+import { attachBuiltinSkillPackages } from './builtin-skill-packages.js';
 
 export { DEFAULT_RUN_TIMEOUT_MS };
 export {
@@ -42,19 +43,31 @@ export async function* streamAgentReply(
   input: ExecutionBackendStreamInput,
   resolve?: BackendResolveInput,
 ): AsyncGenerator<AgentEvent> {
+  const preparedInput: ExecutionBackendStreamInput = {
+    ...input,
+    skills: await attachBuiltinSkillPackages(input.skills ?? []),
+  };
   const stored = loadExecutionRoutingConfig();
   const backend = resolveExecutionBackend({
     enabledEngines: resolve?.enabledEngines ?? stored.enabledEngines,
     defaultEngine: resolve?.defaultEngine ?? stored.defaultEngine,
     override: resolve?.override,
-    employeeEngine: resolve?.employeeEngine ?? input.engine ?? null,
+    employeeEngine: resolve?.employeeEngine ?? preparedInput.engine ?? null,
     preferCoding: resolve?.preferCoding,
     preferProcessIsolation: resolve?.preferProcessIsolation,
   });
   console.info('[workmate] execution backend selected', {
     engine: backend.id,
-    requestEngine: input.engine ?? null,
-    profileId: input.profile?.id ?? null,
+    requestEngine: preparedInput.engine ?? null,
+    profileId: preparedInput.profile?.id ?? null,
   });
-  yield* backend.stream(input);
+  let annotatedStarted = false;
+  for await (const event of backend.stream(preparedInput)) {
+    if (event.type === 'run.started' && !annotatedStarted) {
+      annotatedStarted = true;
+      yield { ...event, engine: backend.id };
+      continue;
+    }
+    yield event;
+  }
 }

@@ -56,7 +56,10 @@ export function getOrchestrator(): Orchestrator {
         return null;
       }
     };
-    const chatContextResolver = async (employeeId: string): Promise<ChatRunContext | null> => {
+    const chatContextResolver = async (
+      employeeId: string,
+      ownerUserId?: string | null,
+    ): Promise<ChatRunContext | null> => {
       // Desktop/remote chat without client context → assemble for the employee
       // with all their authorized skills and the default permission tier.
       try {
@@ -68,7 +71,7 @@ export function getOrchestrator(): Orchestrator {
           skillIds: [] as string[],
           permissionTier: 'default' as const,
         } as ProjectTask;
-        return await resolveTaskContext(store, task);
+        return await resolveTaskContext(store, task, ownerUserId);
       } catch {
         return null;
       }
@@ -81,9 +84,9 @@ export function getOrchestrator(): Orchestrator {
       maxQueueWaitMs: positiveIntFromEnv('WORKMATE_MAX_QUEUE_WAIT_MS', 120_000),
       contextResolver,
       chatContextResolver,
-      chatMcpConnectionsResolver: async (employeeId: string) => {
+      chatMcpConnectionsResolver: async (employeeId, ownerUserId) => {
         try {
-          return await resolveEmployeeMcpConnections(store, employeeId);
+          return await resolveEmployeeMcpConnections(store, employeeId, ownerUserId);
         } catch {
           return [];
         }

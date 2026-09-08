@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   CollaborationDelivery,
   CollaborationRun,
@@ -12,7 +12,6 @@ import ChatReplyPending from "./ChatReplyPending.vue";
 import type { ProviderConfig } from "../../app/model-config";
 import type { ToolActivity, ToolApproval } from "../../services/api";
 import type { ExecutionLevel } from "../../app/capabilities";
-import { BASELINE_WORKSPACE_SKILL_ID } from "../../app/baseline-skills";
 import { useCapabilities } from "../../app/capabilities";
 import { useEmployeeRuntimePrefs } from "../../app/employee-prefs";
 import { useMcpConfig, isAssociableMcp } from "../../app/mcp-config";
@@ -21,6 +20,12 @@ import { downloadAssetBestEffort } from "../../app/platform-actions.js";
 import { useI18n } from "../../app/i18n";
 import { useNotify } from "../../app/notify";
 import { employeeDisplayDescription, employeeDisplayName } from "../../app/employees";
+import { getServerRuntimeConfig } from "../../services/api";
+
+type EngineId = "pi" | "agentscope" | "dsh";
+function isEngineId(value: unknown): value is EngineId {
+  return value === "pi" || value === "agentscope" || value === "dsh";
+}
 
 const props = defineProps<{
   employee: Employee;
@@ -69,6 +74,8 @@ const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
 const { get: getEmployeePrefs } = useEmployeeRuntimePrefs();
 const { connections: mcpConnections } = useMcpConfig();
+/** Global default from Settings → 执行引擎 (fallback when employee inherits). */
+const runtimeDefaultEngine = ref<EngineId>("pi");
 const approvalLabel: Record<ToolApproval["capability"], string> = {
   "workspace-write": "写入运行工作区",
   "script-execution": "执行本地脚本",
@@ -99,6 +106,42 @@ function stateLabel(activity: ToolActivity) {
       ? "未完成"
       : "已完成";
 }
+function hasFailedActivities(activities?: ToolActivity[]) {
+  return activities?.some((activity) => activity.status === "failed") ?? false;
+}
+function hasRunningActivities(activities?: ToolActivity[]) {
+  return activities?.some((activity) => activity.status === "running") ?? false;
+}
+function activityOutcome(message: Message) {
+  const activities = message.activities ?? [];
+  if (hasRunningActivities(activities)) {
+    return {
+      label: "运行中",
+      tone: "accent" as const,
+      detail: `${activities.length} 步执行中`,
+    };
+  }
+  if (hasFailedActivities(activities)) {
+    const recovered = completedCount(activities) > 0
+      && (message.assets?.length ?? 0) > 0;
+    return recovered
+      ? {
+          label: "已完成，含重试",
+          tone: "warn" as const,
+          detail: "过程中有重试，最终已成功交付",
+        }
+      : {
+          label: "需要处理",
+          tone: "danger" as const,
+          detail: "存在未完成步骤",
+        };
+  }
+  return {
+    label: "已完成 · 查看详情",
+    tone: "success" as const,
+    detail: "流程已顺利完成",
+  };
+}
 function shouldExpand(activities?: ToolActivity[]) {
   return (
     activities?.some(
@@ -112,6 +155,12 @@ function completedCount(activities?: ToolActivity[]) {
     activities?.filter((activity) => activity.status === "completed").length ??
     0
   );
+}
+
+function elapsedLabel(elapsedMs?: number) {
+  if (typeof elapsedMs !== 'number' || elapsedMs < 0) return '';
+  const seconds = Math.round(elapsedMs / 1000);
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 async function submit() {
   if (!draft.value.trim() || !props.modelConfigured || sending.value) return;
@@ -234,7 +283,6 @@ function summarizeNames(names: string[], emptyLabel: string) {
 }
 const activeSkillNames = computed(() =>
   allowedSkillsFor(props.employee.id)
-    .filter((skill) => skill.id !== BASELINE_WORKSPACE_SKILL_ID)
     .map((skill) => skill.name),
 );
 const activeMcpNames = computed(() => {
@@ -243,12 +291,54 @@ const activeMcpNames = computed(() => {
     .filter((item) => selected.has(item.id) && isAssociableMcp(item))
     .map((item) => item.name);
 });
+const employeeEngineOverride = computed(() => {
+  const raw = getEmployeePrefs(props.employee.id).engine;
+  return isEngineId(raw) ? raw : null;
+});
+/** Expected engine for the next turn (employee override → global default). */
+const expectedEngine = computed<EngineId>(
+  () => employeeEngineOverride.value ?? runtimeDefaultEngine.value,
+);
+/** Live engine from the latest assistant turn when SSE reported it. */
+const liveTurnEngine = computed<EngineId | null>(() => {
+  const messages = props.conversation?.messages;
+  if (!messages?.length) return null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg?.role === "assistant" && isEngineId(msg.engine)) return msg.engine;
+  }
+  return null;
+});
+const displayEngine = computed<EngineId>(() => liveTurnEngine.value ?? expectedEngine.value);
+const engineInherited = computed(() => !employeeEngineOverride.value && !liveTurnEngine.value);
 const runtimePreview = computed(() => ({
   skillCount: activeSkillNames.value.length,
   mcpCount: activeMcpNames.value.length,
   skillSummary: summarizeNames(activeSkillNames.value, "无额外 Skills"),
   mcpSummary: summarizeNames(activeMcpNames.value, "未关联 MCP"),
+  engine: displayEngine.value,
+  engineLabel: t(`employee.engine.${displayEngine.value}`),
+  engineInherited: engineInherited.value,
 }));
+
+async function refreshRuntimeDefaultEngine() {
+  try {
+    const value = (await getServerRuntimeConfig()) as { defaultEngine?: string };
+    const def = String(value.defaultEngine || "pi").trim().toLowerCase();
+    runtimeDefaultEngine.value = isEngineId(def) ? def : "pi";
+  } catch {
+    runtimeDefaultEngine.value = "pi";
+  }
+}
+onMounted(() => {
+  void refreshRuntimeDefaultEngine();
+});
+watch(
+  () => props.employee.id,
+  () => {
+    void refreshRuntimeDefaultEngine();
+  },
+);
 function collaborationState(item: CollaborationRun) {
   return item.status === "running"
     ? "协作中"
@@ -380,9 +470,9 @@ onBeforeUnmount(() => {
             >{{ employee.initials }}</span
           ><span
             ><strong class="block text-[13px]">{{ employeeDisplayName(employee, t) }}</strong
-            ><small class="block text-[11px] text-[var(--muted)]">{{
-              t("employee.default")
-            }}</small></span
+            ><small class="block text-[11px] text-[var(--muted)]"
+              >{{ t("employee.default") }} · {{ t("chat.engine") }} {{ runtimePreview.engineLabel }}</small
+            ></span
           ><span>⌄</span>
         </button>
         <div
@@ -455,6 +545,15 @@ onBeforeUnmount(() => {
       >
         <section class="rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)]/55 px-4 py-3 text-xs text-[var(--muted)]">
           <div class="flex flex-wrap items-center gap-2">
+            <span
+              class="rounded-full px-2.5 py-1 font-semibold"
+              :class="
+                runtimePreview.engine === 'dsh'
+                  ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                  : 'bg-[var(--surface)] text-[var(--foreground)]'
+              "
+              :title="t('chat.engineHelp')"
+            >{{ t('chat.engine') }}：{{ runtimePreview.engineLabel }}<template v-if="runtimePreview.engineInherited"> · {{ t('chat.engineInheritShort') }}</template></span>
             <span class="rounded-full bg-[var(--surface)] px-2.5 py-1 font-semibold text-[var(--foreground)]">权限：{{ tiers.find((item) => item.value === permissionTier)?.label ?? permissionTier }}</span>
             <span class="rounded-full bg-[var(--surface)] px-2.5 py-1">Skills：{{ runtimePreview.skillCount }}</span>
             <span class="rounded-full bg-[var(--surface)] px-2.5 py-1">MCP：{{ runtimePreview.mcpCount }}</span>
@@ -476,16 +575,21 @@ onBeforeUnmount(() => {
             >{{ employee.initials }}</span
           >
           <div class="min-w-0 flex-1">
-            <small class="text-[11px] text-[var(--muted)]">{{
-              message.role === "user" ? t("chat.you") : t("chat.assistant")
-            }}</small>
+            <small class="inline-flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--muted)]">
+              <span>{{ message.role === "user" ? t("chat.you") : t("chat.assistant") }}</span>
+              <span
+                v-if="message.role === 'assistant' && message.engine"
+                class="rounded-full bg-[var(--surface)] px-1.5 py-0.5 font-medium text-[10px] text-[var(--foreground)]"
+                :title="t('chat.engineTurnHelp')"
+              >{{ t('chat.engine') }} · {{ t(`employee.engine.${message.engine}`) }}</span>
+            </small>
             <p
               v-if="message.content"
               :class="[
-                'mt-1 max-w-none whitespace-pre-wrap px-4 py-3 leading-7',
+                'mt-1 max-w-none whitespace-pre-wrap border px-4 py-3.5 leading-7 shadow-[0_10px_30px_rgba(15,23,42,0.04)]',
                 message.role === 'user'
-                  ? 'rounded-[14px_4px_14px_14px] bg-[var(--accent-soft)]'
-                  : 'rounded-[4px_14px_14px] bg-[var(--surface)]',
+                  ? 'rounded-[18px_6px_18px_18px] border-[var(--accent)]/10 bg-[linear-gradient(180deg,var(--accent-soft),rgba(255,255,255,0.92))] text-[var(--foreground)]'
+                  : 'rounded-[8px_18px_18px_18px] border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))] text-[var(--foreground)] dark:bg-[linear-gradient(180deg,rgba(17,24,39,0.96),rgba(15,23,42,0.92))]',
               ]"
             >
               {{ message.content }}
@@ -567,69 +671,87 @@ onBeforeUnmount(() => {
             </details>
             <details
               v-if="message.role === 'assistant' && message.activities?.length"
-              class="group mt-2 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs"
+              class="group mt-2 overflow-hidden rounded-lg border border-[var(--border)]/80 bg-[var(--surface)]/92 text-[11px] shadow-[0_4px_14px_rgba(15,23,42,0.035)]"
               :open="shouldExpand(message.activities)"
             >
               <summary
-                class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[var(--muted)] hover:bg-[var(--surface-muted)]"
+                class="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-muted)]"
               >
                 <span
-                  class="grid h-5 w-5 place-items-center rounded-md bg-[var(--accent-soft)] text-[10px] text-[var(--accent)]"
+                  class="grid h-5 w-5 place-items-center rounded-md bg-[var(--accent-soft)] text-[9px] font-black text-[var(--accent)]"
                   >⌘</span
-                ><strong class="font-semibold text-[var(--text)]"
-                  >执行过程</strong
-                ><span
-                  >{{ message.activities.length }} 步 ·
-                  {{ completedCount(message.activities) }} 已完成</span
+                ><span class="min-w-0">
+                  <strong class="block text-[11px] font-semibold leading-4 text-[var(--text)]"
+                    >执行过程</strong
+                  ><span class="block text-[10px] leading-3.5"
+                    >{{ message.activities.length }} 步 ·
+                    {{ completedCount(message.activities) }} 已完成<span v-if="elapsedLabel(message.elapsedMs)"> · 耗时 {{ elapsedLabel(message.elapsedMs) }}</span></span
+                  ></span
                 ><span
                   v-if="
                     message.activities.some((item) => item.status === 'running')
                   "
-                  class="ml-auto text-[var(--accent)]"
-                  >运行中</span
-                ><span
-                  v-else-if="
-                    message.activities.some((item) => item.status === 'failed')
-                  "
-                  class="ml-auto text-rose-600"
-                  >需要处理</span
-                ><span v-else class="ml-auto text-emerald-600"
-                  >已完成 · 查看详情</span
+                  :class="[
+                    'ml-auto rounded-full px-2 py-0.5 text-[9px] font-semibold',
+                    activityOutcome(message).tone === 'accent'
+                      ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : activityOutcome(message).tone === 'danger'
+                        ? 'bg-rose-500/10 text-rose-600'
+                        : activityOutcome(message).tone === 'warn'
+                          ? 'bg-amber-500/10 text-amber-700'
+                          : 'bg-emerald-500/10 text-emerald-600',
+                  ]"
+                  >{{ activityOutcome(message).label }}</span
                 ><span class="transition-transform group-open:rotate-180"
                   >⌄</span
                 >
               </summary>
-              <ol class="space-y-1 border-t border-[var(--border)] p-2">
+              <ol class="space-y-0.5 border-t border-[var(--border)] p-1">
                 <li
                   v-for="(activity, index) in message.activities"
                   :key="`${activity.toolName}-${index}`"
                   :class="[
-                    'rounded-lg px-2.5 py-2',
+                    'relative overflow-hidden rounded-md border px-1.5 py-1 shadow-sm transition-all',
                     activity.status === 'running'
-                      ? 'bg-[var(--accent-soft)]'
+                      ? 'border-[var(--accent)]/20 bg-[var(--accent-soft)]/55'
                       : activity.status === 'failed'
-                        ? 'bg-rose-500/10'
-                        : 'bg-emerald-500/5',
+                        ? 'border-rose-500/20 bg-rose-500/5'
+                        : 'border-emerald-500/15 bg-emerald-500/5',
                   ]"
                 >
-                  <div class="flex items-center justify-between gap-3">
-                    <strong class="font-medium">{{
-                      displayTool(activity)
-                    }}</strong
-                    ><span
-                      :class="
-                        activity.status === 'failed'
-                          ? 'text-rose-600'
-                          : activity.status === 'running'
-                            ? 'text-[var(--accent)]'
-                            : 'text-emerald-600'
-                      "
-                      >{{ stateLabel(activity) }}</span
-                    >
+                  <div class="flex items-start gap-1">
+                    <span
+                      :class="[
+                        'grid h-4 w-4 shrink-0 place-items-center rounded text-[8px] font-black',
+                        activity.status === 'running'
+                          ? 'bg-[var(--accent)] text-white'
+                          : activity.status === 'failed'
+                            ? 'bg-rose-500 text-white'
+                            : 'bg-emerald-500 text-white',
+                      ]"
+                    >{{ String(index + 1).padStart(2, '0') }}</span>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center justify-between gap-2">
+                        <strong class="text-[10px] font-medium leading-4 tracking-[0.01em]">{{
+                          displayTool(activity)
+                        }}</strong
+                        ><span
+                          :class="[
+                            'shrink-0 rounded-full px-1.5 py-0 text-[8px] font-semibold',
+                            activity.status === 'failed'
+                              ? 'bg-rose-500/10 text-rose-600'
+                              : activity.status === 'running'
+                                ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                                : 'bg-emerald-500/10 text-emerald-600',
+                          ]"
+                          >{{ stateLabel(activity) }}</span
+                        >
+                      </div>
+                      <p class="mt-0.5 break-words text-[10px] leading-3.5 text-[var(--muted)]">
+                        {{ activity.summary }}
+                      </p>
+                    </div>
                   </div>
-                  <p class="mt-1 break-words leading-5 text-[var(--muted)]">
-                    {{ activity.summary }}
-                  </p>
                 </li>
               </ol>
             </details>

@@ -9,6 +9,7 @@ import { employeeDisplayName } from '../../app/employees';
 import ProviderInstancesEditor from './ProviderInstancesEditor.vue';
 import EnvironmentSettingsCard from './EnvironmentSettingsCard.vue';
 import ConfiguredModelsEditor from './ConfiguredModelsEditor.vue';
+import LocalEmbeddingSettingsCard from './LocalEmbeddingSettingsCard.vue';
 import UsageStatsPanel from './UsageStatsPanel.vue';
 import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
@@ -221,12 +222,12 @@ function toggleEnabledEngine(id: 'pi' | 'agentscope' | 'dsh') {
 
 async function saveRuntimeSettings() {
   try {
-    const enabled = runtimeSettings.value.enabledEngines.length
+    const enabled: Array<'pi' | 'agentscope' | 'dsh'> = runtimeSettings.value.enabledEngines.length
       ? runtimeSettings.value.enabledEngines
-      : ['pi'];
-    const defaultEngine = enabled.includes(runtimeSettings.value.defaultEngine)
+      : ['pi' as const];
+    const defaultEngine: 'pi' | 'agentscope' | 'dsh' = enabled.includes(runtimeSettings.value.defaultEngine)
       ? runtimeSettings.value.defaultEngine
-      : enabled[0];
+      : (enabled[0] ?? 'pi');
     const payload = {
       sidecarPoolSize: Math.max(1, Number(runtimeSettings.value.sidecarPoolSize) || 1),
       sidecarSharedMaxRuns: Math.max(1, Number(runtimeSettings.value.sidecarSharedMaxRuns) || 8),
@@ -241,7 +242,7 @@ async function saveRuntimeSettings() {
     };
     runtimeSettings.value.sidecarPoolSize = Math.max(1, Number(saved.sidecarPoolSize) || payload.sidecarPoolSize);
     runtimeSettings.value.sidecarSharedMaxRuns = Math.max(1, Number(saved.sidecarSharedMaxRuns) || payload.sidecarSharedMaxRuns);
-    const savedEnabled = Array.isArray(saved.enabledEngines)
+    const savedEnabled: Array<'pi' | 'agentscope' | 'dsh'> = Array.isArray(saved.enabledEngines)
       ? saved.enabledEngines
         .map((id) => String(id).trim().toLowerCase())
         .filter((id): id is 'pi' | 'agentscope' | 'dsh' => id === 'pi' || id === 'agentscope' || id === 'dsh')
@@ -604,6 +605,9 @@ function handleDefaultEmployeeChange(event: Event) {
             保存并立即生效
           </button>
         </div>
+      </div>
+      <div class="mt-5">
+        <LocalEmbeddingSettingsCard />
       </div>
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">

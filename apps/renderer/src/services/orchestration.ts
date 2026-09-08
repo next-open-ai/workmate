@@ -76,6 +76,7 @@ export interface ServerRunRecord {
   attemptNo: number;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting-approval';
   error?: string;
+  engine?: 'pi' | 'agentscope' | 'dsh';
   startedAt: number;
   finishedAt?: number;
   transcript: string;
@@ -277,6 +278,7 @@ export interface OrcEvent {
   text?: string;
   provider?: string;
   attemptNo?: number;
+  engine?: 'pi' | 'agentscope' | 'dsh';
   activity?: ServerRunActivity;
   approval?: ServerRunApproval;
   artifact?: { path: string };

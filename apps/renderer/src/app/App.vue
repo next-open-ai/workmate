@@ -166,10 +166,9 @@ async function setupEnvironmentCheck() {
     // 安装后首次启动无论如何都执行一次环境检查；之后遵循“每次启动检查”开关。
     const firstRun = !(await readStored('env.first-run-done'));
     if (firstRun) await writeStored('env.first-run-done', '1');
-    // 缺省为“每次启动检查”：从未设置过时显式落为 '1'，不覆盖用户已关闭('0')的选择。
+    // 缺省不在每次启动时检查；仅产品首次启动强制检查一次。
     const stored = await readStored('env.check-on-startup');
-    if (stored == null) await writeStored('env.check-on-startup', '1');
-    const startupEnabled = stored !== '0';
+    const startupEnabled = stored === '1';
     if (!firstRun && !startupEnabled) return;
     void runStartupEnvironmentCheck();
   } catch { /* 环境检查失败不应阻塞启动 */ }

@@ -8,7 +8,7 @@ import { environmentIssueCount, environmentState, environmentSummaryText } from 
  */
 const emit = defineEmits<{ openCheck: []; openEnvironment: [] }>();
 
-const startupCheckEnabled = ref(true);
+const startupCheckEnabled = ref(false);
 const issueCount = environmentIssueCount;
 const checking = computed(() => environmentState.runStatus.value === 'checking');
 const summary = computed(() => environmentState.report.value?.summary ?? null);
@@ -19,7 +19,7 @@ const lastCheckedText = computed(() => {
 const platform = computed(() => environmentState.report.value?.platform ?? '');
 
 onMounted(async () => {
-  startupCheckEnabled.value = (await readStored('env.check-on-startup')) !== '0';
+  startupCheckEnabled.value = (await readStored('env.check-on-startup')) === '1';
 });
 
 async function toggleStartupCheck() {
@@ -64,7 +64,7 @@ async function toggleStartupCheck() {
       <span>
         <strong class="block text-sm">每次启动时自动检查</strong>
         <span class="mt-0.5 block text-xs leading-relaxed text-[var(--muted)]">
-          默认开启。安装后的首次启动无论开关如何都会检查一次；关闭后，仅在设置中手动执行检查。
+          默认关闭。安装后的首次启动无论开关如何都会检查一次；若发现问题会自动弹出结果窗口。开启后，后续每次启动也会自动检查。
         </span>
       </span>
     </label>

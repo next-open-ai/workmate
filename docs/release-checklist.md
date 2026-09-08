@@ -5,6 +5,7 @@
 - [ ] `pnpm install`
 - [ ] `pnpm web:build`
 - [ ] `pnpm agentscope:smoke`
+- [ ] `pnpm dsh:regression`（dsh MCP + Skills 桥接）
 - [ ] `pnpm orch:smoke`
 - [ ] `pnpm concurrency:regression`
 - [ ] 数据目录 `~/.workmate` 可正常读写

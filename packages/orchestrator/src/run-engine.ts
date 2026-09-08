@@ -152,6 +152,19 @@ export class RunEngine {
       run.eventLog.push(event);
       if (run.eventLog.length > 500) run.eventLog.splice(0, run.eventLog.length - 500);
       switch (event.type) {
+        case 'run.started': {
+          if (event.engine) {
+            run.engine = event.engine;
+            publish({
+              type: 'run.engine',
+              runId,
+              sessionId: options.sessionId,
+              engine: event.engine,
+            });
+          }
+          scheduleCheckpoint();
+          break;
+        }
         case 'tool.started': {
           const activity: RunActivity = { toolName: event.toolName, summary: event.summary, status: 'running', at: Date.now() };
           run.activities.push(activity);
@@ -160,16 +173,46 @@ export class RunEngine {
           break;
         }
         case 'tool.completed': {
-          const activity: RunActivity = { toolName: event.toolName, summary: event.summary, status: event.ok ? 'completed' : 'failed', at: Date.now() };
-          run.activities.push(activity);
-          publish({ type: 'run.activity', runId, activity });
+          const existing = [...run.activities].reverse().find(
+            (item) => item.toolName === event.toolName && item.status === 'running',
+          );
+          // Keep the started summary (often includes args); only flip status.
+          const activity: RunActivity = existing
+            ? Object.assign(existing, {
+                status: event.ok ? 'completed' : 'failed',
+                at: Date.now(),
+              })
+            : {
+                toolName: event.toolName,
+                summary: event.summary,
+                status: event.ok ? 'completed' : 'failed',
+                at: Date.now(),
+              };
+          if (!existing) run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
           break;
         }
         case 'tool.failed': {
-          const activity: RunActivity = { toolName: event.toolName, summary: event.summary, status: 'failed', at: Date.now() };
-          run.activities.push(activity);
-          publish({ type: 'run.activity', runId, activity });
+          const existing = [...run.activities].reverse().find(
+            (item) => item.toolName === event.toolName && item.status === 'running',
+          );
+          const activity: RunActivity = existing
+            ? Object.assign(existing, {
+                status: 'failed',
+                summary: event.summary && !existing.summary.includes(event.summary)
+                  ? `${existing.summary} — ${event.summary}`
+                  : (existing.summary || event.summary),
+                at: Date.now(),
+              })
+            : {
+                toolName: event.toolName,
+                summary: event.summary,
+                status: 'failed',
+                at: Date.now(),
+              };
+          if (!existing) run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
           break;
         }
@@ -326,6 +369,19 @@ export class RunEngine {
     const pending = run.approvals.filter((approval) => approval.status === 'pending');
     if (run.status === 'completed' && pending.length > 0) {
       run.status = 'waiting-approval';
+    }
+    // Close any activity rows that never received tool.completed (lost events / parallel same-name).
+    for (const activity of run.activities) {
+      if (activity.status !== 'running') continue;
+      if (run.status === 'completed' || run.status === 'waiting-approval') {
+        activity.status = 'completed';
+        activity.summary = activity.summary.includes('完成') ? activity.summary : `${activity.summary}（已完成）`;
+      } else {
+        activity.status = 'failed';
+        activity.summary = activity.summary.includes('中止') ? activity.summary : `${activity.summary}（已中止）`;
+      }
+      activity.at = Date.now();
+      publish({ type: 'run.activity', runId, activity: { ...activity } });
     }
     run.finishedAt = Date.now();
     await this.save(run);

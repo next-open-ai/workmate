@@ -1,28 +1,145 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { McpConnectionRuntime, AgentSkillRuntime } from '@workmate/contracts';
 import type { WorkmateDshModelRoute } from './model-route.js';
 import { WORKMATE_DSH_API_KEY_ENV, WORKMATE_DSH_PROVIDER_ROUTE } from './model-route.js';
 
 function yamlString(value: string): string {
-  // Prefer JSON encoding so special chars / unicode stay valid YAML scalars.
   return JSON.stringify(value);
+}
+
+function yamlBlock(indent: string, record: Record<string, string>): string[] {
+  const keys = Object.keys(record);
+  if (!keys.length) return [`${indent}{}`];
+  return keys.map((key) => `${indent}${key}: ${yamlString(record[key]!)}`);
+}
+
+function sanitizeServerName(raw: string, used: Set<string>): string {
+  let base = String(raw || 'mcp')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+  if (!base || !/^[A-Za-z0-9_]/.test(base)) base = `mcp_${base}`.slice(0, 32);
+  if (!base) base = 'mcp';
+  let name = base;
+  let n = 2;
+  while (used.has(name)) {
+    const suffix = `_${n}`;
+    name = `${base.slice(0, Math.max(1, 32 - suffix.length))}${suffix}`;
+    n += 1;
+  }
+  used.add(name);
+  return name;
+}
+
+export type WorkmateDshCordisOptions = {
+  route: WorkmateDshModelRoute;
+  mcpConnections?: McpConnectionRuntime[];
+  /** When true, enable dsh skill stack (filesystem under DSH_CWD/.agents/skills). */
+  skillsEnabled?: boolean;
+  /** Absolute custom skill dirs (usually materialize root). */
+  customSkillDirs?: string[];
+  mcpToolTimeoutMs?: number;
+};
+
+function buildMcpPluginLines(
+  connections: McpConnectionRuntime[] | undefined,
+  toolTimeoutMs: number,
+): string[] {
+  const enabled = (connections ?? []).filter((item) => item.enabled !== false).slice(0, 12);
+  if (!enabled.length) return [];
+  const used = new Set<string>();
+  const lines: string[] = [];
+
+  for (const conn of enabled) {
+    const serverName = sanitizeServerName(conn.id || conn.name, used);
+    const pluginId = `mcp-${serverName}`.slice(0, 48);
+
+    if (conn.transport === 'stdio') {
+      lines.push(
+        `- id: ${pluginId}`,
+        "  name: '@deepseek-ai/dsh-mcp-client'",
+        '  config:',
+        '    transport: stdio',
+        `    serverName: ${yamlString(serverName)}`,
+        `    command: ${yamlString(conn.command)}`,
+        ...(conn.args?.length
+          ? ['    args:', ...conn.args.map((arg) => `      - ${yamlString(arg)}`)]
+          : ['    args: []']),
+        '    env:',
+        ...yamlBlock('      ', conn.env ?? {}),
+        `    cwd: ${yamlString(conn.cwd || '')}`,
+        `    toolCallTimeoutMs: ${toolTimeoutMs}`,
+        // Block cordis activation until tools/list succeeds so the first LLM
+        // turn already sees mcp__* in the function schema (avoids bash fallback).
+        '    failOnStartupError: true',
+        '',
+      );
+      continue;
+    }
+
+    // Workmate http/sse → dsh streamable-http (best effort for SSE endpoints).
+    const headers: Record<string, string> = {};
+    if (conn.apiKey?.trim()) headers.Authorization = `Bearer ${conn.apiKey.trim()}`;
+    lines.push(
+      `- id: ${pluginId}`,
+      "  name: '@deepseek-ai/dsh-mcp-client'",
+      '  config:',
+      '    transport: streamable-http',
+      `    serverName: ${yamlString(serverName)}`,
+      `    url: ${yamlString(conn.url)}`,
+      '    headers:',
+      ...yamlBlock('      ', headers),
+      `    toolCallTimeoutMs: ${toolTimeoutMs}`,
+      '    failOnStartupError: true',
+      '',
+    );
+  }
+
+  return lines;
 }
 
 /**
  * Build a jsonrpc-agent-compatible cordis.yml that uses llm-pi-ai with one
- * Workmate-declared provider route (instead of dsh-llm-deepseek only).
+ * Workmate-declared provider route, optional MCP clients, and optional skills.
  *
- * IMPORTANT: `sdk-jsonrpc-server` must be last. It opens stdin as soon as it
- * applies; if initialize arrives before llm-pi-ai registers `workmate`, the
- * SDK rejects with `no adapter registered for provider "workmate"`.
- * (The stock deepseek cordis can put the server first because initialize
- * lazily mounts LlmDeepSeek only for `deepseek-official`.)
+ * `sdk-jsonrpc-server` stays last so stdin opens after adapters/tools register.
  */
-export function buildWorkmateDshCordisYaml(route: WorkmateDshModelRoute): string {
+export function buildWorkmateDshCordisYaml(options: WorkmateDshCordisOptions | WorkmateDshModelRoute): string {
+  const opts: WorkmateDshCordisOptions =
+    options && typeof options === 'object' && 'route' in options && (options as WorkmateDshCordisOptions).route
+      ? (options as WorkmateDshCordisOptions)
+      : { route: options as WorkmateDshModelRoute };
+  const route = opts.route;
+  const skillsEnabled = Boolean(opts.skillsEnabled);
+  const customDirs = (opts.customSkillDirs ?? []).filter(Boolean);
+  const toolTimeoutMs = Math.min(300_000, Math.max(3_000, opts.mcpToolTimeoutMs ?? 60_000));
+  const mcpLines = buildMcpPluginLines(opts.mcpConnections, toolTimeoutMs);
+
+  const skillBlock = skillsEnabled
+    ? [
+        '    skills:',
+        '      enabled: true',
+        '      filesystem:',
+        '        includeDefaultRoots: true',
+        '        watch: false',
+        ...(customDirs.length
+          ? [
+              '        customSkillDirs:',
+              ...customDirs.map((dir) => `          - ${yamlString(dir)}`),
+            ]
+          : ['        customSkillDirs: []']),
+      ]
+    : [
+        '    skills:',
+        '      enabled: false',
+      ];
+
   const lines = [
     '# Generated by Workmate — do not edit by hand.',
     '# stdout is reserved for JSON-RPC; no console logger / terminal UI.',
-    '# llm-pi-ai and tools load BEFORE sdk-jsonrpc-server (see note above).',
+    '# llm / tools / mcp load BEFORE sdk-jsonrpc-server.',
     '',
     '- id: llm-pi-ai',
     "  name: '@deepseek-ai/dsh-llm-pi-ai'",
@@ -52,8 +169,7 @@ export function buildWorkmateDshCordisYaml(route: WorkmateDshModelRoute): string
     '  config:',
     "    persona: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a coding agent.'",
     '    workspaceContext: false',
-    '    skills:',
-    '      enabled: false',
+    ...skillBlock,
     '    toolBash:',
     '      enableRunInBackground: false',
     '    toolJobs: false',
@@ -109,7 +225,8 @@ export function buildWorkmateDshCordisYaml(route: WorkmateDshModelRoute): string
     '    maxTokens: 8192',
     '    compactionRetries: 1',
     '',
-    '# Open stdin last — only after provider routes exist.',
+    ...mcpLines,
+    '# Open stdin last — only after provider/tools/mcp exist.',
     '- id: sdk-jsonrpc-server',
     "  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'",
     '  config:',
@@ -120,9 +237,15 @@ export function buildWorkmateDshCordisYaml(route: WorkmateDshModelRoute): string
 }
 
 /** Write cordis next to the run workspace; return absolute path. */
-export function writeWorkmateDshCordis(workspaceDir: string, route: WorkmateDshModelRoute): string {
+export function writeWorkmateDshCordis(
+  workspaceDir: string,
+  options: WorkmateDshCordisOptions | WorkmateDshModelRoute,
+): string {
   const file = path.join(workspaceDir, '.workmate-dsh.cordis.yml');
   fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.writeFileSync(file, buildWorkmateDshCordisYaml(route), 'utf8');
+  fs.writeFileSync(file, buildWorkmateDshCordisYaml(options), 'utf8');
   return file;
 }
+
+/** @deprecated use WorkmateDshCordisOptions — kept for typed callers that only pass route. */
+export type { AgentSkillRuntime };

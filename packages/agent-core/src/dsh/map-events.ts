@@ -14,11 +14,43 @@ function textFromContentBlocks(content: unknown): string {
   return parts.join('');
 }
 
+/** Correlates dsh tool/call → tool/result (result events often omit `name`). */
+export type DshEventMapContext = {
+  toolNamesByCallId: Map<string, string>;
+};
+
+export function createDshEventMapContext(): DshEventMapContext {
+  return { toolNamesByCallId: new Map() };
+}
+
+function extractCallId(data: Record<string, unknown>, message: Record<string, unknown> | null): string {
+  if (typeof data.callId === 'string' && data.callId) return data.callId;
+  const source = message && isRecord(message.source) ? message.source : null;
+  if (source && typeof source.callId === 'string' && source.callId) return source.callId;
+  if (Array.isArray(message?.content)) {
+    for (const block of message.content) {
+      if (!isRecord(block)) continue;
+      if (typeof block.toolCallId === 'string' && block.toolCallId) return block.toolCallId;
+    }
+  }
+  return '';
+}
+
+function toolResultFailed(data: Record<string, unknown>, message: Record<string, unknown> | null): boolean {
+  if (data.error) return true;
+  if (!Array.isArray(message?.content)) return false;
+  return message.content.some((block) => isRecord(block) && block.isError === true);
+}
+
 /**
  * Map one DeepSeek Harness session-log event onto zero or more Workmate AgentEvents.
  * Only emits user-visible text deltas (not reasoning) and tool activity.
  */
-export function mapDshSessionEvent(runId: string, event: unknown): AgentEvent[] {
+export function mapDshSessionEvent(
+  runId: string,
+  event: unknown,
+  ctx: DshEventMapContext = createDshEventMapContext(),
+): AgentEvent[] {
   if (!isRecord(event) || typeof event.type !== 'string') return [];
   const data = isRecord(event.data) ? event.data : {};
   const out: AgentEvent[] = [];
@@ -32,14 +64,10 @@ export function mapDshSessionEvent(runId: string, event: unknown): AgentEvent[] 
       break;
     }
     case 'assistant/message': {
-      // Prefer live chunks; use assembled message only as a fallback marker via empty skip.
-      // If the stream had no text-delta (some adapters), emit full text once.
       const message = isRecord(data.message) ? data.message : null;
       const text = textFromContentBlocks(message?.content);
       if (text) {
-        // Caller tracks whether deltas already arrived; we still emit here only when
-        // tagged — stream.ts decides based on emittedText flag by re-checking.
-        out.push({ type: 'message.delta', runId, text: `\u0000${text}` }); // sentinel prefix for stream.ts
+        out.push({ type: 'message.delta', runId, text: `\u0000${text}` });
       }
       if (isRecord(data.usage)) {
         const usage = data.usage;
@@ -63,6 +91,8 @@ export function mapDshSessionEvent(runId: string, event: unknown): AgentEvent[] 
     }
     case 'tool/call': {
       const name = String(data.name || 'tool');
+      const callId = extractCallId(data, null);
+      if (callId) ctx.toolNamesByCallId.set(callId, name);
       const args = String(data.arguments || '').slice(0, 200);
       out.push({
         type: 'tool.started',
@@ -74,16 +104,23 @@ export function mapDshSessionEvent(runId: string, event: unknown): AgentEvent[] 
     }
     case 'tool/result': {
       const message = isRecord(data.message) ? data.message : null;
-      const name = String(message?.name || data.name || 'tool');
-      const failed = Boolean(data.error);
+      const callId = extractCallId(data, message);
+      const name = String(
+        message?.name
+        || data.name
+        || (callId ? ctx.toolNamesByCallId.get(callId) : undefined)
+        || 'tool',
+      );
+      const failed = toolResultFailed(data, message);
       const summary = failed
-        ? String((isRecord(data.error) && data.error.name) || 'tool failed')
+        ? String((isRecord(data.error) && data.error.name) || `${name} failed`)
         : `${name} completed`;
       if (failed) {
         out.push({ type: 'tool.failed', runId, toolName: name, summary });
       } else {
         out.push({ type: 'tool.completed', runId, toolName: name, summary, ok: true });
       }
+      if (callId) ctx.toolNamesByCallId.delete(callId);
       break;
     }
     case 'turn/end': {

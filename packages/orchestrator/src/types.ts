@@ -189,6 +189,8 @@ export interface RunRecord {
   model?: RunModelInfo;
   /** Token consumption for this execution (input/output/cache/…). */
   usage?: RunUsage;
+  /** Resolved execution backend (pi / agentscope / dsh). */
+  engine?: 'pi' | 'agentscope' | 'dsh';
 }
 
 /* ------------------------------------------------------------------ *

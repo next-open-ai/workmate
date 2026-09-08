@@ -47,6 +47,80 @@ interface Window {
     saveChannelSettings(payload: unknown): Promise<{ ok: boolean; meta: Record<string, unknown> }>;
     gatewayStatus(): Promise<{ running: boolean; pid: number | null }>;
     gatewayRestart(): Promise<{ running: boolean; pid: number | null }>;
+    getLocalEmbeddingStatus(): Promise<{
+      enabled: boolean;
+      manifest: {
+        runtimeId: string;
+        version: string;
+        providerName: string;
+        providerType: 'openai-compatible';
+        modelId: string;
+        dimension: number;
+        normalize: boolean;
+        sizeBytes: number;
+        platforms: string[];
+        platform: string;
+        supported: boolean;
+      };
+      runtime: { root: string; modelDir: string; logsDir: string };
+      settings: {
+        autoRestart: boolean;
+        backendUrl: string;
+        backendModel: string;
+        backendApiKey: string;
+        updatedAt: number;
+      };
+      providerDraft: {
+        suggestedProviderName: string;
+        providerType: 'openai-compatible';
+        baseUrl: string;
+        embeddingModel: string;
+        meta: {
+          dimension: number;
+          normalize: boolean;
+        };
+      };
+      state: {
+        enabled: boolean;
+        runtimeId: string;
+        version: string;
+        downloadStatus: 'missing' | 'ready';
+        serviceStatus: 'stopped' | 'degraded' | 'running' | 'failed';
+        endpoint: string;
+        port: number | null;
+        pid: number | null;
+        checkedAt: number;
+        lastError: string;
+        updatedAt: number;
+        backendConfigured?: boolean;
+        backendUrl?: string;
+        backendModel?: string;
+      };
+    }>;
+    getLocalEmbeddingSettings(): Promise<{
+      autoRestart: boolean;
+      backendUrl: string;
+      backendModel: string;
+      backendApiKey: string;
+      updatedAt: number;
+    }>;
+    saveLocalEmbeddingSettings(value: { autoRestart?: boolean; backendUrl?: string; backendModel?: string; backendApiKey?: string }): Promise<{
+      autoRestart: boolean;
+      backendUrl: string;
+      backendModel: string;
+      backendApiKey: string;
+      updatedAt: number;
+    }>;
+    setLocalEmbeddingEnabled(enabled: boolean): Promise<{
+      ok: boolean;
+      enabled: boolean;
+      status: Awaited<ReturnType<NonNullable<Window['workmateDesktop']>['getLocalEmbeddingStatus']>>;
+    }>;
+    restartLocalEmbedding(): Promise<{
+      ok: boolean;
+      message: string;
+      status: Awaited<ReturnType<NonNullable<Window['workmateDesktop']>['getLocalEmbeddingStatus']>>;
+    }>;
     checkEnvironment(): Promise<EnvCheckReport>;
     onEnvCheckProgress(callback: (payload: EnvCheckProgressPayload) => void): () => void;
   };

@@ -2,7 +2,7 @@ import { ref } from 'vue';
 import type { SearchProviderId } from './search-config';
 import type { KnowledgeProviderId } from './kb-config';
 import { knowledgeProviderIds } from './kb-config';
-import { readStored, writeStored } from './storage';
+import { getStorageNamespace, readStored, writeStored } from './storage';
 
 export type EmployeeSearchMode = 'inherit' | 'auto' | 'off' | 'llm-builtin' | SearchProviderId;
 /** Which knowledge provider this employee uses; then pick bases under that provider. */
@@ -57,7 +57,8 @@ export const defaultEmployeeRuntimePrefs = (): EmployeeRuntimePrefs => ({
 
 const key = 'workspace.employee-runtime-prefs';
 const prefsByEmployee = ref<Record<string, EmployeeRuntimePrefs>>({});
-const loaded = ref(false);
+/** Tracks which auth namespace the in-memory prefs were loaded for (`null` = logged out). */
+const loadedForNamespace = ref<string | null | undefined>(undefined);
 
 function clampSteps(value: unknown) {
   const n = Number(value);
@@ -123,14 +124,16 @@ function normalizeAll(value: unknown): Record<string, EmployeeRuntimePrefs> {
 }
 
 export function useEmployeeRuntimePrefs() {
-  const load = async () => {
-    if (loaded.value) return;
+  const load = async (opts?: { force?: boolean }) => {
+    const ns = getStorageNamespace();
+    // Avoid sticky empty loads from before auth sets `user:<id>` namespace.
+    if (!opts?.force && loadedForNamespace.value === ns) return;
     try {
       prefsByEmployee.value = normalizeAll(JSON.parse((await readStored(key)) || '{}'));
     } catch {
       prefsByEmployee.value = {};
     }
-    loaded.value = true;
+    loadedForNamespace.value = ns;
   };
 
   const persist = async () => {

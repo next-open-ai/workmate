@@ -16,6 +16,7 @@ import {
   bailianOpenApiUpdateIndex,
   bailianOpenApiUploadDocument,
 } from './bailian-openapi.js';
+import { buildEmbeddingSignature, embedOpenAiCompatible } from './embedding-http.js';
 
 export type KnowledgeHit = {
   id: string;
@@ -86,29 +87,13 @@ function resolveEmbedConfig(kb: KnowledgeBaseRuntime, model?: ModelConfig): Embe
   const baseUrl = (kb.embeddingBaseUrl || model?.embeddingBaseUrl || model?.baseUrl || '').replace(/\/$/, '');
   const apiKey = kb.embeddingApiKey || model?.embeddingApiKey || model?.apiKey || '';
   if (!baseUrl || !embeddingModel) return null;
-  if (!apiKey.trim() && !/ollama/i.test(baseUrl) && model?.provider !== 'ollama') return null;
-  return { baseUrl, apiKey: apiKey || 'ollama', model: embeddingModel };
+  if (!apiKey.trim() && !/ollama/i.test(baseUrl) && model?.provider !== 'ollama' && model?.provider !== 'openai-compatible') return null;
+  return { baseUrl, apiKey: apiKey.trim(), model: embeddingModel };
 }
 
 async function embedTexts(config: EmbedConfig, inputs: string[]): Promise<number[][]> {
-  const url = `${config.baseUrl}/embeddings`;
-  const response = await timeout(fetch(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${config.apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ model: config.model, input: inputs }),
-  }));
-  if (!response.ok) throw new Error(`Embedding provider returned HTTP ${response.status}.`);
-  const data = await response.json() as { data?: Array<{ embedding?: number[] }> };
-  const rows = Array.isArray(data?.data) ? data.data : [];
-  if (rows.length !== inputs.length) throw new Error('Embedding response size mismatch.');
-  return rows.map((row) => {
-    const vector = row.embedding;
-    if (!Array.isArray(vector) || !vector.length) throw new Error('Embedding vector missing.');
-    return vector.map(Number);
-  });
+  const result = await embedOpenAiCompatible(config, inputs);
+  return result.vectors;
 }
 
 function cosine(a: number[], b: number[]) {
@@ -380,6 +365,16 @@ export async function ingestLocalKnowledge(input: {
     backend: usedLance ? 'lancedb' : 'file-fallback',
     dataDir,
     status: 'ready' as const,
+    indexState: {
+      status: 'ready' as const,
+      signature: buildEmbeddingSignature({
+        model: embed.model,
+        dimension: rows[0]?.vector.length || input.kb.embeddingMeta?.dimension,
+        normalize: input.kb.embeddingMeta?.normalize,
+      }),
+      lastBuildAt: createdAt,
+      lastBuildModel: embed.model,
+    },
   };
 }
 

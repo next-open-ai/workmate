@@ -8,7 +8,7 @@ import {
   type KnowledgeBase,
   type KnowledgeProviderId,
 } from '../../app/kb-config';
-import { toModelPayload, useModelConfig } from '../../app/model-config';
+import { resolveActiveEmbeddingConfig, toModelPayload, useModelConfig } from '../../app/model-config';
 import { useNotify } from '../../app/notify';
 import {
   deleteKnowledgeChunk,
@@ -29,8 +29,8 @@ import {
 const emit = defineEmits<{ openSettings: [] }>();
 const { t } = useI18n();
 const notify = useNotify();
-const { bases, load, upsert, remove, setEnabled, setDocumentCount, isReady, enabledProviders, isProviderEnabled, providerDefaults, resolveCredentials } = useKnowledgeConfig();
-const { activeConfig, configured, load: loadModels } = useModelConfig();
+const { bases, load, upsert, remove, setEnabled, setDocumentCount, setIndexState, isReady, enabledProviders, isProviderEnabled, providerDefaults, resolveCredentials } = useKnowledgeConfig();
+const { activeConfig, configured, settings: modelSettings, load: loadModels } = useModelConfig();
 
 type DetailTab = 'documents' | 'chunks' | 'search' | 'settings';
 type ProviderFilter = 'all' | KnowledgeProviderId;
@@ -98,6 +98,7 @@ const filteredBases = computed(() => {
 
 const selected = computed(() => bases.value.find((item) => item.id === selectedId.value) ?? null);
 const isLocal = computed(() => selected.value?.provider === 'lancedb');
+const systemEmbedding = computed(() => resolveActiveEmbeddingConfig(modelSettings.value));
 /** Providers that support document/chunk CRUD + upload through the unified knowledge API. */
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
@@ -157,7 +158,27 @@ function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
     embeddingBaseUrl: item.embeddingBaseUrl || undefined,
     embeddingApiKey: item.embeddingApiKey || undefined,
     embeddingModel: item.embeddingModel || undefined,
+    embeddingMeta: item.embeddingMeta,
+    indexState: item.indexState,
   };
+}
+
+function indexStatusLabel(item: KnowledgeBase) {
+  switch (item.indexState?.status) {
+    case 'stale': return 'Stale';
+    case 'rebuilding': return 'Rebuilding';
+    case 'ready': return 'Ready';
+    default: return '';
+  }
+}
+
+function indexStatusClass(item: KnowledgeBase) {
+  switch (item.indexState?.status) {
+    case 'stale': return 'bg-amber-500/15 text-amber-700';
+    case 'rebuilding': return 'bg-sky-500/15 text-sky-700';
+    case 'ready': return 'bg-emerald-500/15 text-emerald-700';
+    default: return 'bg-[var(--surface-muted)] text-[var(--muted)]';
+  }
 }
 
 function formatTime(value: number) {
@@ -206,6 +227,9 @@ function applyProviderDefaults(provider: KnowledgeProviderId) {
   draft.value.workspaceId = '';
   draft.value.accessKeyId = '';
   draft.value.accessKeySecret = '';
+  if ((provider === 'lancedb' || provider === 'qdrant' || provider === 'pinecone') && !draft.value.embeddingModel.trim()) {
+    draft.value.embeddingModel = systemEmbedding.value?.modelId || '';
+  }
 }
 
 function onDraftProviderChange() {
@@ -240,6 +264,15 @@ function closeForm() {
 async function save() {
   saving.value = true;
   try {
+    const existing = editingId.value
+      ? bases.value.find((item) => item.id === editingId.value)
+      : undefined;
+    const inheritedEmbedding = (draft.value.provider === 'lancedb' || draft.value.provider === 'qdrant' || draft.value.provider === 'pinecone')
+      ? systemEmbedding.value
+      : null;
+    const manualEmbeddingModel = draft.value.embeddingModel.trim();
+    const resolvedEmbeddingModel = manualEmbeddingModel || inheritedEmbedding?.modelId || '';
+    const keepExistingEmbedding = Boolean(existing && manualEmbeddingModel && existing.embeddingModel === manualEmbeddingModel);
     const saved = await upsert({
       id: editingId.value || undefined,
       name: draft.value.name,
@@ -253,7 +286,16 @@ async function save() {
       workspaceId: draft.value.workspaceId,
       accessKeyId: draft.value.accessKeyId,
       accessKeySecret: draft.value.accessKeySecret,
-      embeddingModel: draft.value.embeddingModel,
+      embeddingBaseUrl: keepExistingEmbedding
+        ? (existing?.embeddingBaseUrl || '')
+        : (!manualEmbeddingModel ? (inheritedEmbedding?.baseUrl || '') : ''),
+      embeddingApiKey: keepExistingEmbedding
+        ? (existing?.embeddingApiKey || '')
+        : (!manualEmbeddingModel ? (inheritedEmbedding?.apiKey || '') : ''),
+      embeddingModel: resolvedEmbeddingModel,
+      embeddingMeta: keepExistingEmbedding
+        ? existing?.embeddingMeta
+        : (!manualEmbeddingModel ? inheritedEmbedding?.meta : undefined),
       documentCount: editingId.value
         ? bases.value.find((item) => item.id === editingId.value)?.documentCount
         : 0,
@@ -416,6 +458,9 @@ async function runIngest() {
       lastJobId.value = result.jobId;
       lastJobStatus.value = result.status || 'PENDING';
       await pollBailianJob(result.jobId);
+    }
+    if (result.indexState) {
+      await setIndexState(selected.value.id, result.indexState);
     }
     await setDocumentCount(selected.value.id, (selected.value.documentCount || 0) + Math.max(1, result.chunks || 0));
     notify.success(result.jobId ? 'notify.kbIngestQueued' : 'notify.kbIngested');
@@ -603,6 +648,17 @@ function summaryLine(item: KnowledgeBase) {
   if (item.provider === 'lancedb') return t('knowledge.localSummary', { count: item.documentCount || 0 });
   return [item.baseUrl, item.externalId].filter(Boolean).join(' · ') || item.provider;
 }
+
+function embeddingSourceSummary(item: KnowledgeBase) {
+  if (item.embeddingModel?.trim()) {
+    if (item.embeddingBaseUrl?.trim()) return `${item.embeddingModel} · ${item.embeddingBaseUrl}`;
+    return item.embeddingModel;
+  }
+  if (systemEmbedding.value?.modelId) {
+    return `${systemEmbedding.value.modelId}（系统默认）`;
+  }
+  return '未配置';
+}
 </script>
 
 <template>
@@ -667,6 +723,9 @@ function summaryLine(item: KnowledgeBase) {
                   <span :class="['rounded-full px-2 py-0.5 text-[10px] font-bold', isReady(item) ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'bg-[var(--surface-muted)] text-[var(--muted)]']">
                     {{ isReady(item) ? t('knowledge.ready') : t('knowledge.notReady') }}
                   </span>
+                  <span v-if="item.indexState?.status" :class="['rounded-full px-2 py-0.5 text-[10px] font-bold', indexStatusClass(item)]">
+                    {{ indexStatusLabel(item) }}
+                  </span>
                 </div>
                 <p class="mt-1 text-xs text-[var(--muted)]">{{ meta(item.provider).label }}</p>
               </div>
@@ -677,6 +736,9 @@ function summaryLine(item: KnowledgeBase) {
             </div>
             <p class="mt-3 line-clamp-2 text-sm text-[var(--muted)]">{{ item.description || summaryLine(item) }}</p>
             <p class="mt-2 text-[11px] text-[var(--muted)]">{{ summaryLine(item) }}</p>
+            <p v-if="item.provider === 'lancedb' || item.provider === 'qdrant' || item.provider === 'pinecone'" class="mt-1 text-[11px] text-[var(--muted)]">
+              Embedding: {{ embeddingSourceSummary(item) }}
+            </p>
             <div class="mt-5 flex flex-wrap gap-2">
               <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="selectedId = item.id">{{ t('knowledge.open') }}</button>
               <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="openEdit(item)">{{ t('knowledge.edit') }}</button>
@@ -695,6 +757,12 @@ function summaryLine(item: KnowledgeBase) {
               <p class="mt-1 text-sm text-[var(--muted)]">{{ selected.description || summaryLine(selected) }}</p>
               <p v-if="supportsManage" class="mt-2 text-xs text-[var(--muted)]">{{ t('knowledge.stats', { docs: docStats.documentCount, chunks: docStats.chunkCount, backend: docStats.backend || '—' }) }}</p>
               <p v-if="lastJobId" class="mt-1 text-[11px] text-[var(--muted)]">{{ t('knowledge.jobStatus', { id: lastJobId, status: lastJobStatus || '—' }) }}</p>
+              <p v-if="selected.indexState?.status" class="mt-1 text-[11px] text-[var(--muted)]">
+                Index status: {{ indexStatusLabel(selected) }}<span v-if="selected.indexState.signature"> · {{ selected.indexState.signature }}</span>
+              </p>
+              <p v-if="selected.provider === 'lancedb' || selected.provider === 'qdrant' || selected.provider === 'pinecone'" class="mt-1 text-[11px] text-[var(--muted)]">
+                Embedding: {{ embeddingSourceSummary(selected) }}
+              </p>
             </div>
             <div class="flex flex-wrap gap-2">
               <button v-if="supportsManage" type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" @click="openIngest">{{ t('knowledge.upload') }}</button>
@@ -824,6 +892,18 @@ function summaryLine(item: KnowledgeBase) {
               <dt class="text-[11px] font-bold uppercase tracking-wide text-[var(--muted)]">Category ID</dt>
               <dd class="mt-1 break-all font-mono text-xs">{{ selected.categoryId }}</dd>
             </div>
+            <div v-if="selected.indexState?.status" class="rounded-xl bg-[var(--surface-muted)] px-4 py-3 sm:col-span-2">
+              <dt class="text-[11px] font-bold uppercase tracking-wide text-[var(--muted)]">Index State</dt>
+              <dd class="mt-1">{{ indexStatusLabel(selected) }}</dd>
+              <dd v-if="selected.indexState.signature" class="mt-1 break-all font-mono text-xs text-[var(--muted)]">{{ selected.indexState.signature }}</dd>
+              <dd v-if="selected.indexState.lastBuildModel" class="mt-1 text-xs text-[var(--muted)]">last model: {{ selected.indexState.lastBuildModel }}</dd>
+              <dd v-if="selected.indexState.lastBuildError" class="mt-1 text-xs text-rose-600">{{ selected.indexState.lastBuildError }}</dd>
+            </div>
+            <div v-if="selected.provider === 'lancedb' || selected.provider === 'qdrant' || selected.provider === 'pinecone'" class="rounded-xl bg-[var(--surface-muted)] px-4 py-3 sm:col-span-2">
+              <dt class="text-[11px] font-bold uppercase tracking-wide text-[var(--muted)]">Embedding</dt>
+              <dd class="mt-1">{{ embeddingSourceSummary(selected) }}</dd>
+              <dd v-if="selected.embeddingMeta?.dimension" class="mt-1 text-xs text-[var(--muted)]">dimension: {{ selected.embeddingMeta.dimension }}</dd>
+            </div>
           </dl>
           <p v-if="!supportsManage" class="mt-4 rounded-xl border border-dashed border-[var(--border)] px-4 py-3 text-sm text-[var(--muted)]">{{ t('knowledge.cloudManageHint') }}</p>
           <p v-else-if="selected.provider === 'bailian' && !selected.categoryId" class="mt-4 rounded-xl border border-dashed border-[var(--border)] px-4 py-3 text-sm text-[var(--muted)]">{{ t('knowledge.bailianNeedCategory') }}</p>
@@ -885,6 +965,9 @@ function summaryLine(item: KnowledgeBase) {
             <label v-else class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.externalId') }}<input v-model="draft.externalId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('knowledge.externalIdHint')" /></label>
           </template>
           <label v-if="draft.provider === 'lancedb' || draft.provider === 'qdrant' || draft.provider === 'pinecone'" class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.embeddingModel') }}<input v-model="draft.embeddingModel" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('knowledge.embeddingModelHint')" /></label>
+          <p v-if="(draft.provider === 'lancedb' || draft.provider === 'qdrant' || draft.provider === 'pinecone') && !draft.embeddingModel.trim()" class="rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-[11px] font-normal text-[var(--muted)]">
+            {{ systemEmbedding?.modelId ? `当前将继承系统 Embedding：${systemEmbedding.modelId}${systemEmbedding.meta?.dimension ? ` · ${systemEmbedding.meta.dimension}d` : ''}` : '当前没有系统级 Embedding 默认项，建议先去设置页注册并设为默认。' }}
+          </p>
           <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
         </div>
         <div class="mt-5 flex justify-end gap-2">

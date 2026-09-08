@@ -329,6 +329,19 @@ export type KnowledgeBasePayload = {
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  embeddingMeta?: {
+    dimension?: number;
+    normalize?: boolean;
+    maxBatch?: number;
+    maxInputChars?: number;
+  };
+  indexState?: {
+    status: 'ready' | 'stale' | 'rebuilding';
+    signature?: string;
+    lastBuildAt?: number;
+    lastBuildModel?: string;
+    lastBuildError?: string;
+  };
 };
 
 export type StreamChatInput = {
@@ -473,6 +486,7 @@ export async function ingestKnowledgeDocument(input: {
     documentId?: string;
     jobId?: string;
     status?: string;
+    indexState?: KnowledgeBasePayload['indexState'];
   };
   if (!response.ok) throw new Error(body.message || `Knowledge ingest failed: ${response.status}`);
   return body as {
@@ -483,6 +497,7 @@ export async function ingestKnowledgeDocument(input: {
     documentId?: string;
     jobId?: string;
     status?: string;
+    indexState?: KnowledgeBasePayload['indexState'];
   };
 }
 
@@ -703,6 +718,51 @@ export async function testProviderConnection(input: {
   const body = await response.json().catch(() => ({})) as { ok?: boolean; message?: string };
   if (!response.ok || body.ok === false) throw new Error(body.message || `Provider test failed: ${response.status}`);
   return { ok: true as const, message: body.message || '连接成功。' };
+}
+
+export async function testEmbeddingConnection(input: {
+  type: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model: string;
+}) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/providers/test-embedding`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await response.json().catch(() => ({})) as {
+    ok?: boolean;
+    status?: 'healthy' | 'degraded' | 'unreachable' | 'unauthorized' | 'misconfigured';
+    checkedAt?: number;
+    latencyMs?: number;
+    modelReachable?: boolean;
+    message?: string;
+    code?: string | null;
+    detail?: Record<string, number>;
+  };
+  if (!response.ok || body.ok === false) {
+    const error = new Error(body.message || `Embedding provider test failed: ${response.status}`) as Error & {
+      status?: string;
+      code?: string | null;
+      detail?: Record<string, number>;
+    };
+    error.status = body.status;
+    error.code = body.code;
+    error.detail = body.detail;
+    throw error;
+  }
+  return {
+    ok: true as const,
+    status: body.status || 'healthy',
+    checkedAt: Number(body.checkedAt) || Date.now(),
+    latencyMs: Number(body.latencyMs) || 0,
+    modelReachable: Boolean(body.modelReachable),
+    message: body.message || 'Embedding 连接成功。',
+    code: body.code || null,
+    detail: body.detail || {},
+  };
 }
 
 export async function listProviderModels(input: {

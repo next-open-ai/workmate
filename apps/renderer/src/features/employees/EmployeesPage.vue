@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import type { Employee, EmployeeDraft, EmployeeId } from '../../app/workspace';
 import { useI18n } from '../../app/i18n';
-import { baselineWorkspaceSkillMeta } from '../../app/baseline-skills';
 import { useCapabilities, type PolicyMode, type SkillRecord } from '../../app/capabilities';
 import { chatEndpointLabel, useModelConfig } from '../../app/model-config';
 import { searchProviderIds, useSearchConfig } from '../../app/search-config';
@@ -717,18 +716,6 @@ watch(employeeModelSupportsBuiltinSearch, (ok) => {
             >
               {{ t('employee.skillPick') }}
             </button>
-          </div>
-
-          <div class="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/40 px-4 py-3">
-            <div class="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <strong class="text-sm">{{ t('employee.baselineSkill') }}</strong>
-                <span class="ml-2 rounded bg-[var(--accent-soft)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--accent)]">{{ t('employee.system') }}</span>
-                <p class="mt-1 text-xs text-[var(--muted)]">{{ baselineWorkspaceSkillMeta.description }}</p>
-                <p class="mt-1 text-[11px] text-[var(--muted)]">{{ t('employee.baselineSkillTier') }}</p>
-              </div>
-              <span class="text-xs font-semibold text-emerald-600">{{ t('employee.baselineSkillAlways') }}</span>
-            </div>
           </div>
 
           <p v-if="!linkedSkills.length" class="mt-4 rounded-xl border border-dashed border-[var(--border)] px-4 py-8 text-center text-sm text-[var(--muted)]">

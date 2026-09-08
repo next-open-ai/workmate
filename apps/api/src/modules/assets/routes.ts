@@ -53,7 +53,11 @@ async function database(): Promise<SqlDatabase> {
       if (!cols.has('access_scope')) db.run(`ALTER TABLE assets ADD COLUMN access_scope TEXT DEFAULT 'private'`);
       if (!cols.has('access_grants')) db.run('ALTER TABLE assets ADD COLUMN access_grants TEXT');
       db.run('CREATE INDEX IF NOT EXISTS assets_project_id ON assets(project_id)');
+      // `output/` is a runtime-only delivery boundary.  Never expose it as a
+      // user workspace folder, and keep linked project files at their natural
+      // relative location instead of under an implementation directory.
       db.run(`UPDATE assets SET workspace_relative = name WHERE workspace_relative IS NULL OR workspace_relative = ''`);
+      db.run(`UPDATE assets SET workspace_relative = substr(workspace_relative, 8) WHERE workspace_relative LIKE 'output/%'`);
       db.run(`UPDATE assets SET owner_user_id = user_id WHERE (owner_user_id IS NULL OR owner_user_id = '') AND user_id IS NOT NULL AND user_id != ''`);
       db.run(`UPDATE assets SET access_scope = 'private' WHERE access_scope IS NULL OR access_scope = ''`);
       db.run(`UPDATE assets SET access_grants = '[]' WHERE access_grants IS NULL OR access_grants = ''`);
@@ -200,10 +204,10 @@ async function archiveArtifact(value: { runId?: string; relativePath?: string; c
   const accessGrants = JSON.stringify(Array.isArray(value?.accessGrants) ? value.accessGrants : []);
   db.run(
     'INSERT INTO assets (id, name, relative_path, mime_type, size_bytes, created_at, conversation_id, employee_id, run_id, sha256, project_id, workspace_relative, org_id, owner_user_id, user_id, access_scope, access_grants) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, name, relativeAssetPath, assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, relativePath, orgId, ownerUserId, userId, accessScope, accessGrants],
+    [id, name, relativeAssetPath, assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, relativePath.replace(/^output\//, ''), orgId, ownerUserId, userId, accessScope, accessGrants],
   );
   flushDatabase(db);
-  return { id, name, relativePath: relativeAssetPath, mimeType: assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative: relativePath, orgId, ownerUserId, userId, accessScope, accessGrants: parseAccessGrants(accessGrants) };
+  return { id, name, relativePath: relativeAssetPath, mimeType: assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative: relativePath.replace(/^output\//, ''), orgId, ownerUserId, userId, accessScope, accessGrants: parseAccessGrants(accessGrants) };
 }
 
 async function linkAssetsToProject(value: { projectId?: string; assetIds?: string[]; workspacePath?: string }) {

@@ -37,19 +37,6 @@ const PRESET_DEFAULT_INSTRUCTIONS: Record<string, string> = {
     '凡任务要求「按既定设计规范」但没有提供规范/品牌/页面清单：必须采用一份文档化的默认企业规范（主/辅色、字阶、12 列栅格、断点、页面清单写入 README.md），并直接产出核心可运行页面；不得因缺品牌/规范/文案而停下澄清。只输出文字、不写文件=失败；要么写文件，要么给出精确阻塞点+唯一需要的输入。',
 };
 
-const BASELINE_WORKSPACE_SKILL_ID = 'workmate-workspace';
-const BASELINE_WORKSPACE_INSTRUCTIONS = `---
-name: workmate-workspace
-description: Workmate platform workspace harness for isolated read/write and script execution in the current run directory.
----
-
-You are using the **Workmate workspace harness** (workmate-workspace). It is always authorized for this run. Use it for artifacts that belong in the run workspace, not on arbitrary host paths.
-
-- write_workspace_file — create/replace/append text under the workspace (requires workspace-write). Keep each call small (≤6KB); split large HTML/CSS/JS into multiple files or mode "append".
-- run_workspace_script — execute a .py/.sh/.js script you wrote into the workspace (requires script permission).
-- install_python_dependency — install a PyPI package into .python-packages for workspace scripts only.
-- read_workspace_file — read text artifacts already in the workspace.
-Only claim a file was saved when the tool returned ok: true.`;
 
 interface EmployeeRow { id?: string; name?: string; instructions?: string; description?: string }
 interface SkillRow {
@@ -65,12 +52,26 @@ interface PrefsRow {
 }
 interface ModelSettings {
   providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; apiKey?: string; disableThinking?: boolean }>;
-  models?: Array<{ id?: string; providerInstanceId?: string; capability?: string; modelId?: string; label?: string }>;
+  models?: Array<{
+    id?: string;
+    providerInstanceId?: string;
+    capability?: string;
+    modelId?: string;
+    label?: string;
+    meta?: { dimension?: number; normalize?: boolean; maxBatch?: number; maxInputChars?: number };
+  }>;
   activeChatModelId?: string | null;
   activeEmbeddingModelId?: string | null;
   employeeDefaultModelIds?: Record<string, string>;
   activeProvider?: string;
-  providers?: Array<{ provider?: string; baseUrl?: string; chatModel?: string; apiKey?: string; disableThinking?: boolean }>;
+  providers?: Array<{
+    provider?: string;
+    baseUrl?: string;
+    chatModel?: string;
+    apiKey?: string;
+    disableThinking?: boolean;
+    embeddingModel?: string;
+  }>;
 }
 interface SearchSettings {
   defaultProvider?: string;
@@ -85,6 +86,34 @@ async function kvJson(store: KeyValueStore, key: string): Promise<unknown> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Desktop stores prefs under `user:<id>:workspace.employee-runtime-prefs`.
+ * Unscoped key is often empty; scan user-scoped keys as fallback.
+ */
+async function readEmployeePrefsMap(
+  store: KeyValueStore,
+  ownerUserId?: string | null,
+): Promise<Record<string, unknown>> {
+  const candidates: string[] = [];
+  if (ownerUserId?.trim()) candidates.push(`user:${ownerUserId.trim()}:${PREFS_KEY}`);
+  candidates.push(PREFS_KEY);
+  for (const key of candidates) {
+    const raw = await kvJson(store, key);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  }
+  try {
+    const keys = await store.keys('user:');
+    const prefKeys = keys.filter((key) => key.endsWith(`:${PREFS_KEY}`));
+    for (const key of prefKeys.reverse()) {
+      const raw = await kvJson(store, key);
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+    }
+  } catch {
+    // ignore listing failures
+  }
+  return {};
 }
 
 function rows(value: unknown): Array<Record<string, unknown>> {
@@ -221,21 +250,6 @@ async function skillRuntimeFor(store: KeyValueStore, task: ProjectTask, tier: st
     });
   }
 
-  // Platform harness: always injected, gated by the task's permission tier.
-  runtime.unshift({
-    id: BASELINE_WORKSPACE_SKILL_ID,
-    name: 'Workmate Workspace',
-    description: 'Platform harness: read/write the isolated run workspace and run workspace scripts.',
-    mode: 'default',
-    instructions: BASELINE_WORKSPACE_INSTRUCTIONS,
-    resources: [],
-    execution: {
-      allowWorkspaceWrite: tier !== 'read-only',
-      allowScriptExecution: tier !== 'read-only',
-      allowedNetworkHosts: [],
-      allowAllNonDestructive: tier === 'full',
-    },
-  });
   return runtime;
 }
 
@@ -303,6 +317,15 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow): Promise
       ...(raw.baseUrl ? { baseUrl: String(raw.baseUrl) } : {}),
       ...(apiKey ? { apiKey } : {}),
       ...(raw.externalId ? { externalId: String(raw.externalId) } : {}),
+      ...(raw.embeddingBaseUrl ? { embeddingBaseUrl: String(raw.embeddingBaseUrl) } : {}),
+      ...(raw.embeddingApiKey ? { embeddingApiKey: String(raw.embeddingApiKey) } : {}),
+      ...(raw.embeddingModel ? { embeddingModel: String(raw.embeddingModel) } : {}),
+      ...(raw.embeddingMeta && typeof raw.embeddingMeta === 'object'
+        ? { embeddingMeta: raw.embeddingMeta as ChatRunContext['knowledgeBases'][number]['embeddingMeta'] }
+        : {}),
+      ...(raw.indexState && typeof raw.indexState === 'object'
+        ? { indexState: raw.indexState as ChatRunContext['knowledgeBases'][number]['indexState'] }
+        : {}),
     });
   }
   return out;
@@ -316,9 +339,9 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow): Promise
 export async function resolveEmployeeMcpConnections(
   store: KeyValueStore,
   employeeId: string,
+  ownerUserId?: string | null,
 ): Promise<ChatRunContext['mcpConnections']> {
-  const prefsRaw = await kvJson(store, PREFS_KEY);
-  const prefsAll = prefsRaw && typeof prefsRaw === 'object' ? (prefsRaw as Record<string, unknown>) : {};
+  const prefsAll = await readEmployeePrefsMap(store, ownerUserId);
   const prefs = (prefsAll[employeeId] ?? {}) as PrefsRow;
   return mcpConnectionsFor(store, prefs);
 }
@@ -327,12 +350,15 @@ export async function resolveEmployeeMcpConnections(
  * Build a best-effort run context for a project task using domain KV + the
  * keyring secrets. Returns null when no chat model can be resolved.
  */
-export async function resolveTaskContext(store: KeyValueStore, task: ProjectTask): Promise<ChatRunContext | null> {
+export async function resolveTaskContext(
+  store: KeyValueStore,
+  task: ProjectTask,
+  ownerUserId?: string | null,
+): Promise<ChatRunContext | null> {
   const employees = rows(await kvJson(store, EMPLOYEES_KEY)) as EmployeeRow[];
   const overridesRaw = await kvJson(store, OVERRIDES_KEY);
   const overrides = overridesRaw && typeof overridesRaw === 'object' ? (overridesRaw as Record<string, { description?: string; instructions?: string }>) : {};
-  const prefsRaw = await kvJson(store, PREFS_KEY);
-  const prefsAll = prefsRaw && typeof prefsRaw === 'object' ? (prefsRaw as Record<string, unknown>) : {};
+  const prefsAll = await readEmployeePrefsMap(store, ownerUserId);
   const prefs = (prefsAll[task.employeeId] ?? {}) as PrefsRow;
   // Refresh keyring when empty: model settings are often saved after API boot.
   const secrets = await ensureModelSecrets();
@@ -362,6 +388,7 @@ export async function resolveTaskContext(store: KeyValueStore, task: ProjectTask
     maxSteps,
     runTimeoutMs,
     mcpToolTimeoutMs,
+    workspaceAccess: tier === 'read-only' ? 'read' : tier === 'full' ? 'full' : 'write',
     ...(engine ? { engine } : {}),
   };
 }

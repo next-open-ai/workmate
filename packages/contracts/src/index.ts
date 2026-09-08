@@ -75,7 +75,12 @@ export const RunModelRefSchema = z.object({
 export type RunModelRef = z.infer<typeof RunModelRefSchema>;
 
 export const AgentEventSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('run.started'), runId: z.string() }),
+  z.object({
+    type: z.literal('run.started'),
+    runId: z.string(),
+    /** Resolved execution backend for this run (pi / agentscope / dsh). */
+    engine: AgentEngineIdSchema.optional(),
+  }),
   z.object({ type: z.literal('message.delta'), runId: z.string(), text: z.string() }),
   z.object({ type: z.literal('tool.started'), runId: z.string(), toolName: z.string(), summary: z.string() }),
   z.object({ type: z.literal('tool.completed'), runId: z.string(), toolName: z.string(), summary: z.string(), ok: z.boolean() }),
@@ -112,6 +117,13 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
 export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'qwen', 'ollama', 'openai-compatible']);
+export const EmbeddingMetaSchema = z.object({
+  dimension: z.number().int().positive().max(65_536).optional(),
+  normalize: z.boolean().optional(),
+  maxBatch: z.number().int().positive().max(10_000).optional(),
+  maxInputChars: z.number().int().positive().max(10_000_000).optional(),
+});
+export type EmbeddingMeta = z.infer<typeof EmbeddingMetaSchema>;
 export const ModelConfigSchema = z.object({
   provider: ProviderIdSchema,
   baseUrl: z.string().url().optional(),
@@ -136,7 +148,7 @@ export const ModelConfigSchema = z.object({
   asrModel: z.string().optional(),
   ttsModel: z.string().optional(),
   apiKey: z.string(),
-}).refine((value) => value.provider === 'ollama' || value.apiKey.trim().length > 0, { message: 'API key is required for this provider.' });
+}).refine((value) => value.provider === 'ollama' || value.provider === 'openai-compatible' || value.apiKey.trim().length > 0, { message: 'API key is required for this provider.' });
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
 export const SearchProviderIdSchema = z.enum(['bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun']);
@@ -187,6 +199,15 @@ export type McpProbeRequest = z.infer<typeof McpProbeRequestSchema>;
 export const KnowledgeProviderIdSchema = z.enum(['lancedb', 'bailian', 'dify', 'qdrant', 'pinecone']);
 export type KnowledgeProviderId = z.infer<typeof KnowledgeProviderIdSchema>;
 
+export const KnowledgeIndexStateSchema = z.object({
+  status: z.enum(['ready', 'stale', 'rebuilding']),
+  signature: z.string().max(500).optional(),
+  lastBuildAt: z.number().int().nonnegative().optional(),
+  lastBuildModel: z.string().max(240).optional(),
+  lastBuildError: z.string().max(2_000).optional(),
+});
+export type KnowledgeIndexState = z.infer<typeof KnowledgeIndexStateSchema>;
+
 export const KnowledgeBaseRuntimeSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1).max(120),
@@ -211,6 +232,8 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   embeddingBaseUrl: z.string().url().optional(),
   embeddingApiKey: z.string().optional(),
   embeddingModel: z.string().max(120).optional(),
+  embeddingMeta: EmbeddingMetaSchema.optional(),
+  indexState: KnowledgeIndexStateSchema.optional(),
 });
 export type KnowledgeBaseRuntime = z.infer<typeof KnowledgeBaseRuntimeSchema>;
 
@@ -301,6 +324,8 @@ export const ChatRequestSchema = z.object({
    * promote deliverables from the isolated run workspace into this directory.
    */
   projectWorkspacePath: z.string().min(1).max(500).optional(),
+  /** Platform workspace capability. This is runtime policy, never a Skill permission. */
+  workspaceAccess: z.enum(['read', 'write', 'full']).optional(),
   /** Soft ceiling for tool/LLM steps in one run. */
   maxSteps: z.number().int().min(4).max(64).optional(),
   /** Wall-clock budget for the whole agent run (ms). */

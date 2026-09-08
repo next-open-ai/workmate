@@ -9,7 +9,6 @@ import type {
 import type { AuthUser } from "../../services/auth.js";
 import type { ProjectDraftResult } from "../../app/project-planning.js";
 import { modeLabel } from "../../app/project-planning.js";
-import { BASELINE_WORKSPACE_SKILL_ID } from "../../app/baseline-skills.js";
 import { employeeDisplayName } from "../../app/employees.js";
 import type { ProviderConfig, ProviderId } from "../../app/model-config.js";
 import { useModelConfig } from "../../app/model-config.js";
@@ -658,7 +657,6 @@ function summarizeNames(names: string[], emptyLabel: string) {
 function taskRuntimeSkillNames(task: { employeeId: EmployeeId; skillIds?: string[] }) {
   const scoped = new Set(task.skillIds ?? []);
   return allowedSkillsFor(task.employeeId)
-    .filter((skill) => skill.id !== BASELINE_WORKSPACE_SKILL_ID)
     .filter((skill) => !scoped.size || scoped.has(skill.id))
     .map((skill) => skill.name);
 }

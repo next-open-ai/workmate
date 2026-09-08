@@ -36,7 +36,10 @@ export interface ChatSessionServiceOptions {
    * server-backed mode). Resolves for the session's employee; null → the
    * caller sees a clear "model not configured" style error.
    */
-  contextResolver?: (employeeId: string) => ChatRunContext | null | Promise<ChatRunContext | null>;
+  contextResolver?: (
+    employeeId: string,
+    ownerUserId?: string | null,
+  ) => ChatRunContext | null | Promise<ChatRunContext | null>;
   /**
    * MCP-only backfill when the client sends a context with empty
    * `mcpConnections` (common when model comes from the client but MCP prefs
@@ -44,6 +47,7 @@ export interface ChatSessionServiceOptions {
    */
   mcpConnectionsResolver?: (
     employeeId: string,
+    ownerUserId?: string | null,
   ) => ChatRunContext['mcpConnections'] | Promise<ChatRunContext['mcpConnections']>;
 }
 
@@ -96,11 +100,15 @@ export class ChatSessionService {
   }
 
   /** Resolve a run context for an employee (caller payload first, else resolver). */
-  private async resolveContextFor(employeeId: string, explicit?: ChatRunContext): Promise<ChatRunContext | null> {
+  private async resolveContextFor(
+    employeeId: string,
+    explicit?: ChatRunContext,
+    ownerUserId?: string | null,
+  ): Promise<ChatRunContext | null> {
     let resolved: ChatRunContext | null = explicit ?? null;
     if (!resolved && this.contextResolver) {
       try {
-        resolved = (await this.contextResolver(employeeId)) ?? null;
+        resolved = (await this.contextResolver(employeeId, ownerUserId)) ?? null;
       } catch {
         resolved = null;
       }
@@ -110,20 +118,29 @@ export class ChatSessionService {
       let mcp: ChatRunContext['mcpConnections'] = [];
       if (this.mcpConnectionsResolver) {
         try {
-          mcp = (await this.mcpConnectionsResolver(employeeId)) ?? [];
+          mcp = (await this.mcpConnectionsResolver(employeeId, ownerUserId)) ?? [];
         } catch {
           mcp = [];
         }
       }
       if (!mcp.length && this.contextResolver) {
         try {
-          const fallback = (await this.contextResolver(employeeId)) ?? null;
+          const fallback = (await this.contextResolver(employeeId, ownerUserId)) ?? null;
           mcp = fallback?.mcpConnections ?? [];
         } catch {
           mcp = [];
         }
       }
       if (mcp.length) resolved = { ...resolved, mcpConnections: mcp };
+    }
+    // Client may omit engine after a prefs load race; backfill from server resolver.
+    if (!resolved.engine && this.contextResolver) {
+      try {
+        const fallback = (await this.contextResolver(employeeId, ownerUserId)) ?? null;
+        if (fallback?.engine) resolved = { ...resolved, engine: fallback.engine };
+      } catch {
+        // ignore
+      }
     }
     return resolved;
   }
@@ -234,7 +251,8 @@ export class ChatSessionService {
 
     session.employeeId = input.employeeId ?? session.employeeId;
     const employeeId = input.employeeId ?? session.employeeId;
-    const runContext = await this.resolveContextFor(employeeId, input.context);
+    const ownerUserId = session.ownerUserId ?? session.userId ?? null;
+    const runContext = await this.resolveContextFor(employeeId, input.context, ownerUserId);
     if (!runContext) {
       throw new Error('缺少运行上下文（模型/Skill 配置）。请先在桌面端配置模型。');
     }
@@ -338,7 +356,11 @@ export class ChatSessionService {
       || estimateSessionMemoryChars(summary, uncovered) >= 24_000;
     if (!needsWork) return session;
 
-    const runContext = await this.resolveContextFor(session.employeeId);
+    const runContext = await this.resolveContextFor(
+      session.employeeId,
+      undefined,
+      session.ownerUserId ?? session.userId ?? null,
+    );
     const resolvedModel = model ?? runContext?.model;
     if (!resolvedModel) {
       await this.saveSession(session);
@@ -387,7 +409,11 @@ export class ChatSessionService {
 
     // Allowed but no explicit resume payload: fall back to the server-side
     // context resolver so a remote/desktop client can approve with no secrets.
-    const resumeContext = input.resumeContext ?? (await this.resolveContextFor(session.employeeId));
+    const resumeContext = input.resumeContext ?? (await this.resolveContextFor(
+      session.employeeId,
+      undefined,
+      session.ownerUserId ?? session.userId ?? null,
+    ));
     if (!input.allow || !resumeContext) {
       await this.saveSession(session);
       return { run: waiting };

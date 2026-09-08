@@ -6,9 +6,9 @@ import { Type, StringEnum, defineAgentTool, type AgentTool } from './pi-tools.js
 
 const MAX_FILE_BYTES = 96_000;
 /** Soft cap per tool-call body so models do not emit fragile multi‑10KB JSON strings. */
-const MAX_WRITE_CHUNK = 4_000;
-const MAX_WRITE_CONTENT = 12_000;
-const MAX_WRITE_CHUNKS = 12;
+const MAX_WRITE_CHUNK = 6_000;
+const MAX_WRITE_CONTENT = 24_000;
+const MAX_WRITE_CHUNKS = 24;
 const MAX_NETWORK_BYTES = 256_000;
 const MAX_SCRIPT_OUTPUT = 32_000;
 const SCRIPT_TIMEOUT_MS = 30_000;
@@ -159,6 +159,12 @@ async function pathInside(root: string, relative: string) {
   return candidate;
 }
 
+async function ensureWorkspaceScaffold(root: string) {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await mkdir(path.join(root, WORKSPACE_OUTPUT_DIR), { recursive: true, mode: 0o700 });
+  await mkdir(path.join(root, 'scripts'), { recursive: true, mode: 0o700 });
+}
+
 async function listSkillFiles(root: string, folder = root, depth = 0, entries: string[] = []): Promise<string[]> {
   if (depth > 5 || entries.length >= 80) return entries;
   for (const entry of await readdir(folder, { withFileTypes: true })) {
@@ -261,6 +267,24 @@ async function collectScriptDeliverables(root: string, before: Set<string>, star
   return [...staged];
 }
 
+/**
+ * End-of-run safety net for engines without register_deliverable (e.g. dsh):
+ * stage root PDF/HTML/… into output/ and return relative deliverable paths for
+ * artifact.created events. Call once before run.completed.
+ */
+export async function harvestWorkspaceDeliverables(
+  workspaceRoot: string,
+  options?: { startedAtMs?: number; before?: Iterable<string> },
+): Promise<string[]> {
+  const root = path.resolve(workspaceRoot);
+  const startedAtMs = options?.startedAtMs ?? Date.now();
+  const before = new Set(options?.before ?? []);
+  if (!before.size) {
+    for (const item of await listOutputDeliverables(root).catch(() => [])) before.add(item);
+  }
+  return collectScriptDeliverables(root, before, startedAtMs);
+}
+
 function approvedSkillRoot(skill: AgentSkillRuntime) {
   const configuredRoot = process.env.WORKMATE_SKILLS_DIR;
   if (!configuredRoot || !skill.rootPath) return null;
@@ -285,6 +309,13 @@ function runProcess(command: string, args: string[], cwd: string, options: { env
   });
 }
 
+function pythonImportProbeModuleName(dependency: string) {
+  return dependency
+    .replace(/==.*$/, '')
+    .trim()
+    .replace(/-/g, '_');
+}
+
 /**
  * The local execution boundary for Agent Skills. Skill packages are immutable
  * at runtime; generated artifacts belong in a separate, run-scoped workspace.
@@ -297,19 +328,37 @@ export function createSkillExecutionTools(input: {
   skills: AgentSkillRuntime[];
   runId: string;
   projectRoot?: string;
+  workspaceAccess?: 'read' | 'write' | 'full';
 }): AgentTool[] {
   const packages = new Map(input.skills.map((skill) => [skill.id, skill]));
   const workspaceRoot = path.join(process.env.WORKMATE_WORKSPACES_DIR || path.join(process.cwd(), '.workmate-workspaces'), input.runId);
   const projectRoot = input.projectRoot?.trim() ? path.resolve(input.projectRoot.trim()) : '';
-  const loaded = new Set(input.skills.filter((skill) => skill.mode === 'default' && skill.instructions).map((skill) => skill.id));
+  const workspaceAccess = input.workspaceAccess ?? 'write';
+  const canWriteWorkspace = workspaceAccess === 'write' || workspaceAccess === 'full';
+  // "write" is the normal task tier. It must retain the controlled local
+  // execution needed to produce artifacts (for example, a PDF renderer).
+  // "full" is reserved for future elevated capabilities such as networked
+  // execution; it is not required merely to run a workspace script.
+  const canRunWorkspaceScript = workspaceAccess === 'write' || workspaceAccess === 'full';
+  const writeDenied = () => ({ ok: false, error: 'Workspace write is not permitted for this run.' });
+  const scriptDenied = () => ({ ok: false, error: 'Workspace script execution is not permitted for this run.' });
+  // Preloaded instructions are for first-turn reasoning, not implicit execution
+  // of every skill. Workspace operations are platform tools, never a Skill.
+  const loaded = new Set(
+    input.skills
+      .filter((skill) => skill.mode === 'default' && skill.instructions)
+      .map((skill) => skill.id),
+  );
   const getSkill = (skillId: string) => {
     const skill = packages.get(skillId);
     if (!skill) throw new Error('Skill is not authorized for this run.');
     return skill;
   };
-  const ensureLoaded = (skillId: string) => { if (!loaded.has(skillId)) throw new Error('Load the Skill before accessing its files or execution capabilities.'); };
+  const ensureLoaded = (skillId: string) => {
+    if (!loaded.has(skillId)) throw new Error('Load the Skill before accessing its files or execution capabilities.');
+  };
   const workspacePath = async (relative: string) => {
-    await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
+    await ensureWorkspaceScaffold(workspaceRoot);
     return pathInside(workspaceRoot, relative);
   };
   const projectPath = async (relative: string) => {
@@ -317,11 +366,8 @@ export function createSkillExecutionTools(input: {
     await mkdir(projectRoot, { recursive: true, mode: 0o700 });
     return pathInside(projectRoot, relative);
   };
-  const runWorkspaceScript = async (skillId: string, relative: string, args: string[]) => {
-    ensureLoaded(skillId);
-    const skill = getSkill(skillId);
-    if (!skill.execution.allowWorkspaceWrite) return approval(skillId, 'workspace-write', 'Writing the generator into this run workspace requires your approval.');
-    if (!skill.execution.allowScriptExecution) return approval(skillId, 'script-execution', 'Running the generated script requires your approval.');
+  const runWorkspaceScript = async (relative: string, args: string[]) => {
+    if (!canRunWorkspaceScript) return scriptDenied();
     const normalized = safeRelative(relative);
     if (!/\.(sh|js|mjs|cjs|py)$/i.test(normalized)) return { ok: false, error: 'Only .sh, .js, .mjs, .cjs, or .py workspace scripts may run.' };
     let script: string;
@@ -332,6 +378,7 @@ export function createSkillExecutionTools(input: {
     const extension = path.extname(script).toLowerCase();
     const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
     const dependencyRoot = path.join(workspaceRoot, '.python-packages');
+    await ensureWorkspaceScaffold(workspaceRoot);
     const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
     const startedAtMs = Date.now();
     const result = await runProcess(command, [script, ...args], workspaceRoot, { env: { ...process.env, PYTHONPATH: dependencyRoot } });
@@ -342,7 +389,7 @@ export function createSkillExecutionTools(input: {
   return [
     defineAgentTool({
       name: 'load_skill',
-      description: 'Load the full SKILL.md instructions for a relevant authorized Skill. Use only exact ids listed in the Skill catalog.',
+      description: 'Load the full SKILL.md instructions for a relevant authorized user Skill.',
       parameters: Type.Object({ skillId: Type.String({ minLength: 1 }) }),
       execute: async ({ skillId }) => {
         const skill = getSkill(skillId);
@@ -392,9 +439,8 @@ export function createSkillExecutionTools(input: {
     defineAgentTool({
       name: 'write_workspace_file',
       description:
-        'Write a text file to this run\'s isolated workspace. Process files (generators/scripts) stay outside output/. Finished business deliverables must use path under output/ or pass deliverable=true (auto-places under output/). Keep each call small: prefer content ≤8KB, or chunks (≤4KB each); use mode "append" for large files.',
+        'Write a text file to this run\'s isolated workspace. Process files (generators/scripts) stay outside output/. Finished business deliverables must use path under output/ or pass deliverable=true (auto-places under output/). Keep each call small: prefer content ≤12KB, or chunks (≤6KB each, up to 24); use mode "append" for large files.',
       parameters: Type.Object({
-        skillId: Type.String({ minLength: 1, default: 'workmate-workspace' }),
         path: Type.String({ minLength: 1, maxLength: 240 }),
         content: Type.Optional(Type.String({ maxLength: MAX_WRITE_CONTENT })),
         chunks: Type.Optional(Type.Array(Type.String({ maxLength: MAX_WRITE_CHUNK }), { maxItems: MAX_WRITE_CHUNKS })),
@@ -402,12 +448,9 @@ export function createSkillExecutionTools(input: {
         /** When true, file is written under output/ and archived as a business deliverable. */
         deliverable: Type.Optional(Type.Boolean()),
       }),
-      execute: async ({ skillId, path: relative, content, chunks, mode, deliverable }) => {
+      execute: async ({ path: relative, content, chunks, mode, deliverable }) => {
+        if (!canWriteWorkspace) return writeDenied();
         const writeMode = mode === 'append' ? 'append' : 'replace';
-        const id = skillId || 'workmate-workspace';
-        ensureLoaded(id);
-        const skill = getSkill(id);
-        if (!skill.execution.allowWorkspaceWrite) return approval(id, 'workspace-write', 'Writing an artifact to this run workspace requires your approval.');
         const requested = safeRelative(relative);
         const asDeliverable = Boolean(deliverable) || isUnderWorkspaceOutput(requested);
         const targetRel = asDeliverable ? toOutputPath(requested) : requested;
@@ -438,17 +481,11 @@ export function createSkillExecutionTools(input: {
       description:
         'Mark an existing run-workspace file as a finished business deliverable. Copies it into output/ (if needed) so it can be archived to the asset library / published to a project. Use this for final products of any type (including .py/.js) — do not register generator scripts you only needed as intermediate tooling.',
       parameters: Type.Object({
-        skillId: Type.String({ minLength: 1, default: 'workmate-workspace' }),
         path: Type.String({ minLength: 1, maxLength: 240 }),
         destName: Type.Optional(Type.String({ minLength: 1, maxLength: 180 })),
       }),
-      execute: async ({ skillId, path: relative, destName }) => {
-        const id = skillId || 'workmate-workspace';
-        ensureLoaded(id);
-        const skill = getSkill(id);
-        if (!skill.execution.allowWorkspaceWrite) {
-          return approval(id, 'workspace-write', 'Registering a deliverable requires your approval.');
-        }
+      execute: async ({ path: relative, destName }) => {
+        if (!canWriteWorkspace) return writeDenied();
         const sourceRel = safeRelative(relative);
         if (PROCESS_ONLY_DIRS.has(pathParts(sourceRel)[0] || '')) {
           return { ok: false, error: 'Files under scripts/tools/tmp/… are process files and cannot be registered as deliverables. Copy the final product out first, or write it under output/.' };
@@ -459,6 +496,20 @@ export function createSkillExecutionTools(input: {
           if (!(await stat(source)).isFile()) throw new Error('Not a file');
         } catch {
           return { ok: false, error: `Run workspace file is unavailable: ${sourceRel}.` };
+        }
+        // A file already under output/ is already a business deliverable. Do
+        // not turn a harmless "register" confirmation into a second renamed
+        // PDF and a duplicate asset card.
+        if (isBusinessDeliverablePath(sourceRel)) {
+          const bytes = (await stat(source)).size;
+          return {
+            ok: true,
+            path: sourceRel,
+            sourcePath: sourceRel,
+            bytes,
+            deliverable: true,
+            alreadyRegistered: true,
+          };
         }
         const destRel = toOutputPath(sourceRel, destName);
         if (!isBusinessDeliverablePath(destRel)) {
@@ -497,36 +548,40 @@ export function createSkillExecutionTools(input: {
         await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
         const extension = path.extname(script).toLowerCase();
         const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
+        const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
+        const startedAtMs = Date.now();
         const result = await runProcess(command, [script, ...(args ?? [])], workspaceRoot);
-        return { ok: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+        const declared = result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith('WORKMATE_DELIVERABLE:'))
+          .map((line) => line.slice('WORKMATE_DELIVERABLE:'.length))
+          .filter((item) => isBusinessDeliverablePath(item));
+        const artifacts = declared.length
+          ? [...new Set(declared)]
+          : await collectScriptDeliverables(workspaceRoot, before, startedAtMs).catch(() => []);
+        return { ok: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, artifacts };
       },
     }),
     defineAgentTool({
       name: 'run_workspace_script',
-      description: 'Run a script previously written to this isolated run workspace. Use this only to create an artifact when the loaded Skill permits both workspace writes and script execution. No shell expressions are accepted.',
+      description: 'Run a script previously written to this isolated run workspace to create or verify an artifact. No shell expressions are accepted.',
       parameters: Type.Object({
-        skillId: Type.String({ minLength: 1, default: 'workmate-workspace' }),
         path: Type.String({ minLength: 1, maxLength: 240 }),
         args: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 16 })),
       }),
-      execute: async ({ skillId, path: relative, args }) => runWorkspaceScript(skillId || 'workmate-workspace', relative, args ?? []),
+      execute: async ({ path: relative, args }) => runWorkspaceScript(relative, args ?? []),
     }),
     defineAgentTool({
       name: 'publish_to_project',
       description:
         'Promote a finished business deliverable from this run workspace into the shared project workspace. Source must be under output/ (or already registered). Process files under scripts/tools/tmp stay in the run workspace. Requires a project-bound run.',
       parameters: Type.Object({
-        skillId: Type.String({ minLength: 1, default: 'workmate-workspace' }),
         path: Type.String({ minLength: 1, maxLength: 240 }),
         destPath: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
       }),
-      execute: async ({ skillId, path: relative, destPath }) => {
-        const id = skillId || 'workmate-workspace';
-        ensureLoaded(id);
-        const skill = getSkill(id);
-        if (!skill.execution.allowWorkspaceWrite) {
-          return approval(id, 'workspace-write', 'Publishing a deliverable into the project workspace requires your approval.');
-        }
+      execute: async ({ path: relative, destPath }) => {
+        if (!canWriteWorkspace) return writeDenied();
         if (!projectRoot) {
           return { ok: false, error: 'Current run is not bound to a project workspace. publish_to_project is only available for project tasks.' };
         }
@@ -567,19 +622,27 @@ export function createSkillExecutionTools(input: {
     }),
     defineAgentTool({
       name: 'install_python_dependency',
-      description: 'Install a Python package needed by a loaded Skill into this run workspace only. This is allowed by default work permission; it never modifies system Python.',
+      description: 'Install a Python package into this run workspace only when required to create or verify an artifact. This is allowed by default work permission; it never modifies system Python.',
       parameters: Type.Object({
-        skillId: Type.String({ minLength: 1, default: 'workmate-workspace' }),
         package: Type.String({ minLength: 1, maxLength: 120 }),
       }),
-      execute: async ({ skillId, package: dependency }) => {
-        const id = skillId || 'workmate-workspace';
-        ensureLoaded(id);
-        const skill = getSkill(id);
-        if (!skill.execution.allowScriptExecution) return approval(id, 'script-execution', 'Installing an isolated dependency requires default work permission.');
+      execute: async ({ package: dependency }) => {
+        if (!canRunWorkspaceScript) return scriptDenied();
         if (!/^[a-zA-Z0-9_.-]+(?:==[a-zA-Z0-9_.+-]+)?$/.test(dependency)) return { ok: false, error: 'Only a simple PyPI package name with an optional exact version is permitted.' };
         await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
         const dependencyRoot = path.join(workspaceRoot, '.python-packages');
+        const moduleName = pythonImportProbeModuleName(dependency);
+        const probe = await runProcess('python3', ['-c', `import importlib.util, sys; sys.exit(0 if importlib.util.find_spec(${JSON.stringify(moduleName)}) else 1)`], workspaceRoot, { timeoutMs: 10_000 }).catch(() => null);
+        if (probe?.exitCode === 0) {
+          return {
+            ok: true,
+            package: dependency,
+            exitCode: 0,
+            alreadyAvailable: true,
+            stdout: `Python module already available: ${moduleName}`,
+            stderr: '',
+          };
+        }
         const result = await runProcess('python3', ['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, dependency], workspaceRoot, { timeoutMs: 120_000 });
         return { ok: result.exitCode === 0, package: dependency, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
       },

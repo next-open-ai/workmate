@@ -28,12 +28,14 @@ Electron Main ── SQLite（元数据） + ~/.workmate（Skill、工作区、�
 
 ## 3. Skill 与执行模型
 
-Skill 是“指令能力包”，不是自动获得系统权限的插件。运行时分三层加载：
+Skill 是“业务指令能力包”，不是自动获得系统权限的插件。运行时分为两条明确边界：
 
-0. **平台 harness（`workmate-workspace`）**：每次 run 由 `baseline-skills.ts` 自动注入，不依赖员工 Skill 策略；`mode: default` 且带内嵌指令，Agent Core 预加载。读写/脚本能力由**当前权限档位**（及会话批准）映射到 `execution`，与聊天侧栏、项目任务 `permissionTier` 共用同一套规则。
-1. 候选层：只根据员工授权与任务选择传递名称、描述和风险元信息。
-2. 指令层：模型调用 `load_skill` 后读取选中 Skill 的 `SKILL.md`（harness 已预加载，可直接使用 `skillId: workmate-workspace` 调用工作区工具）。
-3. 资源/执行层：仅在需要时读取参考文件、写入工作区或运行白名单范围内的脚本。
+1. **平台基础 Tools**：工作区读写、受控脚本、交付物登记与项目发布属于 Runtime Tool Contract，不进入 Skill 目录、不参与业务路由，也不要求传入 `skillId`。`workspaceAccess`（`read` / `write` / `full`）统一约束 PI 与 AgentScope 的宿主工具；默认 `write` 可完成受控的本地产物生成。
+2. **业务 Skill 候选层**：只根据员工授权与任务选择传递名称、描述和风险元信息。
+3. **业务指令层**：模型调用 `load_skill` 后读取选中业务 Skill 的 `SKILL.md`。
+4. **资源/执行层**：业务 Skill 按需读取资源；平台 Tools 在独立运行工作区中完成受控 I/O 与产物交付。
+
+DSH 目前直接控制其运行目录，尚未具备操作系统级只读沙箱；因此 `read` 任务会被显式拒绝 DSH，必须路由至 PI 或 AgentScope，不能静默降级为可写。
 
 Skill 的执行策略、员工授权、任务权限档位和用户审批均须通过，实际工具才能执行。
 

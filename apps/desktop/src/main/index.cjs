@@ -5,6 +5,15 @@ const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const {
+  getLocalEmbeddingSettings,
+  maybeAutoRestartLocalEmbedding,
+  resolveLocalEmbeddingStatus,
+  restartLocalEmbedding,
+  saveLocalEmbeddingSettings,
+  setLocalEmbeddingEnabled,
+  stopSidecarProcess,
+} = require('./local-embedding/sidecar-manager.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -56,7 +65,9 @@ function migrateAssetsSchema() {
   if (!cols.has('workspace_relative')) database.run('ALTER TABLE assets ADD COLUMN workspace_relative TEXT');
   database.run('CREATE INDEX IF NOT EXISTS assets_project_id ON assets(project_id)');
   // Backfill workspace_relative from basename for legacy rows.
+  // output/ is an internal runtime boundary, not a user-facing asset folder.
   database.run(`UPDATE assets SET workspace_relative = name WHERE workspace_relative IS NULL OR workspace_relative = ''`);
+  database.run(`UPDATE assets SET workspace_relative = substr(workspace_relative, 8) WHERE workspace_relative LIKE 'output/%'`);
 }
 
 function flushDatabase() { writeFileSync(databaseFile(), Buffer.from(database.export()), { mode: 0o600 }); }
@@ -122,7 +133,7 @@ function archiveArtifact(value) {
   const relativeAssetPath = path.relative(storageRoot(), target).split(path.sep).join('/');
   const createdAt = Date.now();
   const projectId = String(value?.projectId || '').trim() || null;
-  const workspaceRelative = relativePath;
+  const workspaceRelative = relativePath.replace(/^output\//, '');
   const conversationId = String(value?.conversationId || '') || null;
   const employeeId = String(value?.employeeId || '') || null;
   database.run(
@@ -134,7 +145,38 @@ function archiveArtifact(value) {
 }
 function assetFile(assetId) {
   const row = assetRows(database.exec(`${ASSET_SELECT} WHERE id = ?`, [String(assetId)]))[0];
-  if (!row) throw new Error('Asset not found.');
+  // The API process owns asset archival and persists its own sql.js snapshot.
+  // This Electron process keeps a long-lived in-memory snapshot, so a newly
+  // archived asset can legitimately be absent here for a moment. Its folder is
+  // already content-addressed by asset id; recover that single-file asset
+  // without requiring a desktop restart or a stale DB reload.
+  if (!row) {
+    const id = String(assetId || '');
+    if (!/^[a-f0-9-]{20,}$/i.test(id)) throw new Error('Asset not found.');
+    const folder = path.join(storageRoot(), 'assets', id);
+    let names = [];
+    try {
+      names = readdirSync(folder).filter((name) => {
+        const candidate = path.join(folder, name);
+        return statSync(candidate).isFile();
+      });
+    } catch (_) {
+      throw new Error('Asset not found.');
+    }
+    if (names.length !== 1) throw new Error('Asset not found.');
+    const name = names[0];
+    const target = path.join(folder, name);
+    return {
+      row: {
+        id,
+        name,
+        relativePath: path.relative(storageRoot(), target).split(path.sep).join('/'),
+        mimeType: assetMimeType(name),
+        sizeBytes: statSync(target).size,
+      },
+      target,
+    };
+  }
   const target = path.resolve(storageRoot(), row.relativePath);
   if (!target.startsWith(`${path.resolve(storageRoot(), 'assets')}${path.sep}`) || !existsSync(target)) throw new Error('Asset file is unavailable.');
   return { row, target };
@@ -401,10 +443,19 @@ function writeModelConfig(value) {
             capability: String(model.capability || 'chat'),
             modelId: String(model.modelId || ''),
             label: model.label ? String(model.label) : undefined,
+            meta: model.meta && typeof model.meta === 'object'
+              ? {
+                  ...(Number(model.meta.dimension) ? { dimension: Number(model.meta.dimension) } : {}),
+                  ...(typeof model.meta.normalize === 'boolean' ? { normalize: Boolean(model.meta.normalize) } : {}),
+                  ...(Number(model.meta.maxBatch) ? { maxBatch: Number(model.meta.maxBatch) } : {}),
+                  ...(Number(model.meta.maxInputChars) ? { maxInputChars: Number(model.meta.maxInputChars) } : {}),
+                }
+              : undefined,
             supportsBuiltinWebSearch: Boolean(model.supportsBuiltinWebSearch) || undefined,
           }))
         : [],
       activeChatModelId: value?.activeChatModelId ? String(value.activeChatModelId) : null,
+      activeEmbeddingModelId: value?.activeEmbeddingModelId ? String(value.activeEmbeddingModelId) : null,
       employeeDefaultModelIds: value?.employeeDefaultModelIds && typeof value.employeeDefaultModelIds === 'object'
         ? Object.fromEntries(Object.entries(value.employeeDefaultModelIds).map(([key, modelId]) => [String(key), String(modelId)]))
         : {},
@@ -1431,6 +1482,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('workmate:gateway-status', () => gatewayStatus());
   ipcMain.handle('workmate:env-check', async (event) => runEnvironmentChecks((payload) => event.sender.send('workmate:env-check-progress', payload)));
   ipcMain.handle('workmate:gateway-restart', () => gatewayRestart());
+  ipcMain.handle('workmate:get-local-embedding-status', async () => resolveLocalEmbeddingStatus(storageRoot()));
+  ipcMain.handle('workmate:get-local-embedding-settings', () => getLocalEmbeddingSettings(storageRoot()));
+  ipcMain.handle('workmate:save-local-embedding-settings', (_, value) => saveLocalEmbeddingSettings(storageRoot(), value));
+  ipcMain.handle('workmate:set-local-embedding-enabled', (_, enabled) => setLocalEmbeddingEnabled(storageRoot(), enabled));
+  ipcMain.handle('workmate:restart-local-embedding', () => restartLocalEmbedding(storageRoot()));
   ipcMain.handle('workmate:list-assets', () => listAssets());
   ipcMain.handle('workmate:archive-artifact', (_, value) => archiveArtifact(value));
   ipcMain.handle('workmate:link-assets-to-project', (_, value) => linkAssetsToProject(value));
@@ -1449,10 +1505,11 @@ app.whenReady().then(async () => {
   await waitForApi().catch(() => { /* fall back to legacy sql.js forwarding */ });
   const migratedCount = await migrateDomainKvToApi().catch(() => 0);
   if (migratedCount > 0) console.log(`[orch] migrated ${migratedCount} legacy domain keys`);
+  await maybeAutoRestartLocalEmbedding(storageRoot()).catch((error) => console.warn('[local-embedding] auto restart failed:', error));
   await startGatewayIfEnabled().catch((error) => console.warn('[gateway] start failed:', error));
   await createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { apiProcess?.kill('SIGTERM'); gatewayProcess?.kill('SIGTERM'); });
+app.on('before-quit', () => { stopSidecarProcess(); apiProcess?.kill('SIGTERM'); gatewayProcess?.kill('SIGTERM'); });

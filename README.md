@@ -14,7 +14,8 @@ Quick links:
 - AgentScope ABI: `docs/design/agentscope-abi.md`
 - Concurrency runtime: `docs/design/concurrency-runtime.md`
 - Concurrency verification checklist: `docs/design/concurrency-verification.md`
-- Concurrency regression command: `pnpm concurrency:regression`
+- Concurrency regression command: `pnpm concurrency:regression` (includes dsh MCP/Skills bridge case first)
+- Standalone dsh MCP/Skills regression: `pnpm dsh:regression`
 
 ```bash
 pnpm install
@@ -25,6 +26,7 @@ pnpm workmate:doctor
 pnpm workmate:init
 pnpm workmate:start
 pnpm agentscope:smoke
+pnpm dsh:regression
 pnpm concurrency:regression
 ```
 

@@ -22,10 +22,14 @@ export interface OrchestratorOptions {
   /** Fallback server-side run-context assembly (see ProjectServiceOptions). */
   contextResolver?: (task: ProjectTask) => ChatRunContext | null | Promise<ChatRunContext | null>;
   /** Fallback chat run-context assembly by employee id (see ChatSessionService). */
-  chatContextResolver?: (employeeId: string) => ChatRunContext | null | Promise<ChatRunContext | null>;
+  chatContextResolver?: (
+    employeeId: string,
+    ownerUserId?: string | null,
+  ) => ChatRunContext | null | Promise<ChatRunContext | null>;
   /** MCP-only backfill for chat when client context omits connectors. */
   chatMcpConnectionsResolver?: (
     employeeId: string,
+    ownerUserId?: string | null,
   ) => ChatRunContext['mcpConnections'] | Promise<ChatRunContext['mcpConnections']>;
 }
 

@@ -47,7 +47,37 @@ pnpm dev
 - Workmate 内仅薄桥（KB 级），**不**把 harness monorepo 打进安装包。
 - Runtime 外置（sibling / `WORKMATE_DSH_BIN`）。
 
-## 5. 关键路径
+## 6. MCP 与 Skills（员工授权注入）
+
+每回合（非自定义 `WORKMATE_DSH_CORDIS`）会把当前 ChatRequest 里的员工 MCP / Skills 桥进 dsh：
+
+### MCP
+- 在生成的 cordis 里为每个已启用连接挂 `@deepseek-ai/dsh-mcp-client`
+- `stdio` → dsh `transport: stdio`（command/args/env/cwd）
+- Workmate `http` / `sse` → dsh `streamable-http`（SSE 端点为 best-effort）
+- 工具名在 dsh 侧一般为 `mcp__<server>__<tool>`；prompt 会提示已连接的 server 名
+
+### Skills
+- 授权技能物化到 `DSH_CWD/.agents/skills/<kebab>/SKILL.md`（跳过平台 harness：`workmate-workspace` 等）
+- cordis `agent-spine.skills.enabled: true` + `customSkillDirs` 指向物化根目录
+- 模型通过 dsh 原生 `skill` 工具加载（不是 pi 的 `load_skill`）
+
+| 文件 | 说明 |
+|------|------|
+| `dsh/skills-materialize.ts` | Skill → `.agents/skills` |
+| `dsh/cordis-compose.ts` | MCP 插件行 + skills 配置 |
+| `dsh/stream.ts` | 回合编排 |
+
+## 7. 回归
+
+```bash
+pnpm dsh:regression
+# 也作为 pnpm concurrency:regression 的前置 case
+```
+
+覆盖：cordis 注入 MCP（stdio / streamable-http）、skills.enabled + customSkillDirs、技能物化与平台 harness 跳过。
+
+## 8. 关键路径
 
 | 文件 | 说明 |
 |------|------|
@@ -56,3 +86,4 @@ pnpm dev
 | `dsh/stream.ts` | 启动与事件流 |
 | `dsh/jsonrpc-client.ts` | stdio JSON-RPC |
 | `dsh/launch.ts` | bin 发现 |
+| `dsh/skills-materialize.ts` | Skills 物化 |

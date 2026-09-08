@@ -48,6 +48,11 @@ contextBridge.exposeInMainWorld('workmateDesktop', {
   saveChannelSettings: (payload) => ipcRenderer.invoke('workmate:save-channel-settings', payload),
   gatewayStatus: () => ipcRenderer.invoke('workmate:gateway-status'),
   gatewayRestart: () => ipcRenderer.invoke('workmate:gateway-restart'),
+  getLocalEmbeddingStatus: () => ipcRenderer.invoke('workmate:get-local-embedding-status'),
+  getLocalEmbeddingSettings: () => ipcRenderer.invoke('workmate:get-local-embedding-settings'),
+  saveLocalEmbeddingSettings: (value) => ipcRenderer.invoke('workmate:save-local-embedding-settings', value),
+  setLocalEmbeddingEnabled: (enabled) => ipcRenderer.invoke('workmate:set-local-embedding-enabled', enabled),
+  restartLocalEmbedding: () => ipcRenderer.invoke('workmate:restart-local-embedding'),
   checkEnvironment: () => ipcRenderer.invoke('workmate:env-check'),
   onEnvCheckProgress: (callback) => {
     const listener = (_event, payload) => callback(payload);

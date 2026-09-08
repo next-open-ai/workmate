@@ -142,8 +142,18 @@ function mcpContentToDetails(result: { content?: Array<{ type: string; text?: st
   return { ok: !result.isError, isError: Boolean(result.isError) };
 }
 
-/** Keep live MCP clients across chat turns — reconnect was a multi-second TTFT tax. */
-const MCP_IDLE_TTL_MS = 90_000;
+/**
+ * Keep live MCP clients across chat turns / dsh runs.
+ * First connect pays cold-start (npx download); later acquires within the idle
+ * window reuse the same process so catalog + npm cache stay hot.
+ */
+const DEFAULT_MCP_IDLE_TTL_MS = 600_000;
+function mcpIdleTtlMs(): number {
+  const raw = Number(process.env.WORKMATE_MCP_IDLE_TTL_MS || '');
+  if (Number.isFinite(raw) && raw >= 5_000) return Math.min(3_600_000, Math.round(raw));
+  return DEFAULT_MCP_IDLE_TTL_MS;
+}
+
 type PooledMcp = {
   key: string;
   client: Client;
@@ -152,8 +162,37 @@ type PooledMcp = {
   instructions?: string;
   refs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Wall time of the process that created this pool entry. */
+  warmedAt: number;
 };
 const mcpPool = new Map<string, PooledMcp>();
+
+/** Read-only handle for dsh HTTP bridges that forward into a pooled client. */
+export type PooledMcpHandle = {
+  client: Client;
+  listed: Awaited<ReturnType<Client['listTools']>>;
+  instructions?: string;
+};
+
+/** Pin an already-warmed pool entry for a dsh bridge (must warm first). */
+export async function acquirePooledMcpForBridge(connection: McpConnectionRuntime): Promise<PooledMcpHandle> {
+  const { pooled } = await acquirePooledMcp(connection);
+  return {
+    client: pooled.client,
+    listed: pooled.listed,
+    ...(pooled.instructions ? { instructions: pooled.instructions } : {}),
+  };
+}
+
+/** Unpin a bridge ref acquired via {@link acquirePooledMcpForBridge}. */
+export function releasePooledMcpForBridge(handle: PooledMcpHandle): void {
+  for (const pooled of mcpPool.values()) {
+    if (pooled.client === handle.client) {
+      releasePooledMcp(pooled);
+      return;
+    }
+  }
+}
 
 function mcpConnectionKey(connection: McpConnection | McpConnectionRuntime): string {
   return JSON.stringify({
@@ -169,7 +208,14 @@ function mcpConnectionKey(connection: McpConnection | McpConnectionRuntime): str
   });
 }
 
-async function acquirePooledMcp(connection: McpConnectionRuntime): Promise<PooledMcp> {
+export type McpWarmAcquireResult = {
+  pooled: PooledMcp;
+  /** True when an existing idle/live process was reused. */
+  cacheHit: boolean;
+  durationMs: number;
+};
+
+async function acquirePooledMcp(connection: McpConnectionRuntime): Promise<McpWarmAcquireResult> {
   const key = mcpConnectionKey(connection);
   const existing = mcpPool.get(key);
   if (existing) {
@@ -178,8 +224,9 @@ async function acquirePooledMcp(connection: McpConnectionRuntime): Promise<Poole
       existing.idleTimer = undefined;
     }
     existing.refs += 1;
-    return existing;
+    return { pooled: existing, cacheHit: true, durationMs: 0 };
   }
+  const started = Date.now();
   const { client, close } = await connectMcpClient(connection);
   const listed = await client.listTools();
   const instructions = (client as { getInstructions?: () => string | undefined }).getInstructions?.()?.trim()
@@ -191,20 +238,24 @@ async function acquirePooledMcp(connection: McpConnectionRuntime): Promise<Poole
     listed,
     ...(instructions ? { instructions } : {}),
     refs: 1,
+    warmedAt: Date.now(),
   };
   mcpPool.set(key, pooled);
-  return pooled;
+  return { pooled, cacheHit: false, durationMs: Date.now() - started };
 }
 
 function releasePooledMcp(pooled: PooledMcp) {
   pooled.refs = Math.max(0, pooled.refs - 1);
   if (pooled.refs > 0) return;
   if (pooled.idleTimer) clearTimeout(pooled.idleTimer);
+  const ttl = mcpIdleTtlMs();
   pooled.idleTimer = setTimeout(() => {
     if (pooled.refs > 0) return;
     mcpPool.delete(pooled.key);
     void pooled.closeTransport().catch(() => undefined);
-  }, MCP_IDLE_TTL_MS);
+  }, ttl);
+  // Allow Node to exit while an idle MCP is waiting to be reaped.
+  pooled.idleTimer.unref?.();
 }
 
 /**
@@ -236,7 +287,7 @@ export async function loadMcpToolset(
   // Connect in parallel; reuse pooled clients across turns.
   const loaded = await Promise.all(enabled.map(async (connection) => {
     try {
-      const pooled = await acquirePooledMcp(connection);
+      const { pooled } = await acquirePooledMcp(connection);
       acquired.push(pooled);
       const { client, listed } = pooled;
       const prefix = sanitizeToolPrefix(connection.name || connection.id);
@@ -324,6 +375,112 @@ export async function loadMcpToolset(
   };
 }
 
+export type McpWarmResult = {
+  labels: string[];
+  toolLines: string[];
+  /** Per-connector warm outcomes for diagnostics / UI. */
+  items: Array<{
+    name: string;
+    ok: boolean;
+    cacheHit: boolean;
+    durationMs: number;
+    toolNames: string[];
+    error?: string;
+  }>;
+  /** True when at least one connector paid a cold start this call. */
+  hadColdStart: boolean;
+  /** Unpin warm refs so idle TTL can reap unused processes. */
+  release: () => void;
+};
+
+/**
+ * Pin MCP stdio/http clients into the process pool before a dsh/pi run.
+ * Cold start is paid once; subsequent warms within WORKMATE_MCP_IDLE_TTL_MS
+ * (default 10m) are cache hits. Also warms the local npm/uvx package cache so
+ * a later dsh-sidecar `npx -y` spawn is much faster.
+ */
+export async function warmMcpConnections(
+  connections: McpConnectionRuntime[] | undefined,
+  options?: { toolTimeoutMs?: number },
+): Promise<McpWarmResult> {
+  const toolTimeoutMs = Math.min(
+    300_000,
+    Math.max(3_000, Math.round(Number(options?.toolTimeoutMs) || DEFAULT_MCP_TOOL_TIMEOUT_MS)),
+  );
+  const enabled = (connections ?? []).filter((connection) => {
+    if (connection?.enabled === false) return false;
+    return connection.transport === 'stdio'
+      ? Boolean(connection.command?.trim())
+      : Boolean(connection.url);
+  });
+
+  const acquired: PooledMcp[] = [];
+  const items: McpWarmResult['items'] = [];
+  let hadColdStart = false;
+
+  const results = await Promise.all(enabled.map(async (connection) => {
+    const started = Date.now();
+    try {
+      const acquiredOne = await withTimeout(
+        acquirePooledMcp(connection),
+        Math.max(toolTimeoutMs, 25_000),
+        `MCP warm (${connection.name})`,
+      );
+      acquired.push(acquiredOne.pooled);
+      if (!acquiredOne.cacheHit) hadColdStart = true;
+      const toolNames = (acquiredOne.pooled.listed.tools ?? []).map((tool) => tool.name).slice(0, 48);
+      const item = {
+        name: connection.name,
+        ok: true as const,
+        cacheHit: acquiredOne.cacheHit,
+        durationMs: acquiredOne.cacheHit ? Date.now() - started : acquiredOne.durationMs,
+        toolNames,
+      };
+      items.push(item);
+      console.info('[workmate] MCP warm', {
+        name: connection.name,
+        cacheHit: item.cacheHit,
+        durationMs: item.durationMs,
+        toolCount: toolNames.length,
+      });
+      return item;
+    } catch (error) {
+      const item = {
+        name: connection.name,
+        ok: false as const,
+        cacheHit: false,
+        durationMs: Date.now() - started,
+        toolNames: [] as string[],
+        error: error instanceof Error ? error.message : String(error),
+      };
+      items.push(item);
+      console.warn('[workmate] MCP warm failed', { name: connection.name, error: item.error, durationMs: item.durationMs });
+      return item;
+    }
+  }));
+
+  const labels = results.filter((item) => item.ok).map((item) => item.name).slice(0, 12);
+  const toolLines = results.flatMap((item) => {
+    if (!item.ok || !item.toolNames.length) return [];
+    return [
+      `- ${item.name}: ${item.toolNames.slice(0, 24).join(', ')}${item.toolNames.length > 24 ? ` (+${item.toolNames.length - 24} more)` : ''}`,
+    ];
+  });
+
+  let released = false;
+  return {
+    labels,
+    toolLines,
+    items,
+    hadColdStart,
+    release() {
+      if (released) return;
+      released = true;
+      for (const pooled of acquired) releasePooledMcp(pooled);
+    },
+  };
+}
+
 export type McpProbeTool = {
   name: string;
   description?: string;
@@ -336,33 +493,39 @@ export type McpProbeResult = {
   tools: McpProbeTool[];
   durationMs: number;
   error?: string;
+  /** Present when the probe reused the warm process pool. */
+  cacheHit?: boolean;
 };
 
-/** One-shot connectivity check: connect → list tools → close. */
+/** Connectivity check: prefer warm pool (fast); otherwise connect → list tools → release to idle TTL. */
 export async function probeMcpConnection(
   connection: McpConnection | McpConnectionRuntime,
   options?: { timeoutMs?: number },
 ): Promise<McpProbeResult> {
   const timeoutMs = Math.min(60_000, Math.max(3_000, options?.timeoutMs ?? 25_000));
   const started = Date.now();
-  let close: (() => Promise<void>) | undefined;
   try {
+    const runtime = connection as McpConnectionRuntime;
     const work = (async () => {
-      const session = await connectMcpClient(connection);
-      close = session.close;
-      const listed = await session.client.listTools();
-      return (listed.tools ?? []).slice(0, 80).map((tool) => ({
-        name: tool.name,
-        ...(tool.description ? { description: String(tool.description).slice(0, 400) } : {}),
-      }));
+      const { pooled, cacheHit } = await acquirePooledMcp(runtime);
+      try {
+        const tools = (pooled.listed.tools ?? []).slice(0, 80).map((tool) => ({
+          name: tool.name,
+          ...(tool.description ? { description: String(tool.description).slice(0, 400) } : {}),
+        }));
+        return { tools, cacheHit };
+      } finally {
+        releasePooledMcp(pooled);
+      }
     })();
-    const tools = await withTimeout(work, timeoutMs, 'MCP probe');
+    const { tools, cacheHit } = await withTimeout(work, timeoutMs, 'MCP probe');
     return {
       ok: true,
       toolCount: tools.length,
       toolNames: tools.map((item) => item.name),
       tools,
       durationMs: Date.now() - started,
+      cacheHit,
     };
   } catch (error) {
     return {
@@ -373,9 +536,5 @@ export async function probeMcpConnection(
       durationMs: Date.now() - started,
       error: error instanceof Error ? error.message : 'MCP probe failed.',
     };
-  } finally {
-    if (close) {
-      try { await close(); } catch { /* ignore */ }
-    }
   }
 }

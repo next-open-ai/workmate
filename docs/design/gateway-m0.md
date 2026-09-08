@@ -61,7 +61,7 @@ Electron Main: sql.js 仅存密钥(模型/搜索配置, safeStorage)与资产
   读域 KV（员工目录、技能目录 `capabilities.skills.v2` + 员工策略
   `capabilities.employee-policies`、运行时偏好 `workspace.employee-runtime-prefs`、
   MCP/KB 配置）并叠加 keyring 密钥，组装一次任务 run context（profile/model/skills
-  [含 `workmate-workspace` harness]/search/mcp/kb）。缺失项优雅降级；无模型则任务失败并
+  /search/mcp/kb）。平台工作区能力由运行时 Tool Contract 提供，不作为 Skill 注入。缺失项优雅降级；无模型则任务失败并
   给出明确提示。接入 `ProjectService.contextResolver` 兜底：`confirm` 不携带
   `runContextByTask/defaultContext` 时（远程终端场景）自动组装。
 - 密钥通道：`secrets.ts` → api 子进程启动后经 fork IPC 向 Electron 主进程请求一次性
@@ -73,7 +73,7 @@ Electron Main: sql.js 仅存密钥(模型/搜索配置, safeStorage)与资产
 
 `scripts/remote-project-confirm.mjs`：预置域 KV（员工目录+运行时偏好）并以
 `WORKMATE_SECRETS_FILE` 载入 keyring 后，远程终端仅 `POST /projects` + `confirm {}`，
-服务端组装器自动解析模型（ollama/chat-x）、注入 `workmate-workspace` harness 并完成
+服务端组装器自动解析模型（ollama/chat-x）、提供平台工作区 Tools 并完成
 waterfall 两任务 → `[remote-confirm] ALL PASS`。
 
 ### 3.4 项目调度

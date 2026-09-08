@@ -20,7 +20,7 @@ Vue renderer ────── HTTP / SSE ────────┘
 
 AgentScope 迁移说明见 `docs/agentscope-migration.md`；协议 ABI 见 `docs/design/agentscope-abi.md`。
 并发执行机制说明见 `docs/design/concurrency-runtime.md`；压测与验收清单见 `docs/design/concurrency-verification.md`。
-可重复执行的并发回归入口为 `pnpm concurrency:regression`。
+可重复执行的并发回归入口为 `pnpm concurrency:regression`（会先跑 dsh MCP/Skills 桥接 case）。独立验证：`pnpm dsh:regression`。
 
 快速入口：
 
@@ -70,6 +70,7 @@ pnpm dev        # 桌面开发：先构建 workspace 包，再起 Vite + Electro
 pnpm typecheck
 pnpm build
 pnpm package    # electron-builder 打安装包
+pnpm dsh:regression
 pnpm concurrency:regression
 ```
 

@@ -61,7 +61,11 @@ async function writeWorkspaceFile(runId: string, input: Record<string, unknown>)
 /**
  * Execute AgentScope external tools on the TypeScript host.
  */
-export async function executeHostToolCalls(runId: string, toolCalls: HostToolCall[]): Promise<HostToolResult[]> {
+export async function executeHostToolCalls(
+  runId: string,
+  toolCalls: HostToolCall[],
+  workspaceAccess: 'read' | 'write' | 'full' = 'write',
+): Promise<HostToolResult[]> {
   const results: HostToolResult[] = [];
   for (const call of toolCalls) {
     const input = call.input && typeof call.input === 'object' ? call.input : {};
@@ -88,6 +92,16 @@ export async function executeHostToolCalls(runId: string, toolCalls: HostToolCal
         continue;
       }
       if (call.name === 'write_workspace_file') {
+        if (workspaceAccess === 'read') {
+          results.push({
+            id: call.id,
+            name: call.name,
+            state: 'error',
+            output: JSON.stringify({ ok: false, error: 'Workspace write is not permitted for this run.' }),
+            summary: 'workspace write denied',
+          });
+          continue;
+        }
         const written = await writeWorkspaceFile(runId, input);
         results.push({
           id: call.id,
@@ -143,7 +157,7 @@ async function executeTool(call: HostToolCall, tool: AgentTool): Promise<HostToo
 }
 
 export async function prepareAgentscopeHostTools(
-  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs'>,
+  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess'>,
 ): Promise<AgentscopeHostToolSession> {
   const mcp = await loadMcpToolset(request.mcpConnections, { toolTimeoutMs: request.mcpToolTimeoutMs });
   const mcpByName = new Map<string, AgentTool>(mcp.tools.map((tool) => [tool.name, tool]));
@@ -173,7 +187,7 @@ export async function prepareAgentscopeHostTools(
           });
         }
       }
-      if (baseCalls.length) results.push(...await executeHostToolCalls(runId, baseCalls));
+      if (baseCalls.length) results.push(...await executeHostToolCalls(runId, baseCalls, request.workspaceAccess));
       return results;
     },
     close: mcp.close,

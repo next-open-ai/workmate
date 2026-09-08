@@ -65,6 +65,8 @@ jobs:
         run: pnpm agentscope:smoke
         env:
           WORKMATE_AGENTSCOPE_PYTHON: python
+      - name: dsh MCP/Skills regression
+        run: pnpm dsh:regression
       - name: Concurrency regression
         run: pnpm concurrency:regression
         env:

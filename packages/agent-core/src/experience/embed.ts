@@ -1,15 +1,13 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { ModelConfig } from '@workmate/contracts';
+import { embedOpenAiCompatible } from '../embedding-http.js';
 
 type EmbedConfig = {
   baseUrl: string;
   apiKey: string;
   model: string;
 };
-
-const timeout = <T>(promise: Promise<T>, ms = 20_000) =>
-  Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Experience embedding timed out.')), ms))]);
 
 export function resolveExperienceEmbed(model?: ModelConfig): EmbedConfig | null {
   // Prefer dedicated embedding connection fields (global vector model in Settings).
@@ -21,29 +19,14 @@ export function resolveExperienceEmbed(model?: ModelConfig): EmbedConfig | null 
   // When embedding uses its own key/url, treat missing key like ollama only if
   // the chat provider is ollama and we fell back to chat credentials.
   const usingChatCreds = !model?.embeddingBaseUrl && !model?.embeddingApiKey;
-  if (usingChatCreds && provider !== 'ollama' && !apiKey.trim()) return null;
-  if (!usingChatCreds && !apiKey.trim() && !/ollama/i.test(baseUrl)) return null;
-  return { baseUrl, apiKey: apiKey || 'ollama', model: embeddingModel };
+  if (usingChatCreds && provider !== 'ollama' && provider !== 'openai-compatible' && !apiKey.trim()) return null;
+  if (!usingChatCreds && !apiKey.trim() && !/ollama/i.test(baseUrl) && provider !== 'openai-compatible') return null;
+  return { baseUrl, apiKey: apiKey.trim(), model: embeddingModel };
 }
 
 export async function embedExperienceTexts(config: EmbedConfig, inputs: string[]): Promise<number[][]> {
-  const response = await timeout(fetch(`${config.baseUrl}/embeddings`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${config.apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ model: config.model, input: inputs }),
-  }));
-  if (!response.ok) throw new Error(`Experience embedding HTTP ${response.status}.`);
-  const data = await response.json() as { data?: Array<{ embedding?: number[] }> };
-  const rows = Array.isArray(data?.data) ? data.data : [];
-  if (rows.length !== inputs.length) throw new Error('Experience embedding size mismatch.');
-  return rows.map((row) => {
-    const vector = row.embedding;
-    if (!Array.isArray(vector) || !vector.length) throw new Error('Experience embedding vector missing.');
-    return vector.map(Number);
-  });
+  const result = await embedOpenAiCompatible(config, inputs);
+  return result.vectors;
 }
 
 export function cosine(a: number[], b: number[]) {

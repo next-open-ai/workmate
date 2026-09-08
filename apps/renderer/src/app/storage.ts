@@ -4,6 +4,11 @@ export function setStorageNamespace(value: string | null) {
   storageNamespace = value?.trim() || null;
 }
 
+/** Current auth-scoped storage prefix (`user:<id>`), or null before login. */
+export function getStorageNamespace(): string | null {
+  return storageNamespace;
+}
+
 function scopedKey(key: string) {
   if (!storageNamespace || key.startsWith('auth.')) return key;
   return `${storageNamespace}:${key}`;

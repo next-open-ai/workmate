@@ -64,7 +64,13 @@ export const BASELINE_CATALOG_SKILLS: BaselineCatalogSkill[] = [
     write: true,
     script: true,
     instructions:
-      '当用户需要 PDF 报告时：先整理结构（标题/摘要/章节/结论），再在工作区用脚本生成 PDF（优先 TrueType 中文字体）。成品写入 output/，不要只给文字大纲。',
+      '当用户需要 PDF 报告/行程手册等可打印文件时：\n'
+      + '1) 先整理结构（标题/摘要/章节/结论或日程）。\n'
+      + '2) 优先使用该 Skill 提供的模板或渲染资源；仅在需要定制版式时才使用脚本。\n'
+      + '3) 成品必须直接写入唯一的 output/<清晰文件名>.pdf，并验证可打开、页数大于 0。\n'
+      + '4) 已在 output/ 的 PDF 已是交付物：登记时不得改名或复制第二份；验证成功后立即结束。\n'
+      + '5) 不要先探测字体/环境或反复重写脚本；只有上一次渲染返回了具体错误，才针对该错误修复一次后重试。\n'
+      + '禁止只给文字大纲而不落盘 PDF。',
   }),
   skill({
     id: 'skill-baseline-docx',

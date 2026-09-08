@@ -40,6 +40,8 @@ jobs:
         run: pnpm --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: dsh MCP/Skills regression
+        run: pnpm dsh:regression
       - name: Run concurrency regression
         run: pnpm concurrency:regression
         env:
