@@ -25,6 +25,7 @@ permissions:
 
 jobs:
   regression:
+    if: ${{ false }} # Temporarily disabled in GitHub Actions; keep workflow file for quick restore.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

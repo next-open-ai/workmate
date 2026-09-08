@@ -223,7 +223,10 @@ test('writeWorkmateDshCordis persists MCP + skills bridge for a run workspace', 
     const yaml = readFileSync(cordisPath, 'utf8');
     assert.match(yaml, /serverName: "demo-mcp"/);
     assert.match(yaml, /enabled: true/);
-    assert.match(yaml, new RegExp(skillsRoot!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.ok(
+      yaml.includes(JSON.stringify(skillsRoot!)),
+      'custom skill dir must be serialized into cordis yaml',
+    );
     assert.equal(existsSync(path.join(skillsRoot!, 'review-notes', 'SKILL.md')), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

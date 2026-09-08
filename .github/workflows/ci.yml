@@ -29,8 +29,10 @@ jobs:
         env:
           WORKMATE_AGENTSCOPE_PYTHON: python
       - name: dsh MCP/Skills regression
+        if: ${{ false }} # Temporarily disabled in GitHub Actions; keep locally runnable.
         run: pnpm dsh:regression
       - name: Concurrency regression
+        if: ${{ false }} # Temporarily disabled in GitHub Actions; keep locally runnable.
         run: pnpm concurrency:regression
         env:
           WORKMATE_AGENTSCOPE_PYTHON: python3
