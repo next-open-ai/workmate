@@ -48,7 +48,9 @@ async function runDshMcpSkillsCase() {
   });
 }
 
-async function waitForServer(baseUrl, timeoutMs = 20_000) {
+async function waitForServer(baseUrl, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || process.env.WORKMATE_CONCURRENCY_REGRESSION_READY_TIMEOUT_MS || '120000');
+  const output = typeof options.output === 'function' ? options.output : () => '';
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     try {
@@ -59,7 +61,9 @@ async function waitForServer(baseUrl, timeoutMs = 20_000) {
     }
     await sleep(250);
   }
-  throw new Error(`Timed out waiting for API readiness at ${baseUrl}.`);
+  const recent = output().trim();
+  const detail = recent ? `\n--- recent api output ---\n${recent.slice(-4000)}` : '';
+  throw new Error(`Timed out waiting for API readiness at ${baseUrl} after ${timeoutMs}ms.${detail}`);
 }
 
 async function main() {
@@ -103,7 +107,7 @@ async function main() {
   });
 
   try {
-    await waitForServer(baseUrl);
+    await waitForServer(baseUrl, { output: () => output });
     const result = await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [loadtestEntry], {
         cwd: projectRoot,

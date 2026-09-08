@@ -71,6 +71,8 @@ jobs:
         run: pnpm concurrency:regression
         env:
           WORKMATE_AGENTSCOPE_PYTHON: python3
+          WORKMATE_CONCURRENCY_REGRESSION_READY_TIMEOUT_MS: '180000'
+          WORKMATE_CONCURRENCY_REGRESSION_DEBUG: '1'
       - name: Package ${{ matrix.artifact }}
         # 每个 runner 都是目标架构原生环境，因此无需再把参数透传给 pnpm/electron-builder。
         run: pnpm package
