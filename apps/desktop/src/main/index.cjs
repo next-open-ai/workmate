@@ -1036,6 +1036,10 @@ function bundledAgentscopeRoot() {
 /** Dev-time sibling checkout: tools/deepseek-harness next to workmate/. */
 function siblingDshRoot() {
   if (process.env.WORKMATE_DSH_ROOT?.trim()) return process.env.WORKMATE_DSH_ROOT.trim();
+  // Prefer on-demand user runtime (~/.workmate/dsh-runtime) for packaged apps.
+  const userRuntime = path.join(storageRoot(), 'dsh-runtime');
+  const userBin = path.join(userRuntime, 'node_modules', '@deepseek-ai', 'dsh-sdk-jsonrpc-demo', 'lib', 'bin.js');
+  if (existsSync(userBin)) return userRuntime;
   const candidate = path.resolve(__dirname, '../../../../../deepseek-harness');
   if (existsSync(path.join(candidate, 'pnpm-workspace.yaml'))) return candidate;
   return '';

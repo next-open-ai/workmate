@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { dshRuntimeRoot, probeDshRuntime, resolveDshJsonrpcBin } from './runtime-install.js';
 
 export type DshLaunchSpec = {
   command: string;
@@ -77,21 +78,58 @@ function resolveCordis(harnessRoot: string | null): string | null {
   return null;
 }
 
-function resolveBin(harnessRoot: string | null): { command: string; args: string[]; source: string } | null {
+function resolveBin(harnessRoot: string | null): {
+  command: string;
+  args: string[];
+  source: string;
+  spawnCwd?: string;
+} | null {
   const binEnv = process.env.WORKMATE_DSH_BIN?.trim();
   if (binEnv) {
     const extra = String(process.env.WORKMATE_DSH_ARGS || '')
       .split(/\s+/)
       .map((item) => item.trim())
       .filter(Boolean);
-    return { command: binEnv, args: extra, source: 'WORKMATE_DSH_BIN' };
+    return {
+      command: binEnv,
+      args: extra,
+      source: 'WORKMATE_DSH_BIN',
+      spawnCwd: process.env.WORKMATE_DSH_ROOT?.trim() || harnessRoot || undefined,
+    };
   }
 
-  // Prefer a globally installed dsh-jsonrpc-agent if present.
+  // Prefer on-demand install under ~/.workmate/dsh-runtime (release path).
+  const userRoot = dshRuntimeRoot();
+  const userBin = resolveDshJsonrpcBin(userRoot);
+  if (userBin) {
+    if (userBin.endsWith('.js')) {
+      return {
+        command: process.execPath,
+        args: [userBin],
+        source: `user-runtime:${userBin}`,
+        spawnCwd: userRoot,
+      };
+    }
+    return {
+      command: userBin,
+      args: [],
+      source: `user-runtime:${userBin}`,
+      spawnCwd: userRoot,
+    };
+  }
+
+  // Prefer a globally / locally installed dsh-jsonrpc-agent if present.
   try {
     const require = createRequire(import.meta.url);
     const resolved = require.resolve('@deepseek-ai/dsh-sdk-jsonrpc-demo/bin');
-    if (resolved) return { command: process.execPath, args: [resolved], source: 'node_modules' };
+    if (resolved) {
+      return {
+        command: process.execPath,
+        args: [resolved],
+        source: 'node_modules',
+        spawnCwd: path.dirname(path.dirname(path.dirname(resolved))),
+      };
+    }
   } catch {
     /* not installed in workmate */
   }
@@ -99,7 +137,12 @@ function resolveBin(harnessRoot: string | null): { command: string; args: string
   if (harnessRoot) {
     const built = path.join(harnessRoot, 'packages/examples/jsonrpc-demo/lib/bin.js');
     if (exists(built)) {
-      return { command: process.execPath, args: [built], source: `sibling:${built}` };
+      return {
+        command: process.execPath,
+        args: [built],
+        source: `sibling:${built}`,
+        spawnCwd: harnessRoot,
+      };
     }
     const srcBin = path.join(harnessRoot, 'packages/examples/jsonrpc-demo/src/bin.ts');
     const tsxCandidates = [
@@ -108,18 +151,19 @@ function resolveBin(harnessRoot: string | null): { command: string; args: string
     ];
     const tsxBin = tsxCandidates.find((item) => exists(item));
     if (exists(srcBin) && tsxBin) {
-      // Prefer node + cli.mjs so we do not depend on a shell shim.
       if (tsxBin.endsWith('.mjs') || tsxBin.endsWith('.js')) {
         return {
           command: process.execPath,
           args: [tsxBin, srcBin],
           source: `sibling-tsx:${srcBin}`,
+          spawnCwd: harnessRoot,
         };
       }
       return {
         command: tsxBin,
         args: [srcBin],
         source: `sibling-tsx:${srcBin}`,
+        spawnCwd: harnessRoot,
       };
     }
   }
@@ -147,10 +191,12 @@ export function resolveDshLaunch(options?: { cordisConfig?: string }): DshLaunch
   const bin = resolveBin(harnessRoot);
 
   if (!bin) {
+    const probe = probeDshRuntime({ moduleDir: moduleDir() });
     throw new Error(
-      'DeepSeek Harness runtime not found. Set WORKMATE_DSH_BIN to dsh-jsonrpc-agent '
-      + '(or node path to its bin). Optional: WORKMATE_DSH_ROOT=/path/to/deepseek-harness '
-      + `(looked relative to ${moduleDir()} and cwd ${process.cwd()}).`,
+      'DeepSeek Harness runtime not found. '
+      + 'Open 环境检查 and run「安装 dsh 编码引擎」, or set WORKMATE_DSH_BIN. '
+      + `Expected user runtime at ${dshRuntimeRoot()}. `
+      + `(${probe.detail}; looked relative to ${moduleDir()} and cwd ${process.cwd()}).`,
     );
   }
   if (!cordisConfig) {
@@ -164,7 +210,7 @@ export function resolveDshLaunch(options?: { cordisConfig?: string }): DshLaunch
     command: bin.command,
     args: [...bin.args, cordisConfig],
     cordisConfig,
-    spawnCwd: harnessRoot ?? path.dirname(cordisConfig),
+    spawnCwd: bin.spawnCwd ?? harnessRoot ?? path.dirname(cordisConfig),
     source: bin.source,
   };
 }

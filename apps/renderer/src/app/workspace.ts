@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { materializeWorkspaceAssets, streamChat, syncWorkspaceRun, type RuntimeSkill, type ToolActivity, type ToolApproval, type SearchSource } from '../services/api.js';
+import { materializeWorkspaceAssets, createManagedWorkspace, streamChat, syncWorkspaceRun, type RuntimeSkill, type ToolActivity, type ToolApproval, type SearchSource } from '../services/api.js';
 import * as orch from '../services/orchestration.js';
 import type { ProviderConfig } from './model-config.js';
 import { toModelPayload, useModelConfig } from './model-config.js';
@@ -10,6 +10,7 @@ import { useKnowledgeConfig } from './kb-config.js';
 import { readStored, writeStored } from './storage.js';
 import { useCapabilities, type ExecutionLevel } from './capabilities.js';
 import { useAssets, type Asset } from './assets.js';
+import { useAutoScheduleConfig } from './auto-schedule-config.js';
 import type { Automation } from './automations.js';
 import {
   useEmployeeCatalog,
@@ -22,7 +23,45 @@ export type { Employee, EmployeeDraft, EmployeeId } from './employees.js';
 export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
 export type CollaborationDelivery = 'synthesize' | 'direct';
 export interface CollaborationRun { employeeId: EmployeeId; task: string; status: 'running' | 'completed' | 'failed'; summary: string; activities: ToolActivity[]; error?: string; }
-export interface Message { id: string; role: 'user' | 'assistant'; content: string; reasoning?: string; activities?: ToolActivity[]; approvals?: ToolApproval[]; assets?: Asset[]; sources?: Array<SearchSource & { provider: string }>; collaborations?: CollaborationRun[]; collaborationDelivery?: CollaborationDelivery; /** Resolved execution engine for this assistant turn. */ engine?: 'pi' | 'agentscope' | 'dsh'; startedAt?: number; elapsedMs?: number; }
+export type ScheduleTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export interface ScheduleTaskRun {
+  id: string;
+  title: string;
+  objective: string;
+  employeeId: EmployeeId;
+  skillIds: string[];
+  dependsOn: string[];
+  status: ScheduleTaskStatus;
+  summary: string;
+  activities: ToolActivity[];
+  error?: string;
+  assets?: Array<{ id: string; name: string; sizeBytes: number }>;
+}
+export interface ChatScheduleState {
+  status: 'planning' | 'running' | 'completed' | 'failed' | 'cancelled';
+  mode: 'dag';
+  rationale?: string;
+  tasks: ScheduleTaskRun[];
+  selectedTaskId?: string;
+}
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  reasoning?: string;
+  activities?: ToolActivity[];
+  approvals?: ToolApproval[];
+  assets?: Asset[];
+  sources?: Array<SearchSource & { provider: string }>;
+  collaborations?: CollaborationRun[];
+  collaborationDelivery?: CollaborationDelivery;
+  /** Auto-schedule (planner → DAG → multi-agent) turn state. */
+  schedule?: ChatScheduleState;
+  /** Resolved execution engine for this assistant turn. */
+  engine?: 'pi' | 'agentscope' | 'dsh';
+  startedAt?: number;
+  elapsedMs?: number;
+}
 export interface Conversation { id: string; title: string; employeeId: EmployeeId; messages: Message[]; updatedAt: number; serverSessionId?: string; }
 export interface ProjectTaskDraft { title: string; objective: string; employeeId: EmployeeId; skillIds: string[]; dependsOn?: number[]; contract?: { outputs?: string[]; acceptance?: string; maxSteps?: number; timeoutMs?: number; maxAttempts?: number } };
 export interface ProjectTaskTranscript {
@@ -196,6 +235,8 @@ export function useWorkspace() {
   void loadKnowledgeConfig();
   const { allowedSkillsFor, policyFor, skills, setExecutionPolicy } = useCapabilities();
   const { archiveArtifact } = useAssets();
+  const { config: autoScheduleConfig, load: loadAutoScheduleConfig } = useAutoScheduleConfig();
+  void loadAutoScheduleConfig();
   const { modelForEmployee } = useModelConfig();
 
   const runOptionsFor = (employeeId: EmployeeId, onlineSearch = true) => {
@@ -279,6 +320,7 @@ export function useWorkspace() {
         };
         if (message.role === 'assistant' && old) {
           if (old.reasoning) base.reasoning = old.reasoning;
+          if (old.schedule) base.schedule = old.schedule;
           base.activities = old.activities ?? [];
           base.approvals = old.approvals ?? [];
           base.assets = old.assets ?? [];
@@ -915,7 +957,7 @@ export function useWorkspace() {
       void writeStored('workspace.default-employee', currentEmployeeId.value);
     }
   };
-  const addMessage = async (content: string, model: ProviderConfig, options: { employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean } = {}) => {
+  const addMessage = async (content: string, model: ProviderConfig, options: { employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
     const text = content.trim(); if (!text) return undefined;
     if (options.employeeId) currentEmployeeId.value = options.employeeId;
     if (options.newConversation) activeConversationId.value = null;
@@ -933,6 +975,316 @@ export function useWorkspace() {
     conversation.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: '', activities: [], approvals: [], assets: [], collaborations: [], startedAt: Date.now() });
     // Use the reactive proxy from the array so stream mutations invalidate UI computeds.
     const assistantMessage = conversation.messages[conversation.messages.length - 1];
+
+    const bump = () => { conversations.value = [...conversations.value]; };
+
+    const runChatAutoSchedule = async () => {
+      activeRunAbort?.abort();
+      const runAbort = new AbortController();
+      activeRunAbort = runAbort;
+      const throwIfAborted = () => {
+        if (runAbort.signal.aborted) throw Object.assign(new Error('已由用户中止当前执行。'), { name: 'AbortError' });
+      };
+
+      assistantMessage.schedule = { status: 'planning', mode: 'dag', tasks: [] };
+      assistantMessage.content = '🧭 自动调度：正在根据可用数字员工规划 DAG…';
+      bump();
+
+      // Keep assets on this chat session (same id used by session archives).
+      let sessionAssetId = conversation.serverSessionId || conversation.id;
+      if (serverChatActive()) {
+        sessionAssetId = await ensureServerSession(conversation, text);
+      }
+
+      const visibleEmployeeIds = employees.value.map((item) => item.id);
+      const schedulePrefs = autoScheduleConfig.value;
+      const draft = await generateProjectDraft(text, model, {
+        preferredMode: 'dag',
+        employeeIds: visibleEmployeeIds,
+        primaryEmployeeId: employee.id,
+        preferMinimal: schedulePrefs.preferMinimal,
+        strongFitOnly: schedulePrefs.strongFitOnly,
+        maxAgents: schedulePrefs.maxAgents,
+      });
+      throwIfAborted();
+
+      const scheduleTasks: ScheduleTaskRun[] = draft.tasks.map((task, index) => ({
+        id: `t${index}`,
+        title: task.title,
+        objective: task.objective,
+        employeeId: task.employeeId,
+        skillIds: task.skillIds ?? [],
+        dependsOn: (task.dependsOn ?? []).map((dep) => `t${dep}`),
+        status: 'queued',
+        summary: '',
+        activities: [],
+        assets: [],
+      }));
+
+      assistantMessage.schedule = {
+        status: 'running',
+        mode: 'dag',
+        rationale: draft.modeRationale,
+        tasks: scheduleTasks,
+        selectedTaskId: scheduleTasks[0]?.id,
+      };
+      assistantMessage.content = `🧭 已规划 ${scheduleTasks.length} 个任务（${draft.suggestedMode}），开始调度执行…\n${draft.modeRationale ? `\n规划说明：${draft.modeRationale}` : ''}`;
+      bump();
+
+      // One shared workspace for the whole schedule so downstream agents can read upstream deliverables.
+      let sharedWorkspace = '';
+      try {
+        sharedWorkspace = await createManagedWorkspace(`chat-sched-${conversation.id.slice(0, 8)}`);
+      } catch {
+        sharedWorkspace = '';
+      }
+
+      const byId = new Map(scheduleTasks.map((task) => [task.id, task]));
+      const pending = new Set(scheduleTasks.map((task) => task.id));
+
+      while (pending.size) {
+        throwIfAborted();
+        const ready = [...pending].filter((id) => {
+          const task = byId.get(id)!;
+          return task.dependsOn.every((dep) => byId.get(dep)?.status === 'completed');
+        });
+
+        if (!ready.length) {
+          for (const id of [...pending]) {
+            const task = byId.get(id)!;
+            const blocked = task.dependsOn.some((dep) => {
+              const status = byId.get(dep)?.status;
+              return status === 'failed' || status === 'cancelled';
+            });
+            if (blocked) {
+              task.status = 'cancelled';
+              task.error = '依赖任务未完成，已跳过。';
+              pending.delete(id);
+            }
+          }
+          if (![...pending].some((id) => {
+            const task = byId.get(id)!;
+            return task.dependsOn.every((dep) => byId.get(dep)?.status === 'completed');
+          })) {
+            break;
+          }
+          continue;
+        }
+
+        await Promise.all(ready.map(async (taskId) => {
+          const task = byId.get(taskId)!;
+          pending.delete(taskId);
+          task.status = 'running';
+          if (!assistantMessage.schedule?.selectedTaskId) {
+            assistantMessage.schedule!.selectedTaskId = task.id;
+          }
+          bump();
+          const agent = employees.value.find((item) => item.id === task.employeeId) ?? employee;
+          let lastRunId = '';
+          try {
+            const skills = await skillRuntimeFor(agent.id, task.skillIds.length ? task.skillIds : undefined);
+            const opts = runOptionsFor(agent.id, options.onlineSearch ?? true);
+            const agentModel = modelForEmployee(agent.id, model) ?? model;
+            const dependencyBrief = task.dependsOn
+              .map((dep) => byId.get(dep))
+              .filter((item): item is ScheduleTaskRun => Boolean(item?.summary.trim()))
+              .map((item) => `### ${item.title}\n${item.summary}`)
+              .join('\n\n');
+            const upstreamAssets = task.dependsOn
+              .flatMap((dep) => byId.get(dep)?.assets ?? [])
+              .filter((asset, index, list) => list.findIndex((item) => item.id === asset.id) === index);
+            if (sharedWorkspace && upstreamAssets.length) {
+              await materializeWorkspaceAssets(
+                sharedWorkspace,
+                upstreamAssets.map((asset) => ({ assetId: asset.id, name: asset.name })),
+              ).catch(() => undefined);
+            }
+            const prompt = [
+              `用户目标：${text}`,
+              `你的任务：${task.title}`,
+              `任务目标：${task.objective}`,
+              dependencyBrief ? `上游任务结果：\n${dependencyBrief}` : '',
+              sharedWorkspace
+                ? '本轮自动调度共用同一工作区：上游交付文件已同步到当前工作区（通常在 output/ 下）。请直接读取/沿用这些文件，不要假设隔离环境。'
+                : '上游交付仅以文字摘要提供；请依据摘要继续，不要依赖其它节点的隔离工作区路径。',
+              '请完成本任务并给出可执行结论。如需交付文件，请写入 output/ 目录。',
+            ].filter(Boolean).join('\n\n');
+
+            await streamChat({
+              profile: {
+                id: agent.id,
+                name: labelEmployee(agent),
+                toolIds: skills.map((skill) => skill.id),
+                instructions: profileInstructions(agent, 'You are executing one node in an auto-scheduled DAG. Complete only this assigned task. Upstream deliverables may already exist in the shared workspace under output/. Prefer reusing them. Write new deliverables under output/ when needed. Reply in the user\'s language.'),
+              },
+              messages: [{ role: 'user', content: prompt }],
+              model: toModelPayload(agentModel, { enableSearch: opts.enableBuiltinSearch }),
+              skills,
+              searchProviders: opts.searchProviders,
+              mcpConnections: opts.mcpConnections,
+              knowledgeBases: opts.knowledgeBases,
+              ...(sharedWorkspace ? { projectWorkspacePath: sharedWorkspace } : {}),
+              maxSteps: opts.maxSteps,
+              runTimeoutMs: opts.runTimeoutMs,
+              mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
+              ...(opts.engine ? { engine: opts.engine } : {}),
+              signal: runAbort.signal,
+            }, (delta) => {
+              task.summary += delta;
+              bump();
+            }, (activity) => {
+              const existing = task.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
+              if (existing && activity.status !== 'running') Object.assign(existing, activity);
+              else task.activities.push(activity);
+              bump();
+            }, (approval) => {
+              if (!assistantMessage.approvals?.some((item) => item.skillId === approval.skillId && item.capability === approval.capability)) {
+                assistantMessage.approvals?.push(approval);
+                bump();
+              }
+            }, async (artifact) => {
+              lastRunId = artifact.runId;
+              const normalized = artifact.path.replace(/\\/g, '/').replace(/^\/+/, '');
+              if (!isUserFacingDeliverablePath(normalized)) return;
+              try {
+                const asset = await archiveArtifact({
+                  runId: artifact.runId,
+                  relativePath: normalized,
+                  conversationId: sessionAssetId,
+                  employeeId: agent.id,
+                });
+                if (!task.assets?.some((item) => item.id === asset.id)) {
+                  task.assets = [...(task.assets ?? []), { id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes }];
+                }
+                if (!assistantMessage.assets?.some((item) => item.id === asset.id)) {
+                  assistantMessage.assets?.push(asset as Asset);
+                }
+                bump();
+              } catch (error) {
+                const message = error instanceof Error ? error.message : '';
+                if (/Only business deliverables|Only user-facing deliverables|no longer available/i.test(message)) return;
+              }
+            });
+
+            if (sharedWorkspace && lastRunId) {
+              await syncWorkspaceRun(sharedWorkspace, lastRunId).catch(() => undefined);
+              if (task.assets?.length) {
+                await materializeWorkspaceAssets(
+                  sharedWorkspace,
+                  task.assets.map((asset) => ({ assetId: asset.id, name: asset.name })),
+                ).catch(() => undefined);
+              }
+            }
+
+            if (runAbort.signal.aborted) {
+              task.status = 'cancelled';
+              task.error = '已由用户中止';
+              markActivitiesInterrupted(task.activities);
+            } else {
+              task.status = 'completed';
+              if (!task.summary.trim()) task.summary = '（本任务未返回文本。）';
+            }
+          } catch (cause) {
+            if (isAbortError(cause)) {
+              task.status = 'cancelled';
+              task.error = cause instanceof Error ? cause.message : '已中止';
+              markActivitiesInterrupted(task.activities);
+            } else if (task.summary.trim().length >= 80 || (task.assets?.length ?? 0) > 0) {
+              // Stream may drop at the end after useful work; prefer soft-complete over false failure.
+              task.status = 'completed';
+              task.error = undefined;
+              if (sharedWorkspace && lastRunId) {
+                await syncWorkspaceRun(sharedWorkspace, lastRunId).catch(() => undefined);
+              }
+            } else {
+              task.status = 'failed';
+              task.error = friendlyAssistantError(cause instanceof Error ? cause.message : '任务执行失败');
+            }
+          }
+          bump();
+        }));
+      }
+
+      throwIfAborted();
+
+      const failed = scheduleTasks.filter((task) => task.status === 'failed' || task.status === 'cancelled');
+      const completed = scheduleTasks.filter((task) => task.status === 'completed');
+      assistantMessage.schedule!.status = failed.length && !completed.length ? 'failed' : 'completed';
+
+      const digest = completed.map((task) => {
+        const name = labelEmployee(employees.value.find((item) => item.id === task.employeeId) ?? { id: task.employeeId, color: '#526fe0', initials: 'AI' } as Employee);
+        return `### ${task.title} · ${name}\n${task.summary}`;
+      }).join('\n\n');
+
+      assistantMessage.content = '🧭 调度执行完成，正在汇总最终答复…\n';
+      bump();
+
+      const synthesizeModel = modelForEmployee(employee.id, model) ?? model;
+      const synthesizeOpts = runOptionsFor(employee.id, options.onlineSearch ?? true);
+      const synthesizeSkills = await skillRuntimeFor(employee.id, options.skillIds);
+      let finalText = '';
+      await streamChat({
+        profile: {
+          id: employee.id,
+          name: labelEmployee(employee),
+          toolIds: [],
+          instructions: profileInstructions(employee, 'You are the lead coordinator. Synthesize the scheduled agents\' results into one clear final answer for the user. Do not invent missing deliverables.'),
+        },
+        messages: [{
+          role: 'user',
+          content: `用户请求：${text}\n\n各任务结果：\n${digest || '（无成功任务结果）'}\n\n请给出面向用户的最终答复。`,
+        }],
+        model: toModelPayload(synthesizeModel, { enableSearch: false }),
+        skills: [],
+        searchProviders: [],
+        maxSteps: Math.min(8, synthesizeOpts.maxSteps),
+        runTimeoutMs: synthesizeOpts.runTimeoutMs,
+        signal: runAbort.signal,
+      }, (delta) => {
+        finalText += delta;
+        assistantMessage.content = finalText;
+        bump();
+      });
+
+      if (!assistantMessage.content.trim()) {
+        assistantMessage.content = completed.length
+          ? `自动调度已完成 ${completed.length} 个任务。\n\n${digest}`
+          : '自动调度未产生可用结果，请重试或关闭自动调度后直接对话。';
+      }
+      if (failed.length) {
+        appendAssistantNotice(assistantMessage, `⚠ ${failed.length} 个任务未成功完成。`);
+      }
+      bump();
+    };
+
+    if (options.autoSchedule) {
+      try {
+        await runChatAutoSchedule();
+        assistantMessage.elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
+        void persist();
+        return { conversationId: conversation.id, transcript: { prompt: userMessage.content, conversationId: conversation.id, assistantContent: assistantMessage.content, activities: assistantMessage.activities ?? [], approvals: assistantMessage.approvals ?? [], assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })) } };
+      } catch (cause) {
+        assistantMessage.elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
+        if (assistantMessage.schedule) {
+          assistantMessage.schedule.status = isAbortError(cause) ? 'cancelled' : 'failed';
+          for (const task of assistantMessage.schedule.tasks) {
+            if (task.status === 'queued' || task.status === 'running') {
+              task.status = 'cancelled';
+              task.error = task.error || (isAbortError(cause) ? '已中止' : '调度中断');
+            }
+          }
+        }
+        if (isAbortError(cause)) {
+          appendAssistantNotice(assistantMessage, `⏹ ${cause instanceof Error ? cause.message : '已由用户中止当前执行。'}`);
+          markActivitiesInterrupted(assistantMessage.activities);
+        } else {
+          appendAssistantNotice(assistantMessage, cause instanceof Error ? `⚠ ${friendlyAssistantError(cause.message)}` : '⚠ 自动调度失败，请稍后重试。');
+        }
+        void persist();
+        return { conversationId: conversation.id, transcript: { prompt: userMessage.content, conversationId: conversation.id, assistantContent: assistantMessage.content, activities: assistantMessage.activities ?? [], approvals: assistantMessage.approvals ?? [], assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })) } };
+      }
+    }
+
     const plannedCollaborators = [...new Set(options.collaboratorIds ?? [])].filter((cid) => cid !== employee.id).slice(0, 3);
     if (serverChatActive() && !plannedCollaborators.length) {
       // M0 server-backed turn: the orchestration server owns the run/approval
@@ -1210,29 +1562,70 @@ export function useWorkspace() {
   const generateProjectDraft = async (
     goal: string,
     model: ProviderConfig,
-    options?: { employeeIds?: EmployeeId[]; preferredMode?: import('./projects.js').ProjectMode },
+    options?: {
+      employeeIds?: EmployeeId[];
+      preferredMode?: import('./projects.js').ProjectMode;
+      /** Prefer the fewest agents; collapse to primary when sufficient. */
+      preferMinimal?: boolean;
+      /** Only keep agents that are a strong fit for a distinct need. */
+      strongFitOnly?: boolean;
+      /** Hard cap on distinct agents in the plan (default 5). */
+      maxAgents?: number;
+      /** Current conversation employee — preferred solo owner when capable. */
+      primaryEmployeeId?: EmployeeId;
+    },
   ): Promise<import('./project-planning.js').ProjectDraftResult> => {
     const { analyzeModeFit } = await import('./project-planning.js');
     type ProjectMode = import('./project-planning.js').PlanningMode;
     const preferredMode: ProjectMode = options?.preferredMode ?? 'parallel';
+    const maxAgents = Math.max(1, Math.min(12, options?.maxAgents ?? 5));
+    const preferMinimal = options?.preferMinimal === true;
+    const strongFitOnly = options?.strongFitOnly === true;
     const allowedList = (options?.employeeIds?.length
       ? options.employeeIds.filter((id) => employees.value.some((item) => item.id === id))
       : employees.value.map((item) => item.id));
+    const primaryEmployeeId = (options?.primaryEmployeeId && allowedList.includes(options.primaryEmployeeId))
+      ? options.primaryEmployeeId
+      : (allowedList[0] ?? 'general');
     const roster = allowedList.join('|') || 'general|research|code|administrator';
     const allowed = new Set<EmployeeId>(allowedList.length ? allowedList : ['general', 'research', 'code', 'administrator']);
+    const rosterBrief = allowedList.map((id) => {
+      const item = employees.value.find((row) => row.id === id);
+      const focus = item ? collaboratorFocus(item).slice(0, 120) : id;
+      const name = item ? labelEmployee(item) : id;
+      const mark = id === primaryEmployeeId ? ' [PRIMARY]' : '';
+      return `- ${id}${mark}: ${name} — ${focus}`;
+    }).join('\n');
 
     const modeGuide: Record<ProjectMode, string> = {
       waterfall: 'Prefer a linear chain: each task depends on the previous index only.',
       parallel: 'Prefer independent tasks with empty dependsOn; no edges.',
       discussion: 'Prefer 2+ independent viewpoint tasks, then one integrator that depends on all of them.',
-      dag: 'Prefer an explicit DAG with meaningful fan-in/fan-out dependsOn.',
+      dag: 'Prefer an explicit DAG with meaningful fan-in/fan-out dependsOn — but only when multiple strong-fit agents are truly required.',
     };
+
+    const minimalRules = preferMinimal || strongFitOnly
+      ? `
+HARD PLANNING CONSTRAINTS (must obey):
+1. Minimize distinct agents. If the PRIMARY employee (${primaryEmployeeId}) can complete the goal alone, return EXACTLY 1 task with employeeId="${primaryEmployeeId}" and set singleAgentSufficient=true.
+2. Only add another agent when they are a STRONG fit for a capability the primary clearly lacks and that is necessary for success. Never add agents for optional review, polish, or "more perspectives".
+3. At most ${maxAgents} distinct employeeIds. Prefer 1; 2-3 only when clearly necessary; never pad to fill a quota.
+4. Task count may be small (1 is ideal). Do not invent filler tasks.
+5. Every included employeeId must appear in the roster and must be justified in rationale as a strong fit.`
+      : `Use 2-${maxAgents} tasks when helpful. dependsOn are 0-based indices of prior tasks.`;
 
     // Phase 1 — structure only (roles + edges).
     let structureOut = '';
-    const structurePrompt = `You are Workmate's project coordinator (phase 1: structure). Preferred collaboration mode: ${preferredMode}. ${modeGuide[preferredMode]} If the goal cannot honestly fit that mode, still propose the best graph and set suggestedMode accordingly. Return ONLY JSON: {"suggestedMode":"waterfall|parallel|discussion|dag","rationale":string,"tasks":[{"title":string,"employeeId": one of [${roster}],"dependsOn":number[]}]}. 2-5 tasks. dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
+    const structurePrompt = `You are Workmate's project coordinator (phase 1: structure). Preferred collaboration mode: ${preferredMode}. ${modeGuide[preferredMode]} If the goal cannot honestly fit that mode, still propose the best graph and set suggestedMode accordingly.
+${minimalRules}
+
+Available employees (choose only from these):
+${rosterBrief}
+
+Return ONLY JSON: {"suggestedMode":"waterfall|parallel|discussion|dag","singleAgentSufficient":boolean,"rationale":string,"tasks":[{"title":string,"employeeId": one of [${roster}],"dependsOn":number[],"fitReason":string}]}.
+dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
     await streamChat({
-      profile: { id: 'project-coordinator-structure', name: 'Project coordinator', instructions: 'Output valid JSON only.', toolIds: [] },
+      profile: { id: 'project-coordinator-structure', name: 'Project coordinator', instructions: 'Output valid JSON only. Prefer the fewest strong-fit agents.', toolIds: [] },
       messages: [{ role: 'user', content: structurePrompt }],
       model: toModelPayload(model),
       skills: [],
@@ -1240,41 +1633,89 @@ export function useWorkspace() {
       maxSteps: DEFAULT_MAX_STEPS,
     }, (delta) => { structureOut += delta; });
 
-    type StructureTask = { title: string; employeeId: EmployeeId; dependsOn: number[] };
+    type StructureTask = { title: string; employeeId: EmployeeId; dependsOn: number[]; fitReason?: string };
     let structureTasks: StructureTask[] = [];
     let llmSuggested: ProjectMode | undefined;
     let llmRationale = '';
+    let singleAgentSufficient = false;
     try {
       const json = structureOut.match(/\{[\s\S]*\}/)?.[0] ?? structureOut;
       const parsed = JSON.parse(json) as {
         suggestedMode?: string;
         rationale?: string;
+        singleAgentSufficient?: boolean;
         tasks?: Array<Partial<StructureTask>>;
       };
       if (parsed.suggestedMode === 'waterfall' || parsed.suggestedMode === 'parallel' || parsed.suggestedMode === 'discussion' || parsed.suggestedMode === 'dag') {
         llmSuggested = parsed.suggestedMode;
       }
       llmRationale = String(parsed.rationale || '').slice(0, 400);
-      structureTasks = (parsed.tasks ?? []).slice(0, 5).map((item, index) => ({
+      singleAgentSufficient = parsed.singleAgentSufficient === true;
+      structureTasks = (parsed.tasks ?? []).slice(0, Math.max(maxAgents, 5)).map((item, index) => ({
         title: String(item.title || `任务 ${index + 1}`).slice(0, 80),
-        employeeId: allowed.has(item.employeeId as EmployeeId) ? item.employeeId as EmployeeId : (allowedList[0] ?? 'general'),
+        employeeId: allowed.has(item.employeeId as EmployeeId) ? item.employeeId as EmployeeId : primaryEmployeeId,
         dependsOn: Array.isArray(item.dependsOn)
           ? item.dependsOn.filter((value): value is number => typeof value === 'number' && value >= 0 && value < index)
           : [],
+        fitReason: typeof item.fitReason === 'string' ? item.fitReason.slice(0, 160) : undefined,
       }));
     } catch { /* fall through to template-ish structure */ }
 
+    // Enforce minimal / strong-fit / max-agent caps after the model responds.
+    if (preferMinimal && (singleAgentSufficient || structureTasks.length <= 1)) {
+      const sole = structureTasks[0];
+      structureTasks = [{
+        title: sole?.title || '完成用户目标',
+        employeeId: singleAgentSufficient ? primaryEmployeeId : (sole?.employeeId ?? primaryEmployeeId),
+        dependsOn: [],
+        fitReason: sole?.fitReason || '当前智能体可独立完成',
+      }];
+    } else if (structureTasks.length) {
+      const kept: StructureTask[] = [];
+      const usedAgents = new Set<EmployeeId>();
+      const indexMap = new Map<number, number>();
+      structureTasks.forEach((task, index) => {
+        const isNewAgent = !usedAgents.has(task.employeeId);
+        if (isNewAgent && usedAgents.size >= maxAgents) return;
+        const nextIndex = kept.length;
+        indexMap.set(index, nextIndex);
+        kept.push({
+          ...task,
+          dependsOn: task.dependsOn
+            .map((dep) => indexMap.get(dep))
+            .filter((dep): dep is number => typeof dep === 'number'),
+        });
+        usedAgents.add(task.employeeId);
+      });
+      structureTasks = kept.length ? kept : [{
+        title: '完成用户目标',
+        employeeId: primaryEmployeeId,
+        dependsOn: [],
+        fitReason: '回退为当前智能体',
+      }];
+      // If minimal mode still somehow kept many weak extras, collapse when only primary is needed.
+      if (preferMinimal && usedAgents.size > 1 && singleAgentSufficient) {
+        structureTasks = [{
+          title: structureTasks[0]?.title || '完成用户目标',
+          employeeId: primaryEmployeeId,
+          dependsOn: [],
+          fitReason: '当前智能体可独立完成',
+        }];
+      }
+    }
+
     if (!structureTasks.length) {
-      structureTasks = (allowedList.length ? allowedList : (['research', 'general', 'code'] as EmployeeId[])).slice(0, 3).map((employeeId, index) => ({
-        title: index === 0 ? '任务分析' : index === 1 ? '方案与产出' : '质量检查',
-        employeeId,
-        dependsOn: preferredMode === 'parallel' ? [] : (index ? [index - 1] : []),
-      }));
+      structureTasks = [{
+        title: '完成用户目标',
+        employeeId: primaryEmployeeId,
+        dependsOn: [],
+        fitReason: '默认由当前智能体执行',
+      }];
     }
 
     // Phase 2 — fill objectives + contracts for the fixed structure.
     let detailOut = '';
-    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Use contract.maxSteps when one task obviously needs a materially larger or smaller tool-step budget than the default. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
+    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Use contract.maxSteps when one task obviously needs a materially larger or smaller tool-step budget than the default. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
     await streamChat({
       profile: { id: 'project-coordinator-detail', name: 'Project coordinator', instructions: 'Output valid JSON array only.', toolIds: [] },
       messages: [{ role: 'user', content: detailPrompt }],
@@ -1304,18 +1745,24 @@ export function useWorkspace() {
       contract: details[index]?.contract,
     }));
 
+    const uniqueAgents = new Set(tasks.map((task) => task.employeeId)).size;
     const fit = analyzeModeFit(preferredMode, tasks);
     // Prefer structural inference; LLM suggestedMode is advisory when it disagrees with graph.
-    const suggestedMode = fit.suggestedMode !== preferredMode ? fit.suggestedMode : (llmSuggested ?? fit.suggestedMode);
+    const suggestedMode = tasks.length <= 1
+      ? 'parallel'
+      : (fit.suggestedMode !== preferredMode ? fit.suggestedMode : (llmSuggested ?? fit.suggestedMode));
     const modeFitsPreferred = suggestedMode === preferredMode;
+    const minimalNote = preferMinimal
+      ? `最少智能体约束：${uniqueAgents} 人参与${singleAgentSufficient || uniqueAgents === 1 ? '（当前智能体可独立完成则不扩编）' : ''}。`
+      : '';
     return {
       tasks,
       preferredMode,
       suggestedMode: modeFitsPreferred ? preferredMode : suggestedMode,
       modeFitsPreferred,
-      modeRationale: modeFitsPreferred
-        ? (llmRationale || fit.modeRationale)
-        : (llmRationale || fit.modeRationale),
+      modeRationale: [minimalNote, modeFitsPreferred ? (llmRationale || fit.modeRationale) : (llmRationale || fit.modeRationale)]
+        .filter(Boolean)
+        .join(' '),
     };
   };
   const approveAndRetry = async (conversationId: string, approval: ToolApproval, scope: 'session' | 'always', model: ProviderConfig) => {

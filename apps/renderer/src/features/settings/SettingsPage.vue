@@ -14,8 +14,16 @@ import UsageStatsPanel from './UsageStatsPanel.vue';
 import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
 import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, type RuntimeStatusResponse } from '../../services/api';
+import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
 import { knowledgeProviderMeta, useKnowledgeConfig } from '../../app/kb-config';
+import {
+  DEFAULT_AUTO_SCHEDULE_MAX_AGENTS,
+  MAX_AUTO_SCHEDULE_MAX_AGENTS,
+  MIN_AUTO_SCHEDULE_MAX_AGENTS,
+  useAutoScheduleConfig,
+  type AutoScheduleConfig,
+} from '../../app/auto-schedule-config';
 import { useNotify } from '../../app/notify';
 
 const props = defineProps<{
@@ -45,6 +53,18 @@ const {
 } = useKnowledgeConfig();
 const notify = useNotify();
 const dirty = ref(false);
+const {
+  config: autoScheduleStored,
+  load: loadAutoScheduleConfig,
+  save: saveAutoScheduleConfigStore,
+  clampMaxAgents,
+} = useAutoScheduleConfig();
+const autoScheduleDraft = ref<AutoScheduleConfig>({
+  preferMinimal: true,
+  strongFitOnly: true,
+  maxAgents: DEFAULT_AUTO_SCHEDULE_MAX_AGENTS,
+});
+const autoScheduleDirty = ref(false);
 const runtimeSettings = ref({
   sidecarPoolSize: 1,
   sidecarSharedMaxRuns: 8,
@@ -77,7 +97,17 @@ const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
   { id: 'general', labelKey: 'settings.tabGeneral' },
 ];
 
-onMounted(() => { void load(); void loadSearch(); void loadKnowledgeProviders(); void loadRuntimeSettings(); void loadRuntimeStatus(); });
+onMounted(() => {
+  void load();
+  void loadSearch();
+  void loadKnowledgeProviders();
+  void loadRuntimeSettings();
+  void loadRuntimeStatus();
+  void (async () => {
+    await loadAutoScheduleConfig();
+    autoScheduleDraft.value = { ...autoScheduleStored.value };
+  })();
+});
 
 let runtimeStatusStreamCleanup: (() => void) | null = null;
 let runtimeStatusFallbackTimer: ReturnType<typeof setInterval> | null = null;
@@ -218,6 +248,25 @@ function toggleEnabledEngine(id: 'pi' | 'agentscope' | 'dsh') {
   if (!runtimeSettings.value.enabledEngines.includes(runtimeSettings.value.defaultEngine)) {
     runtimeSettings.value.defaultEngine = runtimeSettings.value.enabledEngines[0] || 'pi';
   }
+}
+
+async function saveAutoScheduleSettings() {
+  try {
+    const saved = await saveAutoScheduleConfigStore({
+      preferMinimal: Boolean(autoScheduleDraft.value.preferMinimal),
+      strongFitOnly: Boolean(autoScheduleDraft.value.strongFitOnly),
+      maxAgents: clampMaxAgents(autoScheduleDraft.value.maxAgents),
+    });
+    autoScheduleDraft.value = { ...saved };
+    autoScheduleDirty.value = false;
+    notify.success(t('settings.autoScheduleSaved'));
+  } catch (error) {
+    notify.error(error);
+  }
+}
+
+function markAutoScheduleDirty() {
+  autoScheduleDirty.value = true;
 }
 
 async function saveRuntimeSettings() {
@@ -562,6 +611,55 @@ function handleDefaultEmployeeChange(event: Event) {
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
+            <h3 class="text-[16px] font-bold">{{ t('settings.autoScheduleTitle') }}</h3>
+            <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">{{ t('settings.autoScheduleHelp') }}</p>
+          </div>
+          <span class="rounded-full bg-[var(--surface)] px-3 py-1 text-xs font-semibold text-[var(--muted)]">
+            {{ t('settings.autoScheduleDefaultHint').replace('{n}', String(DEFAULT_AUTO_SCHEDULE_MAX_AGENTS)) }}
+          </span>
+        </div>
+        <div class="mt-4 grid gap-3">
+          <label class="flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-3 text-sm">
+            <input v-model="autoScheduleDraft.preferMinimal" class="mt-0.5 h-4 w-4" type="checkbox" @change="markAutoScheduleDirty" />
+            <span>
+              <strong class="block">{{ t('settings.autoSchedulePreferMinimal') }}</strong>
+              <span class="mt-1 block text-[12px] leading-relaxed text-[var(--muted)]">{{ t('settings.autoSchedulePreferMinimalHelp') }}</span>
+            </span>
+          </label>
+          <label class="flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-3 text-sm">
+            <input v-model="autoScheduleDraft.strongFitOnly" class="mt-0.5 h-4 w-4" type="checkbox" @change="markAutoScheduleDirty" />
+            <span>
+              <strong class="block">{{ t('settings.autoScheduleStrongFit') }}</strong>
+              <span class="mt-1 block text-[12px] leading-relaxed text-[var(--muted)]">{{ t('settings.autoScheduleStrongFitHelp') }}</span>
+            </span>
+          </label>
+          <label class="grid max-w-xs gap-2 text-sm">
+            <span class="font-medium text-[var(--muted)]">{{ t('settings.autoScheduleMaxAgents') }}</span>
+            <input
+              v-model.number="autoScheduleDraft.maxAgents"
+              type="number"
+              :min="MIN_AUTO_SCHEDULE_MAX_AGENTS"
+              :max="MAX_AUTO_SCHEDULE_MAX_AGENTS"
+              class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-sm"
+              @input="markAutoScheduleDirty"
+            />
+            <span class="text-xs leading-relaxed text-[var(--muted)]">
+              {{ t('settings.autoScheduleMaxAgentsHelp')
+                .replace('{min}', String(MIN_AUTO_SCHEDULE_MAX_AGENTS))
+                .replace('{max}', String(MAX_AUTO_SCHEDULE_MAX_AGENTS)) }}
+            </span>
+          </label>
+        </div>
+        <div class="mt-4 flex items-center justify-between gap-3">
+          <span class="text-xs text-[var(--muted)]">{{ autoScheduleDirty ? t('settings.saveHint') : t('settings.autoScheduleSaveHint') }}</span>
+          <button class="rounded-xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white" type="button" @click="saveAutoScheduleSettings">
+            {{ t('settings.save') }}
+          </button>
+        </div>
+      </div>
+      <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
             <h3 class="text-[16px] font-bold">执行引擎</h3>
             <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">
               选择本机可用引擎与默认引擎。数字员工可覆盖默认。运维强制请设 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE_FORCE=1</code> 并指定 <code class="rounded bg-[var(--surface)] px-1">WORKMATE_AGENT_ENGINE</code>。
@@ -599,6 +697,9 @@ function handleDefaultEmployeeChange(event: Event) {
             </select>
             <span class="text-xs leading-relaxed text-[var(--muted)]">员工未指定引擎时使用此项。</span>
           </label>
+        </div>
+        <div class="mt-4">
+          <DshRuntimeInstallCard @open-environment="emit('openEnvironment')" />
         </div>
         <div class="mt-4 flex justify-end">
           <button class="rounded-xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white" type="button" @click="saveRuntimeSettings">

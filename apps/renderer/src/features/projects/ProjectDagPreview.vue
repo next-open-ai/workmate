@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref, useId } from "vue";
 
 interface DagNode {
   id: string;
@@ -9,12 +9,25 @@ interface DagNode {
   dependsOn?: string[];
 }
 
-type EdgeState = "idle" | "active" | "done" | "failed";
+type EdgeState = "idle" | "pending" | "active" | "done" | "failed";
 
 const props = defineProps<{
   tasks: DagNode[];
   compact?: boolean;
+  /** Ultra-small preview for chat auto-schedule rail. */
+  mini?: boolean;
+  /** Hide the DAG FLOW header bar. */
+  bare?: boolean;
+  /** Keep ambient data-flow motion while the schedule is live. */
+  live?: boolean;
 }>();
+
+const uid = useId().replace(/:/g, "");
+const gradId = `dag-grad-${uid}`;
+const gradDoneId = `dag-grad-done-${uid}`;
+const arrowId = `dag-arrow-${uid}`;
+const arrowDoneId = `dag-arrow-done-${uid}`;
+const clipId = `dag-clip-${uid}`;
 
 const NODE_W = 124;
 const NODE_H = 68;
@@ -27,20 +40,60 @@ function truncateLabel(text: string, max: number) {
 }
 
 function edgeStatus(sourceStatus?: string, targetStatus?: string): EdgeState {
-  if (targetStatus === "failed") return "failed";
+  if (targetStatus === "failed" || targetStatus === "cancelled") return "failed";
   if (targetStatus === "running") return "active";
+  // Upstream finished → downstream waiting: data is being handed off.
+  if (sourceStatus === "completed" && (targetStatus === "queued" || targetStatus === "draft")) return "active";
   if (sourceStatus === "completed" && targetStatus === "completed") return "done";
+  if (sourceStatus === "running") return "pending";
+  if (props.live && (targetStatus === "queued" || targetStatus === "draft" || !targetStatus)) return "pending";
   return "idle";
+}
+
+function edgeStroke(status: EdgeState) {
+  if (status === "failed") return "rgba(244,63,94,0.85)";
+  if (status === "done") return `url(#${gradDoneId})`;
+  if (status === "active") return `url(#${gradId})`;
+  if (status === "pending") return "rgba(96,165,250,0.72)";
+  return "rgba(148,163,184,0.38)";
+}
+
+function edgeMarker(status: EdgeState) {
+  if (status === "done") return `url(#${arrowDoneId})`;
+  if (status === "failed") return `url(#${arrowId})`;
+  return `url(#${arrowId})`;
+}
+
+function edgeParticles(status: EdgeState) {
+  if (status === "active") return 3;
+  if (status === "done" || status === "pending") return 2;
+  return 0;
+}
+
+function particleFill(status: EdgeState, index: number) {
+  if (status === "done") return index === 0 ? "rgba(16,185,129,0.95)" : "rgba(52,211,153,0.75)";
+  if (status === "pending") return "rgba(147,197,253,0.85)";
+  return index === 0 ? "rgba(96,165,250,1)" : index === 1 ? "rgba(129,140,248,0.95)" : "rgba(45,212,191,0.9)";
+}
+
+function particleDur(status: EdgeState) {
+  if (props.mini) {
+    if (status === "active") return "1.35s";
+    if (status === "done") return "2.4s";
+    return "2.8s";
+  }
+  if (status === "active") return props.compact ? "1.55s" : "1.85s";
+  if (status === "done") return "2.8s";
+  return "3.2s";
 }
 
 const normalizedTasks = computed(() =>
   props.tasks.map((task, index) => ({
     id: task.id || `task-${index}`,
     title: task.title || `任务 ${index + 1}`,
-    // CJK glyphs are roughly square; keep well under the ~90px text lane.
-    titleShort: truncateLabel(task.title || `任务 ${index + 1}`, props.compact ? 7 : 9),
+    titleShort: truncateLabel(task.title || `任务 ${index + 1}`, props.mini ? 5 : props.compact ? 7 : 9),
     subtitle: task.subtitle || "",
-    subtitleShort: truncateLabel(task.subtitle || "", props.compact ? 6 : 8),
+    subtitleShort: truncateLabel(task.subtitle || "", props.mini ? 5 : props.compact ? 6 : 8),
     status: task.status || "draft",
     dependsOn: Array.isArray(task.dependsOn) ? task.dependsOn : [],
   })),
@@ -71,10 +124,9 @@ const nodes = computed(() => {
     list.push(task);
     groups.set(layer, list);
   }
-  const maxLayer = Math.max(0, ...groups.keys());
-  const columnGap = props.compact ? 168 : 196;
-  const rowGap = props.compact ? 96 : 116;
-  const baseY = props.compact ? 70 : 88;
+  const columnGap = props.mini ? 140 : props.compact ? 168 : 196;
+  const rowGap = props.mini ? 78 : props.compact ? 96 : 116;
+  const baseY = props.mini ? 54 : props.compact ? 70 : 88;
   const padX = 28;
   const result = normalizedTasks.value.map((task) => {
     const layer = layers.value.get(task.id) ?? 0;
@@ -92,7 +144,7 @@ const nodes = computed(() => {
   return {
     items: result,
     width: Math.max(320, maxX + padX),
-    height: Math.max(props.compact ? 200 : 280, maxY + 16),
+    height: Math.max(props.mini ? 96 : props.compact ? 200 : 280, maxY + 16),
   };
 });
 
@@ -111,11 +163,28 @@ const edges = computed(() => {
   );
 });
 
+const flowParticles = computed(() =>
+  edges.value.flatMap((edge) => {
+    const count = edgeParticles(edge.status);
+    return Array.from({ length: count }, (_, index) => ({
+      key: `${edge.id}-p${index}`,
+      d: edge.d,
+      status: edge.status,
+      r: edge.status === "active" ? (index === 0 ? 4.2 : 3.2) : 2.8,
+      fill: particleFill(edge.status, index),
+      dur: particleDur(edge.status),
+      // Stagger particles along the path via begin offset.
+      begin: `${(index * 0.45).toFixed(2)}s`,
+    }));
+  }),
+);
+
 const statusClass = (status?: string) =>
   ({
     completed: "dag-status-completed",
     running: "dag-status-running",
     failed: "dag-status-failed",
+    cancelled: "dag-status-failed",
     queued: "dag-status-queued",
     stale: "dag-status-stale",
     draft: "dag-status-queued",
@@ -131,7 +200,6 @@ let dragScrollTop = 0;
 
 function onPointerDown(event: PointerEvent) {
   if (event.button !== 0 || !viewport.value) return;
-  // Allow native scrollbar interaction; only pan from empty canvas / svg surface.
   const target = event.target as Element | null;
   if (target?.closest?.("button, a, input, textarea, select")) return;
   dragging.value = true;
@@ -169,7 +237,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-    <div class="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+    <div v-if="!bare && !mini" class="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
       <div>
         <p class="text-[10px] font-bold tracking-[0.14em] text-[var(--accent)]">DAG FLOW</p>
         <h3 class="text-sm font-bold">任务依赖与数据流</h3>
@@ -185,8 +253,9 @@ onBeforeUnmount(() => {
       :class="[
         'dag-viewport relative overflow-auto bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.10),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.02),transparent)]',
         dragging ? 'dag-dragging cursor-grabbing' : 'cursor-grab',
+        live ? 'dag-live' : '',
       ]"
-      :style="{ height: compact ? '220px' : '300px' }"
+      :style="{ height: mini ? '108px' : compact ? '220px' : '300px' }"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="endDrag"
@@ -200,17 +269,32 @@ onBeforeUnmount(() => {
         fill="none"
       >
         <defs>
-          <linearGradient id="dag-edge-gradient" x1="0" y1="0" :x2="nodes.width" y2="0" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="rgba(99,102,241,0.25)" />
-            <stop offset="50%" stop-color="rgba(59,130,246,0.9)" />
-            <stop offset="100%" stop-color="rgba(16,185,129,0.65)" />
+          <linearGradient :id="gradId" x1="0" y1="0" :x2="nodes.width" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="rgba(99,102,241,0.35)" />
+            <stop offset="45%" stop-color="rgba(59,130,246,1)" />
+            <stop offset="100%" stop-color="rgba(45,212,191,0.9)" />
           </linearGradient>
-          <marker id="dag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <linearGradient :id="gradDoneId" x1="0" y1="0" :x2="nodes.width" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="rgba(16,185,129,0.35)" />
+            <stop offset="50%" stop-color="rgba(52,211,153,0.95)" />
+            <stop offset="100%" stop-color="rgba(16,185,129,0.75)" />
+          </linearGradient>
+          <marker :id="arrowId" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
             <path d="M0,0 L8,4 L0,8 z" fill="rgba(59,130,246,0.95)" />
           </marker>
-          <clipPath :id="`dag-node-clip-${compact ? 'c' : 'n'}`">
+          <marker :id="arrowDoneId" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="rgba(16,185,129,0.95)" />
+          </marker>
+          <clipPath :id="clipId">
             <rect :width="NODE_W - 20" :height="40" rx="4" />
           </clipPath>
+          <filter :id="`dag-glow-${uid}`" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="2.2" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
         <g>
@@ -218,8 +302,8 @@ onBeforeUnmount(() => {
             v-for="edge in edges"
             :key="`${edge.id}-glow`"
             :d="edge.d"
-            :stroke="edge.status === 'failed' ? 'rgba(244,63,94,0.18)' : edge.status === 'done' ? 'rgba(16,185,129,0.14)' : 'rgba(59,130,246,0.16)'"
-            stroke-width="10"
+            :stroke="edge.status === 'failed' ? 'rgba(244,63,94,0.2)' : edge.status === 'done' ? 'rgba(16,185,129,0.18)' : 'rgba(59,130,246,0.2)'"
+            stroke-width="11"
             stroke-linecap="round"
           />
           <path
@@ -227,15 +311,23 @@ onBeforeUnmount(() => {
             :key="edge.id"
             :d="edge.d"
             :class="['dag-edge', `dag-edge-${edge.status}`]"
-            marker-end="url(#dag-arrow)"
+            :stroke="edgeStroke(edge.status)"
+            :marker-end="edgeMarker(edge.status)"
+            :filter="edge.status === 'active' || edge.status === 'done' ? `url(#dag-glow-${uid})` : undefined"
           />
           <circle
-            v-for="edge in edges.filter((item) => item.status === 'active')"
-            :key="`${edge.id}-pulse`"
-            r="4"
-            fill="rgba(96,165,250,0.95)"
+            v-for="particle in flowParticles"
+            :key="particle.key"
+            :r="particle.r"
+            :fill="particle.fill"
+            opacity="0.95"
           >
-            <animateMotion :dur="compact ? '1.8s' : '2.3s'" repeatCount="indefinite" :path="edge.d" />
+            <animateMotion
+              :dur="particle.dur"
+              :begin="particle.begin"
+              repeatCount="indefinite"
+              :path="particle.d"
+            />
           </circle>
         </g>
 
@@ -251,6 +343,15 @@ onBeforeUnmount(() => {
             :height="NODE_H + 6"
             rx="21"
             class="dag-node-running-aura"
+          />
+          <rect
+            v-else-if="node.status === 'completed'"
+            x="-2"
+            y="-2"
+            :width="NODE_W + 4"
+            :height="NODE_H + 4"
+            rx="20"
+            class="dag-node-done-aura"
           />
           <circle cx="16" cy="16" r="5" :class="statusClass(node.status)" />
           <circle v-if="node.status === 'running'" cx="16" cy="16" r="8" class="dag-status-running-ring" />
@@ -278,28 +379,34 @@ onBeforeUnmount(() => {
 }
 
 .dag-edge {
-  stroke-width: 2.5;
+  stroke-width: 2.6;
   stroke-dasharray: 10 7;
   stroke-linecap: round;
   fill: none;
 }
 
 .dag-edge-idle {
-  stroke: rgba(148, 163, 184, 0.32);
+  stroke-dasharray: 6 8;
+}
+
+.dag-edge-pending {
+  stroke-dasharray: 8 6;
+  animation: dag-flow 2.6s linear infinite;
 }
 
 .dag-edge-active {
-  stroke: url(#dag-edge-gradient);
-  animation: dag-flow 3.1s linear infinite;
+  stroke-width: 3;
+  stroke-dasharray: 12 8;
+  animation: dag-flow 1.6s linear infinite;
 }
 
 .dag-edge-done {
-  stroke: rgba(16, 185, 129, 0.7);
-  stroke-dasharray: 7 5;
+  stroke-width: 2.6;
+  stroke-dasharray: 9 6;
+  animation: dag-flow 3.2s linear infinite;
 }
 
 .dag-edge-failed {
-  stroke: rgba(244, 63, 94, 0.8);
   stroke-dasharray: 5 7;
 }
 
@@ -310,26 +417,36 @@ onBeforeUnmount(() => {
 .dag-node-surface {
   fill: color-mix(in srgb, var(--surface) 88%, rgb(59 130 246 / 12%));
   stroke: color-mix(in srgb, var(--border) 72%, rgb(59 130 246 / 28%));
+  stroke-width: 1.5;
 }
 
 .dag-node-completed {
-  stroke: rgba(16, 185, 129, 0.38);
+  stroke: rgba(16, 185, 129, 0.45);
 }
 
 .dag-node-running {
-  stroke: rgba(59, 130, 246, 0.55);
+  stroke: rgba(59, 130, 246, 0.65);
 }
 
-.dag-node-failed {
+.dag-node-failed,
+.dag-node-cancelled {
   stroke: rgba(244, 63, 94, 0.45);
 }
 
 .dag-node-running-aura {
   fill: none;
-  stroke: rgba(96, 165, 250, 0.32);
+  stroke: rgba(96, 165, 250, 0.42);
   stroke-width: 2;
   stroke-dasharray: 8 5;
-  animation: dag-orbit 2.4s linear infinite;
+  animation: dag-orbit 2s linear infinite;
+}
+
+.dag-node-done-aura {
+  fill: none;
+  stroke: rgba(16, 185, 129, 0.22);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 10;
+  animation: dag-orbit 4.5s linear infinite;
 }
 
 .dag-label-box {
@@ -360,20 +477,30 @@ onBeforeUnmount(() => {
 }
 
 .dag-status-completed { fill: rgb(16 185 129); }
-.dag-status-running { fill: rgb(59 130 246); animation: dag-dot 1.4s ease-in-out infinite; }
+.dag-status-running { fill: rgb(59 130 246); animation: dag-dot 1.2s ease-in-out infinite; }
 .dag-status-running-ring {
   fill: none;
-  stroke: rgba(59, 130, 246, 0.35);
+  stroke: rgba(59, 130, 246, 0.4);
   stroke-width: 2;
-  animation: dag-ping 1.7s ease-out infinite;
+  animation: dag-ping 1.5s ease-out infinite;
 }
 .dag-status-failed { fill: rgb(244 63 94); }
 .dag-status-queued { fill: rgb(148 163 184); }
 .dag-status-stale { fill: rgb(245 158 11); }
 
+.dag-live::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 35%, rgba(59, 130, 246, 0.07) 50%, transparent 65%);
+  background-size: 220% 100%;
+  animation: dag-scan 2.8s ease-in-out infinite;
+}
+
 @keyframes dag-flow {
   from { stroke-dashoffset: 0; }
-  to { stroke-dashoffset: -220; }
+  to { stroke-dashoffset: -240; }
 }
 
 @keyframes dag-dot {
@@ -383,10 +510,15 @@ onBeforeUnmount(() => {
 
 @keyframes dag-ping {
   0% { opacity: 0.85; transform: scale(0.92); transform-origin: center; }
-  100% { opacity: 0; transform: scale(1.6); transform-origin: center; }
+  100% { opacity: 0; transform: scale(1.65); transform-origin: center; }
 }
 
 @keyframes dag-orbit {
   to { stroke-dashoffset: -52; }
+}
+
+@keyframes dag-scan {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
 }
 </style>

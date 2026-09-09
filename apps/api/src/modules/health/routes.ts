@@ -4,6 +4,12 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { FastifyPluginAsync } from 'fastify';
 import { HealthResponseSchema } from '@workmate/contracts';
+import {
+  DSH_ENV_FIX_TIMEOUT_MS,
+  buildDshEnvironmentCheck,
+  isDshEnvFixAction,
+  runDshEnvironmentFix,
+} from '@workmate/agent-core';
 
 type EnvCheckItem = {
   id: string;
@@ -240,6 +246,8 @@ function buildEnvironmentReport(): EnvCheckReport {
       : `无法写入 ${dataDir()}。请检查卷挂载、磁盘空间或目录权限。`,
   });
 
+  items.push(buildDshEnvironmentCheck());
+
   const summary = {
     total: items.length,
     ok: items.filter((item) => item.status === 'ok').length,
@@ -249,7 +257,7 @@ function buildEnvironmentReport(): EnvCheckReport {
   return { platform: platformLabel(), checks: items, summary, checkedAt: Date.now() };
 }
 
-type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope';
+type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | 'fix-dsh';
 
 function runFixStorage() {
   const root = dataDir();
@@ -315,7 +323,8 @@ function runEnvironmentFix(actionId: string) {
   if (actionId === 'fix-storage') return runFixStorage();
   if (actionId === 'fix-pip') return runFixPip();
   if (actionId === 'fix-agentscope') return runFixAgentscope();
-  throw new Error(`不支持的修复动作：${actionId}（仅允许 fix-storage / fix-pip / fix-agentscope）`);
+  if (isDshEnvFixAction(actionId)) return runDshEnvironmentFix({ reinstall: true });
+  throw new Error(`不支持的修复动作：${actionId}（仅允许 fix-storage / fix-pip / fix-agentscope / fix-dsh）`);
 }
 
 export const healthRoutes: FastifyPluginAsync = async (app) => {
@@ -330,6 +339,11 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
     const actionId = String(body.actionId || '').trim() as EnvFixActionId | '';
     if (!actionId) return reply.code(400).send({ message: '缺少 actionId' });
     try {
+      // Optional heavy engine installs (e.g. dsh) may take several minutes.
+      if (isDshEnvFixAction(actionId)) {
+        request.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
+        reply.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
+      }
       const result = runEnvironmentFix(actionId);
       return { ...result, actionId, report: buildEnvironmentReport() };
     } catch (error) {

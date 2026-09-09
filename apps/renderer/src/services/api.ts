@@ -1,4 +1,5 @@
 import { getStoredSessionToken } from './auth';
+import { DSH_ENV_FIX_ACTION_ID } from '../features/dsh';
 
 export interface HealthStatus { status: 'ok'; service: 'workmate-api'; version: string; }
 export interface EnvCheckItem {
@@ -266,7 +267,7 @@ export async function getEnvironmentReport(): Promise<EnvCheckReport> {
   return body;
 }
 
-export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope';
+export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | typeof DSH_ENV_FIX_ACTION_ID;
 
 export async function runEnvironmentFix(actionId: EnvFixActionId): Promise<{
   ok: boolean;

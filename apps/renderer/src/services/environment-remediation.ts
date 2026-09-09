@@ -1,7 +1,12 @@
 import type { EnvCheckItem, EnvCheckReport } from './api.js';
+import {
+  DSH_ENV_FIX_ACTION_ID,
+  buildDshRemediationPlan,
+  isDshEnvFixAction,
+} from '../features/dsh';
 
 /** Whitelisted auto-fix actions executed by the API (desktop/web share this). */
-export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope';
+export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | typeof DSH_ENV_FIX_ACTION_ID;
 
 export interface EnvRemediationPlan {
   summary: string;
@@ -262,6 +267,18 @@ export function remediationForCheck(check: EnvCheckItem, report: EnvCheckReport 
         script: 'pnpm web:build\npnpm web:start',
       };
 
+    case 'dsh-runtime': {
+      const plan = buildDshRemediationPlan({ docker: kind.docker, os: kind.os });
+      return {
+        summary: plan.summary,
+        steps: plan.steps,
+        script: plan.script,
+        logic: plan.logic,
+        actionId: plan.actionId,
+        canAutoFix: plan.canAutoFix,
+      };
+    }
+
     case 'electron':
       return {
         summary: 'Electron 桌面壳异常。',
@@ -341,9 +358,10 @@ export function buildRemediationPack(report: EnvCheckReport | null): EnvRemediat
       '  workmate-data:',
     ]);
 
+  // Exclude heavy optional installs (dsh) from batch "fix all".
   const autoFixIds = [...new Set(
     plans
-      .filter((item) => item.canAutoFix && item.actionId)
+      .filter((item) => item.canAutoFix && item.actionId && !isDshEnvFixAction(item.actionId))
       .map((item) => item.actionId as EnvFixActionId),
   )];
 

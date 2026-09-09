@@ -9,7 +9,35 @@ export {
 export { buildWorkmateDshCordisYaml, writeWorkmateDshCordis } from './cordis-compose.js';
 export { materializeWorkmateSkillsForDsh } from './skills-materialize.js';
 export { createDshEventMapContext, mapDshSessionEvent, unwrapAssembledDelta } from './map-events.js';
+export {
+  DSH_RUNTIME_NPM_VERSION,
+  DSH_RUNTIME_PACKAGES,
+  dshRuntimeRoot,
+  ensureDshRuntimeInstalled,
+  probeDshRuntime,
+  resolveDshJsonrpcBin,
+} from './runtime-install.js';
+export {
+  DSH_ENV_CHECK_ID,
+  DSH_ENV_FIX_ACTION_ID,
+  DSH_ENV_FIX_TIMEOUT_MS,
+  buildDshEnvironmentCheck,
+  buildDshRemediationPlan,
+  dshInstallCardCopy,
+  isDshEnvCheckId,
+  isDshEnvFixAction,
+  resolvePreferredDshRoot,
+  runDshEnvironmentFix,
+} from './environment.js';
 export type { DshEventMapContext } from './map-events.js';
 export type { DshLaunchSpec } from './launch.js';
 export type { WorkmateDshModelRoute, DshPiAiApi } from './model-route.js';
 export type { WorkmateDshCordisOptions } from './cordis-compose.js';
+export type { DshRuntimeStatus } from './runtime-install.js';
+export type {
+  DshEnvCheckItem,
+  DshEnvFixResult,
+  DshInstallCardCopy,
+  DshRemediationKind,
+  DshRemediationPlan,
+} from './environment.js';

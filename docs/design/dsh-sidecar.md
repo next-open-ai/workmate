@@ -42,10 +42,12 @@ pnpm dev
 
 或 `streamAgentReply(req, { preferCoding: true })`。
 
-## 4. 体积
+## 4. 体积与分发
 
-- Workmate 内仅薄桥（KB 级），**不**把 harness monorepo 打进安装包。
-- Runtime 外置（sibling / `WORKMATE_DSH_BIN`）。
+- Workmate 安装包**不**内置 harness；仅薄桥（KB 级）。
+- 正式环境优先按需安装到 `~/.workmate/dsh-runtime`（环境检查 / 设置里「安装 dsh」）。
+- 开发机仍可使用 sibling `deepseek-harness` 或 `WORKMATE_DSH_BIN`。
+- 版本钉死：`WORKMATE_DSH_NPM_VERSION`（默认见 `runtime-install.ts`）。
 
 ## 6. MCP 与 Skills（员工授权注入）
 
@@ -85,5 +87,10 @@ pnpm dsh:regression
 | `dsh/cordis-compose.ts` | 生成 cordis.yml |
 | `dsh/stream.ts` | 启动与事件流 |
 | `dsh/jsonrpc-client.ts` | stdio JSON-RPC |
-| `dsh/launch.ts` | bin 发现 |
+| `dsh/environment.ts` | 环境检查项 / 一键安装 / 首选 ROOT |
+| `dsh/environment-copy.ts` | 纯文案与常量（无 Node API） |
+| `dsh/launch.ts` | bin 发现（优先 `~/.workmate/dsh-runtime`） |
+| `dsh/runtime-install.ts` | 按需 npm 安装 / probe |
 | `dsh/skills-materialize.ts` | Skills 物化 |
+
+Renderer 适配（薄层）：`apps/renderer/src/features/dsh/`（安装卡片、环境修复文案）。

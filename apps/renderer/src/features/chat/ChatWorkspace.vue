@@ -9,6 +9,7 @@ import type {
   Message,
 } from "../../app/workspace";
 import ChatReplyPending from "./ChatReplyPending.vue";
+import ChatAutoScheduleRail from "./ChatAutoScheduleRail.vue";
 import type { ProviderConfig } from "../../app/model-config";
 import type { ToolActivity, ToolApproval } from "../../services/api";
 import type { ExecutionLevel } from "../../app/capabilities";
@@ -42,6 +43,7 @@ const props = defineProps<{
     collaboratorIds?: EmployeeId[],
     collaborationDelivery?: CollaborationDelivery,
     onlineSearch?: boolean,
+    autoSchedule?: boolean,
   ) => Promise<void>;
   abortMessage?: () => void;
   approve: (
@@ -69,6 +71,7 @@ const mentionMenuOpen = ref(false);
 const mentionActiveIndex = ref(0);
 const collaborationDelivery = ref<CollaborationDelivery>("direct");
 const onlineSearch = ref(true);
+const autoSchedule = ref(false);
 const sending = ref(false);
 const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
@@ -165,17 +168,21 @@ function elapsedLabel(elapsedMs?: number) {
 async function submit() {
   if (!draft.value.trim() || !props.modelConfigured || sending.value) return;
   const text = draft.value;
-  const selected = [...collaboratorIds.value];
+  const selected = autoSchedule.value ? [] : [...collaboratorIds.value];
   const delivery = collaborationDelivery.value;
+  const useAutoSchedule = autoSchedule.value;
   draft.value = "";
-  collaboratorIds.value = [];
+  if (!useAutoSchedule) {
+    collaboratorIds.value = [];
+  }
   collaborationDelivery.value = "direct";
   mentionMenuOpen.value = false;
+  collaboratorMenuOpen.value = false;
   sending.value = true;
   stickToBottom.value = true;
   void nextTick(() => scrollMessagesToBottom(true));
   try {
-    await props.sendMessage(text, selected, delivery, onlineSearch.value);
+    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule);
   } catch (cause) {
     notify.error(cause);
   } finally {
@@ -218,6 +225,7 @@ async function downloadAsset(asset: Asset) {
   await downloadAssetBestEffort(asset.id);
 }
 function toggleCollaborator(id: EmployeeId) {
+  if (autoSchedule.value) return;
   collaboratorIds.value = collaboratorIds.value.includes(id)
     ? collaboratorIds.value.filter((item) => item !== id)
     : [...collaboratorIds.value, id].slice(0, 3);
@@ -228,6 +236,10 @@ function closeCollaboratorMenu() {
   collaboratorMenuOpen.value = false;
 }
 function handleDraftInput() {
+  if (autoSchedule.value) {
+    mentionMenuOpen.value = false;
+    return;
+  }
   const opened = /@[^\s]*$/.test(draft.value);
   if (opened && !mentionMenuOpen.value) mentionActiveIndex.value = 0;
   mentionMenuOpen.value = opened;
@@ -359,8 +371,37 @@ function hasAssistantVisibleProgress(message: Message) {
     message.content.trim()
     || message.reasoning?.trim()
     || message.activities?.length
-    || message.collaborations?.length,
+    || message.collaborations?.length
+    || message.schedule?.tasks.length
+    || message.schedule?.status === 'planning',
   );
+}
+
+const activeScheduleMessage = computed(() => {
+  const messages = props.conversation?.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'assistant' && message.schedule) return message;
+  }
+  return null;
+});
+
+const showScheduleRail = computed(() => Boolean(activeScheduleMessage.value?.schedule));
+
+function selectScheduleTask(taskId: string) {
+  const schedule = activeScheduleMessage.value?.schedule;
+  if (!schedule) return;
+  schedule.selectedTaskId = taskId;
+}
+
+function toggleAutoSchedule() {
+  if (sending.value) return;
+  autoSchedule.value = !autoSchedule.value;
+  if (autoSchedule.value) {
+    collaboratorIds.value = [];
+    collaboratorMenuOpen.value = false;
+    mentionMenuOpen.value = false;
+  }
 }
 
 const pendingAssistantId = computed(() => {
@@ -553,13 +594,16 @@ onBeforeUnmount(() => {
     </div>
     <div
       v-else
-      ref="messageScrollRef"
-      class="min-h-0 flex-1 overflow-y-auto"
-      @scroll="onMessageScroll"
+      class="mx-auto flex min-h-0 w-full max-w-[1560px] flex-1 gap-4 overflow-hidden px-6 lg:px-10"
     >
       <div
+        ref="messageScrollRef"
+        class="min-h-0 min-w-0 flex-1 overflow-y-auto"
+        @scroll="onMessageScroll"
+      >
+      <div
         ref="messageListRef"
-        class="mx-auto flex w-full max-w-[1240px] flex-col gap-6 px-6 py-9 lg:px-10"
+        class="mx-auto flex w-full max-w-[1240px] flex-col gap-6 py-9"
       >
         <section class="rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)]/55 px-4 py-3 text-xs text-[var(--muted)]">
           <div class="flex flex-wrap items-center gap-2">
@@ -864,9 +908,21 @@ onBeforeUnmount(() => {
           :accent="employee.color"
         />
       </div>
+      </div>
+      <div
+        v-if="showScheduleRail && activeScheduleMessage?.schedule"
+        class="hidden min-h-0 w-[272px] shrink-0 py-9 xl:flex"
+      >
+        <ChatAutoScheduleRail
+          class="w-full"
+          :schedule="activeScheduleMessage.schedule"
+          :employees="employees"
+          @select-task="selectScheduleTask"
+        />
+      </div>
     </div>
 
-    <div class="mx-auto mb-7 w-full max-w-[1240px] shrink-0 px-6 lg:px-10">
+    <div class="mx-auto mb-7 w-full max-w-[1560px] shrink-0 px-6 lg:px-10">
       <form
         class="relative grid gap-2 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-4 shadow-lg"
         @submit.prevent="submit"
@@ -948,9 +1004,10 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <div class="relative">
             <button
-              class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold hover:border-[var(--accent)]"
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
               type="button"
-              :disabled="sending"
+              :disabled="sending || autoSchedule"
+              :title="autoSchedule ? t('chat.autoScheduleBlocksCollaborators') : undefined"
               @click="collaboratorMenuOpen = !collaboratorMenuOpen"
             >
               ◎ 添加协作者<span
@@ -959,14 +1016,14 @@ onBeforeUnmount(() => {
                 >{{ collaboratorIds.length }}</span
               ></button
             ><button
-              v-if="collaboratorMenuOpen"
+              v-if="collaboratorMenuOpen && !autoSchedule"
               class="fixed inset-0 z-10 cursor-default"
               aria-label="关闭协作者选择"
               type="button"
               @click="closeCollaboratorMenu"
             />
             <div
-              v-if="collaboratorMenuOpen"
+              v-if="collaboratorMenuOpen && !autoSchedule"
               class="absolute bottom-11 left-0 z-20 w-[280px] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl"
             >
               <div class="border-b border-[var(--border)] px-3 py-2.5">
@@ -1020,6 +1077,36 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
+          <button
+            type="button"
+            role="switch"
+            :aria-checked="autoSchedule"
+            :disabled="sending"
+            :title="t('chat.autoScheduleHelp')"
+            :class="[
+              'group inline-flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold transition',
+              autoSchedule
+                ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] shadow-[inset_0_0_0_1px_rgba(59,130,246,0.12)]'
+                : 'border-[var(--border)] bg-[var(--surface-muted)] text-[var(--muted)] hover:border-[var(--accent)]/35',
+              sending ? 'cursor-not-allowed opacity-50' : '',
+            ]"
+            @click="toggleAutoSchedule"
+          >
+            <span
+              :class="[
+                'relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition',
+                autoSchedule ? 'bg-[var(--accent)]' : 'bg-[var(--border)]',
+              ]"
+            >
+              <span
+                :class="[
+                  'absolute h-3 w-3 rounded-full bg-white shadow transition',
+                  autoSchedule ? 'translate-x-3.5' : 'translate-x-0.5',
+                ]"
+              />
+            </span>
+            <span>{{ t('chat.autoSchedule') }}</span>
+          </button>
           <label
             class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold"
             :title="t('chat.onlineSearchHelp')"

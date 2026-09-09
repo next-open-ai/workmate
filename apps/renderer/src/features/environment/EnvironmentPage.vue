@@ -153,7 +153,7 @@ onMounted(() => {
         <div>
           <h2 class="font-semibold">修复工具包（{{ pack.problems }} 项）</h2>
           <p class="mt-1 text-xs text-[var(--muted)]">
-            可复制主机脚本；Docker 场景请优先改镜像/Compose。白名单一键修复：数据目录、ensurepip、AgentScope init。
+            可复制主机脚本；Docker 场景请优先改镜像/Compose。白名单一键修复：数据目录、ensurepip、AgentScope init。dsh 编码引擎请单项安装（体积较大）。
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
