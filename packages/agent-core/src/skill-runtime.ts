@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { AgentSkillRuntime } from '@workmate/contracts';
 import { Type, StringEnum, defineAgentTool, type AgentTool } from './pi-tools.js';
+import { PDF_SKILL_ID } from './builtin-skill-packages.js';
 
 const MAX_FILE_BYTES = 96_000;
 /** Soft cap per tool-call body so models do not emit fragile multi‑10KB JSON strings. */
@@ -386,7 +387,7 @@ export function createSkillExecutionTools(input: {
     return { ok: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, artifacts };
   };
 
-  return [
+  const tools: AgentTool[] = [
     defineAgentTool({
       name: 'load_skill',
       description: 'Load the full SKILL.md instructions for a relevant authorized user Skill.',
@@ -452,8 +453,24 @@ export function createSkillExecutionTools(input: {
         if (!canWriteWorkspace) return writeDenied();
         const writeMode = mode === 'append' ? 'append' : 'replace';
         const requested = safeRelative(relative);
-        const asDeliverable = Boolean(deliverable) || isUnderWorkspaceOutput(requested);
-        const targetRel = asDeliverable ? toOutputPath(requested) : requested;
+        let asDeliverable = Boolean(deliverable) || isUnderWorkspaceOutput(requested);
+        let targetRel = asDeliverable ? toOutputPath(requested) : requested;
+        // Models commonly mark only the first chunk as deliverable, then append
+        // later chunks using the original bare filename. Continue that existing
+        // output file instead of silently creating a second partial file at the
+        // workspace root.
+        if (!asDeliverable && writeMode === 'append') {
+          const outputRel = toOutputPath(requested);
+          try {
+            const outputFile = await workspacePath(outputRel);
+            if ((await stat(outputFile)).isFile()) {
+              asDeliverable = true;
+              targetRel = outputRel;
+            }
+          } catch {
+            // No matching staged deliverable yet; append to the requested file.
+          }
+        }
         if (!textFilePattern.test(targetRel)) return { ok: false, error: 'Only approved text formats can be written.' };
         if (asDeliverable && !isBusinessDeliverablePath(targetRel)) {
           return { ok: false, error: 'Deliverable path is invalid. Use output/<filename> and avoid cache/bytecode names.' };
@@ -691,4 +708,78 @@ export function createSkillExecutionTools(input: {
       },
     }),
   ];
+
+  // This is deliberately a Skill-owned adapter, not a platform PDF tool. It is
+  // exposed only when the authorized PDF Skill is present, keeping generic
+  // agents and unrelated Skills free to choose their own execution strategy.
+  if (packages.has(PDF_SKILL_ID)) {
+    tools.push(defineAgentTool({
+      name: 'render_pdf_report',
+      description: 'PDF 报告生成 Skill 的专属适配器。传入标题、正文和文件名；它在隔离工作区中安全生成、校验并声明唯一 PDF 交付物。不要手写 JSON、复制渲染器或改用 workspace 脚本。',
+      parameters: Type.Object({
+        title: Type.String({ minLength: 1, maxLength: 240 }),
+        content: Type.String({ minLength: 1, maxLength: 80_000 }),
+        filename: Type.String({ minLength: 1, maxLength: 180 }),
+      }),
+      execute: async ({ title, content, filename }) => {
+        if (!canWriteWorkspace || !canRunWorkspaceScript) return writeDenied();
+        ensureLoaded(PDF_SKILL_ID);
+        const skill = getSkill(PDF_SKILL_ID);
+        if (!skill.execution.allowScriptExecution) {
+          return approval(PDF_SKILL_ID, 'script-execution', 'Running this PDF Skill requires your approval.');
+        }
+        const root = approvedSkillRoot(skill);
+        if (!root) return { ok: false, error: 'PDF Skill renderer is unavailable for this package.' };
+        let script: string;
+        try {
+          script = await pathInside(root, 'scripts/render_pdf.py');
+          if (!(await stat(script)).isFile()) throw new Error('Not a file');
+        } catch {
+          return { ok: false, error: 'PDF Skill renderer is unavailable: scripts/render_pdf.py.' };
+        }
+
+        const leaf = path.basename(filename.trim());
+        if (!leaf || leaf === '.' || leaf === '..' || leaf !== filename.trim() || leaf.startsWith('.')) {
+          return { ok: false, error: 'PDF filename must be a plain file name without a path.' };
+        }
+        const outputName = /\.pdf$/i.test(leaf) ? leaf : `${leaf}.pdf`;
+        const outputRel = `${WORKSPACE_OUTPUT_DIR}/${outputName}`;
+        if (!isBusinessDeliverablePath(outputRel)) return { ok: false, error: 'PDF filename is invalid.' };
+
+        const inputRel = 'tmp/pdf-input.json';
+        const inputFile = await workspacePath(inputRel);
+        const outputFile = await workspacePath(outputRel);
+        await mkdir(path.dirname(inputFile), { recursive: true, mode: 0o700 });
+        await mkdir(path.dirname(outputFile), { recursive: true, mode: 0o700 });
+        await writeFile(inputFile, JSON.stringify({ title: title.trim(), content: content.trim() }), { encoding: 'utf8', mode: 0o600 });
+
+        const dependencyRoot = path.join(workspaceRoot, '.python-packages');
+        const runRenderer = () => runProcess('python3', [script, inputRel, outputRel], workspaceRoot, {
+          env: { ...process.env, PYTHONPATH: dependencyRoot },
+        });
+        let result = await runRenderer();
+        let installedDependency = false;
+        const diagnostics = () => `${result.stdout}\n${result.stderr}`;
+        if (result.exitCode !== 0 && /no module named ['\"]reportlab['\"]/i.test(diagnostics())) {
+          const install = await runProcess('python3', ['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, 'reportlab'], workspaceRoot, { timeoutMs: 120_000 });
+          if (install.exitCode !== 0) {
+            return { ok: false, exitCode: install.exitCode, error: truncate(`${install.stderr}\n${install.stdout}`, 2_000), artifacts: [] };
+          }
+          installedDependency = true;
+          result = await runRenderer();
+        }
+        if (result.exitCode !== 0) {
+          return { ok: false, exitCode: result.exitCode, error: truncate(diagnostics(), 2_000), stdout: result.stdout, stderr: result.stderr, artifacts: [] };
+        }
+        try {
+          const bytes = await readFile(outputFile);
+          if (bytes.length < 512 || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('invalid PDF header');
+          return { ok: true, path: outputRel, bytes: bytes.length, artifacts: [outputRel], installedDependency, stdout: result.stdout, stderr: result.stderr };
+        } catch {
+          return { ok: false, error: 'PDF renderer completed but did not produce a valid PDF file.', artifacts: [] };
+        }
+      },
+    }));
+  }
+  return tools;
 }

@@ -41,6 +41,7 @@ interface Window {
     archiveArtifact(input: { runId: string; relativePath: string; conversationId?: string; employeeId?: string; projectId?: string }): Promise<{ id: string; name: string; relativePath: string; mimeType: string; sizeBytes: number; createdAt: number; conversationId: string | null; employeeId: string | null; runId: string; sha256: string; projectId: string | null; workspaceRelative: string | null }>;
     linkAssetsToProject(input: { projectId: string; assetIds: string[]; workspacePath?: string }): Promise<{ updated: number; copied: number; projectId: string }>;
     unlinkAssetsFromProject(assetIds: string[]): Promise<{ updated: number }>;
+    deleteAssets(assetIds: string[]): Promise<{ deleted: number }>;
     saveAsset(assetId: string): Promise<boolean>;
     revealAsset(assetId: string): Promise<void>;
     getChannelSettings(): Promise<{ meta: Record<string, unknown>; secrets: { telegram?: { botToken?: string }; feishu?: { appSecret?: string }; relay?: { token?: string } } }>;

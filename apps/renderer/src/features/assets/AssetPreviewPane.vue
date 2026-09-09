@@ -10,6 +10,9 @@ const props = defineProps<{
   error?: string;
   kind: PreviewKind;
   desktopShell?: boolean;
+  /** Show destructive delete action (archive mode). */
+  canDelete?: boolean;
+  deleting?: boolean;
   /** Full URL for HTML/PDF iframe (workmate-preview://… or blob:). */
   htmlUrl?: string;
   /** Raw text for md/code. */
@@ -23,6 +26,7 @@ const emit = defineEmits<{
   reveal: [];
   download: [];
   openBrowser: [];
+  delete: [];
 }>();
 
 const mdHtml = computed(() => (props.kind === 'markdown' && props.text ? markdownToHtml(props.text) : ''));
@@ -49,6 +53,13 @@ const unsupportedHint = computed(() => (props.desktopShell ? '此格式暂不支
         <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="emit('openBrowser')">{{ openLabel }}</button>
         <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="emit('reveal')">{{ revealLabel }}</button>
         <button class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-semibold text-white" type="button" @click="emit('download')">下载</button>
+        <button
+          v-if="canDelete"
+          class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-500/15 disabled:opacity-40"
+          type="button"
+          :disabled="deleting"
+          @click="emit('delete')"
+        >{{ deleting ? '删除中…' : '删除' }}</button>
       </div>
     </header>
 

@@ -49,6 +49,13 @@ function runWorkspaceRoot(runId: string) {
   );
 }
 
+function isRetryableRunFailure(error?: string | null) {
+  const text = String(error || '');
+  if (!text) return false;
+  return /reasoning_content|Expected ',' or '\]' after array element in JSON|Unexpected token .* in JSON|Unterminated string|JSON at position|Invalid input|tool arguments/i.test(text)
+    || /network|timeout|timed out|socket hang up|econnreset|econnaborted|fetch failed/i.test(text.toLowerCase());
+}
+
 export interface ProjectTaskDraft {
   /** Stable client id (optional); preserved so dependsOn references survive. */
   id?: string;
@@ -81,6 +88,9 @@ export interface ProjectServiceOptions {
   hub: EventHub<OrcEvent>;
   engine: RunEngine;
   runTimeoutMs?: number;
+  projectTaskTimeoutMs?: number;
+  /** Keep project scheduling at or below dispatcher capacity. */
+  maxConcurrentProjectTasks?: number;
   /**
    * Optional fallback that resolves a run context for a task when the caller
    * did not supply `runContextByTask`/`defaultContext` (e.g. a remote gateway
@@ -202,6 +212,8 @@ export class ProjectService {
   private readonly hub: EventHub<OrcEvent>;
   private readonly engine: RunEngine;
   private readonly runTimeoutMs: number;
+  private readonly projectTaskTimeoutMs: number;
+  private readonly maxConcurrentProjectTasks: number;
   private readonly taskAborts = new Map<string, AbortController>();
   private readonly contextResolver?: ProjectServiceOptions['contextResolver'];
   /** Transient (never persisted): summary context keyed by active run id. */
@@ -218,6 +230,8 @@ export class ProjectService {
     this.hub = options.hub;
     this.engine = options.engine;
     this.runTimeoutMs = options.runTimeoutMs ?? 600_000;
+    this.projectTaskTimeoutMs = Math.min(7_200_000, Math.max(30_000, options.projectTaskTimeoutMs ?? 1_200_000));
+    this.maxConcurrentProjectTasks = Math.max(1, Math.round(options.maxConcurrentProjectTasks ?? 2));
     this.contextResolver = options.contextResolver;
   }
 
@@ -248,11 +262,9 @@ export class ProjectService {
         if (this.taskAborts.has(task.id)) continue;
         const run = await this.engine.load(task.runId);
         if (run && run.status !== 'running') {
-          const shipped = (run.artifacts?.length ?? 0) > 0;
-          // Soft-complete when deliverables already exist (e.g. maxSteps after publish).
-          if (run.status === 'completed' || (run.status === 'failed' && shipped)) {
+          if (run.status === 'completed') {
             task.status = 'completed';
-            task.error = run.status === 'failed' ? undefined : run.error;
+            task.error = run.error;
           } else {
             task.status = run.status === 'cancelled' ? 'cancelled' : 'failed';
             task.error = run.error;
@@ -635,6 +647,26 @@ export class ProjectService {
       const activeTasks = project.tasks.filter((task) => task.status !== 'superseded');
       if (project.status === 'draft' && activeTasks.length === 0) throw new Error('Project has no tasks to run.');
       const now = Date.now();
+      const restartAll = project.status === 'completed' || project.status === 'failed' || project.status === 'cancelled';
+
+      // Archive the previous conversation onto the latest settled run before opening a fresh thread.
+      // Keep messages that belong to the ChangeSet opening this run (e.g. instruction dispatch).
+      const keepMessages = input.changeSetId
+        ? project.messages.filter((message) => message.changeSetId === input.changeSetId)
+        : [];
+      const archiveMessages = input.changeSetId
+        ? project.messages.filter((message) => message.changeSetId !== input.changeSetId)
+        : [...project.messages];
+      if (archiveMessages.length) {
+        const priorRuns = await this.listProjectRuns(project.id);
+        const archiveTarget = priorRuns.find((run) => run.status !== 'running') ?? priorRuns[0];
+        if (archiveTarget) {
+          archiveTarget.messages = archiveMessages.map((message) => ({ ...message }));
+          if (!archiveTarget.summary && project.summary) archiveTarget.summary = project.summary;
+          await writeJson(this.store, this.projectRunKey(archiveTarget.id), archiveTarget);
+        }
+      }
+
       const projectRun: ProjectRun = {
         id: randomUUID(),
         projectId: project.id,
@@ -648,17 +680,33 @@ export class ProjectService {
         taskIds: activeTasks.map((task) => task.id),
         planVersion: plan.version,
         changeSetId: input.changeSetId,
+        messages: [],
       };
       project.activeRunId = projectRun.id;
       project.status = 'running';
       project.summary = undefined;
+      project.messages = [
+        {
+          id: randomUUID(),
+          role: 'system',
+          content: archiveMessages.length
+            ? '新一轮调度已开始。上一轮对话已归档到历史运行。'
+            : '本轮调度已开始。',
+          createdAt: now,
+          runId: projectRun.id,
+        },
+        ...keepMessages.map((message) => ({ ...message, runId: projectRun.id })),
+      ];
       for (const task of project.tasks) {
-        // Keep completed + superseded; everything else is re-queued for this Run.
-        if (task.status === 'completed' || task.status === 'superseded') continue;
+        // Full re-schedule after a terminal project resets completed work; otherwise keep successes.
+        if (task.status === 'superseded') continue;
+        if (!restartAll && task.status === 'completed') continue;
         task.status = 'queued';
         task.error = undefined;
         task.attempts = 0;
         task.runId = undefined;
+        task.startedAt = undefined;
+        task.finishedAt = undefined;
       }
       await writeJson(this.store, this.projectRunKey(projectRun.id), projectRun);
       return { projectRun };
@@ -929,7 +977,7 @@ export class ProjectService {
     for (;;) {
       const project = await this.getProject(projectId);
       if (!project || !(await this.isAlive(projectId, projectRunId))) return;
-      const limit = concurrencyForStrategy(project.mode);
+      const limit = Math.min(concurrencyForStrategy(project.mode), this.maxConcurrentProjectTasks);
       const launching = this.launchingTasks.get(projectId) ?? new Set();
 
       const parked = new Map<string, ProjectTask>();
@@ -1105,7 +1153,13 @@ export class ProjectService {
         content: transcript?.transcript?.trim() || '',
       });
     }
-    const userContent = `${fitObjective(promptTask.objective)}${buildDependencyBlock(dependencyEntries)}`;
+    const outputHint = promptTask.contract?.outputs?.length
+      ? `\n\n本任务要求的交付文件/目录：\n- ${promptTask.contract.outputs.join('\n- ')}`
+      : '';
+    const acceptanceHint = promptTask.contract?.acceptance?.trim()
+      ? `\n\n验收标准：\n${promptTask.contract.acceptance.trim()}`
+      : '';
+    const userContent = `${fitObjective(promptTask.objective)}${outputHint}${acceptanceHint}${buildDependencyBlock(dependencyEntries)}`;
     const request = {
       ...context,
       runId,
@@ -1126,6 +1180,7 @@ export class ProjectService {
         attemptNo: (currentTask ?? task).attempts,
         request,
         signal,
+        timeoutMs: promptTask.contract?.timeoutMs ?? this.projectTaskTimeoutMs,
         extraTopics: [`project:${projectId}`],
       });
     } finally {
@@ -1137,6 +1192,7 @@ export class ProjectService {
       if (!target || target.runId !== run.id) return;
       if (latest.status !== 'running' && latest.status !== 'cancelled') return;
       target.finishedAt = Date.now();
+      const maxAttempts = target.contract?.maxAttempts ?? 1;
       if (run.status === 'completed') {
         target.status = 'completed';
         target.error = run.error;
@@ -1146,9 +1202,9 @@ export class ProjectService {
       } else if (run.status === 'waiting-approval') {
         target.status = 'running';
         target.error = '任务等待审批后继续。';
-      } else if ((run.artifacts?.length ?? 0) > 0) {
-        target.status = 'completed';
-        target.error = undefined;
+      } else if (run.status === 'failed' && target.attempts < maxAttempts && isRetryableRunFailure(run.error)) {
+        target.status = 'queued';
+        target.error = `上次尝试因瞬时格式/连接问题失败，正在自动重试（${target.attempts}/${maxAttempts}）：${run.error}`;
       } else {
         target.status = 'failed';
         target.error = run.error;
@@ -1175,7 +1231,14 @@ export class ProjectService {
     const evidence = buildSummaryEvidence(entries);
     const messageId = randomUUID();
     await this.mutateProject(projectId, (fresh) => {
-      fresh.messages.push({ id: messageId, role: 'assistant', content: '', createdAt: Date.now(), taskId: 'summary' });
+      fresh.messages.push({
+        id: messageId,
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+        taskId: 'summary',
+        runId: fresh.activeRunId,
+      });
     });
     const request = {
       ...context,

@@ -13,6 +13,7 @@ export interface ProjectDraftResult {
     contract?: {
       outputs?: string[];
       acceptance?: string;
+      maxSteps?: number;
       timeoutMs?: number;
       maxAttempts?: number;
     };
@@ -72,13 +73,6 @@ export function analyzeModeFit(
   preferred: PlanningMode,
   tasks: Array<{ dependsOn?: number[] }>,
 ): Pick<ProjectDraftResult, 'suggestedMode' | 'modeFitsPreferred' | 'modeRationale'> {
-  if (preferred === 'dag') {
-    return {
-      suggestedMode: 'dag',
-      modeFitsPreferred: true,
-      modeRationale: '已按 DAG 偏好保留显式依赖。',
-    };
-  }
   const suggestedMode = inferCollaborationMode(tasks);
   if (suggestedMode === preferred) {
     return {

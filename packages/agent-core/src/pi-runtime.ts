@@ -133,7 +133,10 @@ function runtimeClockContext(now = new Date()) {
 
 function preloadedSkillInstructions(skills: AgentSkillRuntime[]) {
   return skills
-    .filter((skill) => skill.instructions)
+    // Only explicit default Skills are preloaded. Available Skills stay as a
+    // compact catalog entry until the agent selects and loads one, which is the
+    // progressive-disclosure contract used by pi-coding-agent.
+    .filter((skill) => skill.mode === 'default' && skill.instructions)
     .map((skill) => `<skill id="${skill.id}">\n${skill.instructions}\n</skill>`)
     .join('\n\n');
 }
@@ -151,18 +154,16 @@ function skillFirstExecutionContract() {
     '8) Assume the run workspace already supports output/ deliverables. Put final user-facing files under output/ directly.',
     '9) For Python PDF generation, prefer standard library plus already-available packages first. Do not call install_python_dependency unless a concrete script/import failure shows the missing module.',
     '10) For PDF tasks, avoid exploratory filesystem/MCP probes when the run workspace tools already cover writing and executing the generator.',
+    '11) If local project context is sparse, stop probing after 1-2 checks, state the assumption once, and proceed to the deliverable instead of repeatedly re-checking the workspace.',
+    '12) For research /素材整理 /设计方案 tasks, do not spend tool steps narrating your plan. Search or inspect only what directly changes the deliverable, then write the result.',
+    '13) Never emit process narration such as "Let me think", "Let me check", "I will first", "我先看一下" as the final answer body. Use tools or write the file directly; keep visible text for conclusions and deliverables only.',
+    '14) For project-task runs with explicit output filenames, prefer writing those files immediately after the minimum necessary inspection. If a public site blocks crawling or a fetch tool errors once, do not spiral into retries; proceed with the best grounded draft and clearly note any evidence limits inside the file.',
   ].join('\n');
 }
 
 function looksLikeDocumentArtifactTask(userText: string, skills: AgentSkillRuntime[]) {
   const text = `${userText}\n${skills.map((skill) => `${skill.name}\n${skill.description}\n${skill.instructions || ''}`).join('\n')}`.toLowerCase();
   return /(pdf|docx?|word|ppt|slides?|excel|spreadsheet|report|itinerary|travel|guide|brochure|行程|旅游|旅行|攻略|报告|手册|文档|海报)/i.test(text);
-}
-
-/** Deterministic first-turn routing for an explicitly requested PDF deliverable. */
-function requiredPdfSkill(userText: string, skills: AgentSkillRuntime[]) {
-  if (!/\bpdf\b|PDF|电子版|可打印|行程册|行程手册/i.test(userText)) return undefined;
-  return skills.find((skill) => /pdf|报告生成|文档生成/i.test(`${skill.id}\n${skill.name}\n${skill.description}`));
 }
 
 function looksLikeFinanceTask(userText: string) {
@@ -183,7 +184,7 @@ export function filterMcpToolsetForTask(
   skills: AgentSkillRuntime[],
 ) {
   if (!looksLikeDocumentArtifactTask(userText, skills) || looksLikeFinanceTask(userText)) return mcp;
-  const blockedPrefixes = new Set(['akshare', 'tushare', 'sequential_thinking', 'sequentialthinking', 'filesystem']);
+  const blockedPrefixes = new Set(['akshare', 'tushare', 'sequential_thinking', 'sequentialthinking', 'filesystem', 'fetch']);
   const keepTools = mcp.tools.filter((tool) => {
     const lower = tool.name.toLowerCase();
     for (const prefix of blockedPrefixes) {
@@ -218,6 +219,7 @@ function toolInputSummary(toolName: string, input: unknown) {
     return `正在发布到项目空间：${String(value.path || '')}${dest}`;
   }
   if (toolName === 'register_deliverable') return `正在登记业务交付物：${String(value.path || '')}`;
+  if (toolName === 'render_pdf_report') return `正在由 PDF Skill 生成文档：${String(value.filename || '')}`;
   if (toolName === 'run_skill_script') return `正在执行脚本：${String(value.path || '')}`;
   if (toolName === 'run_workspace_script') return `正在执行生成脚本：${String(value.path || '')}`;
   if (toolName === 'install_python_dependency') return `正在安装 Python 依赖：${String(value.package || '')}`;
@@ -254,6 +256,7 @@ function toolResultSummary(toolName: string, output: unknown) {
       : `Python 依赖安装完成：${pkg || '未命名依赖'}（退出码 ${String(value.exitCode ?? 0)}）。`;
   }
   if (toolName === 'run_skill_script') return `脚本执行完成（退出码 ${String(value.exitCode ?? 0)}）。`;
+  if (toolName === 'render_pdf_report') return `PDF Skill 已完成：${String(value.path || 'PDF 文件')}。`;
   if (toolName === 'run_workspace_script') {
     const artifacts = Array.isArray(value.artifacts) ? value.artifacts.filter((item): item is string => typeof item === 'string') : [];
     return artifacts.length ? `生成脚本执行完成：${artifacts.join('、')}` : `生成脚本执行完成（退出码 ${String(value.exitCode ?? 0)}）。`;
@@ -380,7 +383,7 @@ function yieldArtifactEvents(
     emittedPaths.add(normalized);
     events.push({ type: 'artifact.created', runId, path: normalized });
   };
-  if (toolName === 'run_workspace_script' || toolName === 'run_skill_script') {
+  if (toolName === 'run_workspace_script' || toolName === 'run_skill_script' || toolName === 'render_pdf_report') {
     const artifacts = value.artifacts;
     if (Array.isArray(artifacts)) {
       for (const artifact of artifacts) {
@@ -480,7 +483,6 @@ export async function* streamAgentReply(input: {
     const libraryDir = process.env.WORKMATE_SKILLS_DIR?.trim();
     const discovered = libraryDir ? discoverPiSkillsUnder(libraryDir) : [];
     const skills = mergeDiscoveredSkillDescriptions(skillsRaw, discovered);
-    const requiredPdf = requiredPdfSkill(lastUserText, skills);
     const mcp = filterMcpToolsetForTask(mcpLoaded, lastUserText, skills);
     const preloadedSkills = preloadedSkillInstructions(skills);
     const kbLabels = (input.knowledgeBases ?? []).filter((item) => item.enabled).map((item) => item.name);
@@ -504,9 +506,6 @@ export async function* streamAgentReply(input: {
       experienceTools.length
         ? 'Agent experience memory is available for this employee only. After a meaningful multi-step success (or a hard-won pitfall), call save_experience with a short structured card (situation/action/pitfall/whenNot). Use load_experience when pivoting to a task that may match prior work. Low-similarity loads return empty—do not invent memories.'
         : '',
-      requiredPdf
-        ? `Required Skill for this turn: ${requiredPdf.name} (${requiredPdf.id}). The user explicitly requested a PDF, so follow this Skill first. Use its own template, renderer, packaged script, or Tool adapter. Do not invent a generic runtime PDF workflow; stop immediately after the Skill has verified and registered the output PDF.`
-        : '',
       skillFirstExecutionContract(),
       projectRoot
         ? 'This run is bound to a shared project workspace. Keep generators under the run workspace (prefer scripts/). Put finished business products under output/ (or write_workspace_file with deliverable=true / register_deliverable). Prefer publish_to_project for each finished output/ file so it appears in the project tree mid-run; end-of-run auto-promotes remaining output/ files.'
@@ -518,7 +517,7 @@ export async function* streamAgentReply(input: {
     // Keep the configured task budget. Do not impose a document-specific global
     // cap: aborting an Agent after it has already queued work produces the false
     // "file succeeded, run failed" state.
-    const requestedMaxSteps = Math.min(64, Math.max(4, Math.round(Number(input.maxSteps) || 28)));
+    const requestedMaxSteps = Math.min(64, Math.max(4, Math.round(Number(input.maxSteps) || 50)));
     const maxSteps = requestedMaxSteps;
     const piModel = toPiModel(input.model);
     const onPayload = createChatCompletionsPayloadPatch(input.model);
@@ -577,6 +576,8 @@ export async function* streamAgentReply(input: {
         if (evt.type === 'text_delta' && evt.delta) {
           emittedText = true;
           enqueue({ type: 'message.delta', runId, text: evt.delta });
+        } else if (evt.type === 'thinking_delta' && evt.delta) {
+          enqueue({ type: 'reasoning.delta', runId, text: evt.delta });
         } else if (evt.type === 'error') {
           runFailed = true;
           const raw = evt.error.errorMessage || 'Model request failed.';
@@ -613,7 +614,7 @@ export async function* streamAgentReply(input: {
           enqueue({
             type: 'run.failed',
             runId,
-            message: `工具调用步数超过上限（${maxSteps}），已中止。`,
+            message: `工具调用步数超过上限（${maxSteps}），已自动中止。请减少重复探查，或在员工详情提高“轮次 / 步骤上限”后重试。`,
           });
           runFailed = true;
           return;

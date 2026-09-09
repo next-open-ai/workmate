@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { readdir, stat } from 'node:fs/promises';
 import type { AgentEvent, ChatRequest, McpConnectionRuntime } from '@workmate/contracts';
 import { DshJsonRpcClient } from './jsonrpc-client.js';
 import { resolveDshLaunch, resolveDshWorkspace } from './launch.js';
@@ -15,6 +16,51 @@ type DshMcpCatalog = {
   labels: string[];
   toolLines: string[];
 };
+
+const DSH_INTERNAL_ENTRIES = new Set([
+  '.agents',
+  '.dsh-sessions',
+  '.git',
+  '.python-packages',
+  'node_modules',
+]);
+
+async function snapshotProjectFiles(root: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const visit = async (directory: string, relative = '', depth = 0): Promise<void> => {
+    if (depth > 12 || files.size >= 2_000) return;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (DSH_INTERNAL_ENTRIES.has(entry.name) || entry.name === '.workmate-dsh.cordis.yml') continue;
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(target, childRelative, depth + 1);
+      } else if (entry.isFile() && childRelative.length <= 240) {
+        const info = await stat(target).catch(() => null);
+        if (info) files.set(childRelative, `${info.size}:${info.mtimeMs}`);
+      }
+      if (files.size >= 2_000) return;
+    }
+  };
+  await visit(root);
+  return files;
+}
+
+function cancellationEvent(runId: string, signal: AbortSignal): AgentEvent {
+  const detail = signal.reason instanceof Error
+    ? signal.reason.message
+    : typeof signal.reason === 'string'
+      ? signal.reason
+      : '';
+  const timedOut = /timed?\s*out|timeout/i.test(detail);
+  return {
+    type: 'run.cancelled',
+    runId,
+    reason: timedOut ? 'timeout' : 'user',
+    message: timedOut ? (detail || '执行超时，已中止当前任务。') : (detail || '已由用户中止当前执行。'),
+  };
+}
 
 function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
   const lines: string[] = [];
@@ -34,12 +80,15 @@ function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
       + `For PDF / Word / slides / spreadsheet deliverables: load the matching document skill BEFORE ad-hoc bash exploration.`,
     );
   }
-  lines.push(
-    `[Deliverables contract]\n`
-    + `Finished user-facing files (PDF, DOCX, HTML, Markdown, CSV, images, …) MUST be written under output/ `
-    + `(create the directory if needed). Prefer output/<clear-name>.pdf over workspace-root files. `
-    + `Do not leave the only copy of a deliverable under scripts/ or /tmp.`,
-  );
+  lines.push(input.projectWorkspacePath?.trim()
+    ? `[Project workspace contract]\n`
+      + `The current working directory is the final shared project root. Create and edit the actual project structure directly here. `
+      + `Use conventional root entry files when appropriate to the chosen stack. Do not wrap the project in output/. `
+      + `Keep temporary process files out of the final project tree.`
+    : `[Deliverables contract]\n`
+      + `Finished user-facing files (PDF, DOCX, HTML, Markdown, CSV, images, …) MUST be written under output/ `
+      + `(create the directory if needed). Prefer output/<clear-name>.pdf over workspace-root files. `
+      + `Do not leave the only copy of a deliverable under scripts/ or /tmp.`);
   const mcpNames = mcpCatalog?.labels?.length
     ? mcpCatalog.labels
     : (input.mcpConnections ?? [])
@@ -122,6 +171,8 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
       runId,
       projectWorkspacePath: input.projectWorkspacePath,
     });
+    const projectBound = Boolean(input.projectWorkspacePath?.trim());
+    const projectFilesBefore = projectBound ? await snapshotProjectFiles(cwd) : null;
     const route = mapWorkmateModelToDshRoute(input.model);
     const mcpEnabled = enabledMcpConnections(input.mcpConnections);
 
@@ -199,7 +250,9 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         const base = input.profile?.instructions?.slice(0, 4_000)
           || 'You are a careful coding agent working inside a Workmate workspace.';
         const mcpNames = mcpCatalog.labels;
-        const deliverable = '\n\nFinished PDF/DOCX/HTML/Markdown must be saved under output/. Prefer loading document skills via the skill tool before ad-hoc PDF tooling.';
+        const deliverable = projectBound
+          ? '\n\nThis cwd is the final shared project root. Write the real project structure directly here; do not create an output/ wrapper.'
+          : '\n\nFinished PDF/DOCX/HTML/Markdown must be saved under output/. Prefer loading document skills via the skill tool before ad-hoc PDF tooling.';
         if (!mcpNames.length) return `${base}${deliverable}`;
         const discovered = mcpCatalog.toolLines.length
           ? `\nAvailable MCP tools:\n${mcpCatalog.toolLines.join('\n')}`
@@ -309,12 +362,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
 
       while (!done || queue.length) {
         if (input.abortSignal?.aborted) {
-          yield {
-            type: 'run.cancelled',
-            runId,
-            reason: 'user',
-            message: '已由用户中止当前执行。',
-          };
+          yield cancellationEvent(runId, input.abortSignal);
           return;
         }
         while (queue.length) {
@@ -330,12 +378,26 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         wake = null;
       }
 
+      // onAbort also flips `done`; re-check after the loop so a timeout can
+      // never be converted into a successful completion.
+      if (input.abortSignal?.aborted) {
+        yield cancellationEvent(runId, input.abortSignal);
+        return;
+      }
+
       if (!failed) {
-        // dsh has no register_deliverable — stage root PDFs/HTML into output/ and
-        // emit artifact.created so the chat asset card + library light up.
-        const harvested = await harvestWorkspaceDeliverables(cwd, { startedAtMs: runStartedAtMs }).catch(() => []);
-        for (const relative of harvested) {
-          yield { type: 'artifact.created', runId, path: relative };
+        if (projectFilesBefore) {
+          const after = await snapshotProjectFiles(cwd);
+          for (const [relative, fingerprint] of after) {
+            if (projectFilesBefore.get(relative) === fingerprint) continue;
+            yield { type: 'project.file.published', runId, path: relative, projectPath: relative };
+          }
+        } else {
+          // Standalone chat runs retain the output/ asset contract.
+          const harvested = await harvestWorkspaceDeliverables(cwd, { startedAtMs: runStartedAtMs }).catch(() => []);
+          for (const relative of harvested) {
+            yield { type: 'artifact.created', runId, path: relative };
+          }
         }
         yield { type: 'run.completed', runId };
       }
@@ -345,12 +407,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
     }
   } catch (error) {
     if (input.abortSignal?.aborted) {
-      yield {
-        type: 'run.cancelled',
-        runId,
-        reason: 'user',
-        message: '已由用户中止当前执行。',
-      };
+      yield cancellationEvent(runId, input.abortSignal);
       return;
     }
     const message = error instanceof Error ? error.message : String(error);

@@ -1183,6 +1183,18 @@ export async function unlinkArchivedAssets(assetIds: string[]) {
   return { updated: Number(body.updated || 0) };
 }
 
+export async function deleteArchivedAssets(assetIds: string[]) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/assets/delete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assetIds }),
+  });
+  const body = await response.json().catch(() => ({})) as { deleted?: number; message?: string };
+  if (!response.ok) throw new Error(body.message || `Asset delete failed: ${response.status}`);
+  return { deleted: Number(body.deleted || 0) };
+}
+
 export async function readArchivedAssetPreview(assetId: string) {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
   const response = await fetch(`${apiBase}/api/assets/preview?${new URLSearchParams({ assetId })}`);

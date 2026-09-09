@@ -10,6 +10,7 @@ export type OrcEvent =
   /* runs */
   | { type: 'run.started'; runId: string; sessionId: string; kind: 'chat' | 'project-task'; taskId?: string; attemptNo: number; engine?: 'pi' | 'agentscope' | 'dsh' }
   | { type: 'run.engine'; runId: string; sessionId: string; engine: 'pi' | 'agentscope' | 'dsh' }
+  | { type: 'run.reasoning.delta'; runId: string; sessionId: string; text: string }
   | { type: 'run.delta'; runId: string; sessionId: string; text: string }
   | { type: 'run.activity'; runId: string; activity: RunActivity }
   | { type: 'run.approval'; runId: string; approval: RunApproval }

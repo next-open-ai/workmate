@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useAssets, type Asset } from '../../app/assets';
 import { useI18n } from '../../app/i18n';
 import { useProjects, type Project } from '../../app/projects';
@@ -24,11 +24,11 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { assets, loading, loadAssets, linkAssetsToProject, unlinkAssetsFromProject } = useAssets();
+const { assets, loading, loadAssets, linkAssetsToProject, unlinkAssetsFromProject, deleteAssets } = useAssets();
 const { projects, load: loadProjects } = useProjects();
 
 type LibraryMode = 'projects' | 'archive';
-type ArchiveScope = 'all' | 'unlinked' | string; // string = projectId
+type ArchiveScope = 'all' | 'unlinked' | string; // projectId or conversation:<server-session-id>
 const ASSET_MODE_KEY = 'assets.mode';
 const mode = ref<LibraryMode>('projects');
 const projectQuery = ref('');
@@ -39,15 +39,19 @@ const collapsedDirectories = ref(new Set<string>());
 const selectedRelative = ref('');
 const archiveQuery = ref('');
 const archiveType = ref('all');
-const archiveScope = ref<ArchiveScope>('unlinked');
+const archiveScope = ref<ArchiveScope>('all');
+const sessionQuery = ref('');
+const sessionPickerOpen = ref(false);
 const selectedAsset = ref<Asset | null>(null);
 const checkedAssetIds = ref<string[]>([]);
 const linkPickerOpen = ref(false);
 const linkTargetProjectId = ref('');
 const linkBusy = ref(false);
+const deleteBusy = ref(false);
 const linkMessage = ref('');
 const showTechnical = ref(false);
 const copied = ref('');
+let projectRefreshTimer: ReturnType<typeof setInterval> | undefined;
 
 const previewLoading = ref(false);
 const previewError = ref('');
@@ -76,11 +80,45 @@ const visibleTree = computed(() =>
 );
 const treeFileCount = computed(() => deliverableEntries(treeEntries.value).filter((entry) => entry.type === 'file').length);
 
-const unlinkedCount = computed(() => assets.value.filter((asset) => !asset.projectId).length);
+const conversationGroups = computed(() => {
+  const map = new Map<string, { id: string; count: number; latest: number; title: string }>();
+  for (const asset of assets.value) {
+    if (!asset.conversationId) continue;
+    const existing = map.get(asset.conversationId);
+    if (existing) {
+      existing.count += 1;
+      existing.latest = Math.max(existing.latest, asset.createdAt);
+    } else {
+      map.set(asset.conversationId, {
+        id: asset.conversationId,
+        count: 1,
+        latest: asset.createdAt,
+        title: conversationTitle(asset.conversationId) || `会话 ${shortId(asset.conversationId)}`,
+      });
+    }
+  }
+  return [...map.values()].sort((a, b) => b.latest - a.latest || b.count - a.count || a.title.localeCompare(b.title, 'zh-CN'));
+});
+const filteredConversationGroups = computed(() => {
+  const q = sessionQuery.value.trim().toLowerCase();
+  if (!q) return conversationGroups.value;
+  return conversationGroups.value.filter((group) => group.title.toLowerCase().includes(q) || group.id.toLowerCase().includes(q));
+});
+const activeConversationFilter = computed(() => {
+  if (!archiveScope.value.startsWith('conversation:')) return null;
+  const id = archiveScope.value.slice('conversation:'.length);
+  return conversationGroups.value.find((group) => group.id === id) ?? {
+    id,
+    count: assets.value.filter((asset) => asset.conversationId === id).length,
+    latest: 0,
+    title: conversationTitle(id) || `会话 ${shortId(id)}`,
+  };
+});
 const filteredAssets = computed(() =>
   assets.value.filter((asset) => {
+    if (archiveScope.value.startsWith('conversation:') && asset.conversationId !== archiveScope.value.slice('conversation:'.length)) return false;
     if (archiveScope.value === 'unlinked' && asset.projectId) return false;
-    if (archiveScope.value !== 'all' && archiveScope.value !== 'unlinked' && asset.projectId !== archiveScope.value) return false;
+    if (!archiveScope.value.startsWith('conversation:') && archiveScope.value !== 'all' && archiveScope.value !== 'unlinked' && asset.projectId !== archiveScope.value) return false;
     if (archiveType.value !== 'all' && !asset.name.toLowerCase().endsWith(`.${archiveType.value}`)) return false;
     if (!asset.name.toLowerCase().includes(archiveQuery.value.trim().toLowerCase())) return false;
     return true;
@@ -129,7 +167,7 @@ async function confirmLinkToProject() {
       .replace('{copied}', String(result.copied));
     checkedAssetIds.value = [];
     linkPickerOpen.value = false;
-    if (archiveScope.value === 'unlinked') archiveScope.value = linkTargetProjectId.value;
+    if (archiveScope.value === 'unlinked') archiveScope.value = 'all';
   } catch (error) {
     linkMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -148,6 +186,79 @@ async function unlinkSelected() {
   } finally {
     linkBusy.value = false;
   }
+}
+
+function pruneSelectionAfterDelete(removedIds: string[]) {
+  const removed = new Set(removedIds);
+  checkedAssetIds.value = checkedAssetIds.value.filter((id) => !removed.has(id));
+  if (selectedAsset.value && removed.has(selectedAsset.value.id)) {
+    selectedAsset.value = filteredAssets.value.find((asset) => !removed.has(asset.id)) ?? null;
+  }
+}
+
+async function removeAssetsByIds(assetIds: string[], confirmText: string) {
+  const ids = [...new Set(assetIds.filter(Boolean))];
+  if (!ids.length) return;
+  if (!window.confirm(confirmText)) return;
+  deleteBusy.value = true;
+  linkMessage.value = '';
+  try {
+    const result = await deleteAssets(ids);
+    pruneSelectionAfterDelete(ids);
+    if (archiveScope.value.startsWith('conversation:')) {
+      const conversationId = archiveScope.value.slice('conversation:'.length);
+      if (!assets.value.some((asset) => asset.conversationId === conversationId)) {
+        archiveScope.value = 'all';
+        sessionPickerOpen.value = false;
+      }
+    }
+    linkMessage.value = t('assets.deleteDone').replace('{n}', String(result.deleted));
+  } catch (error) {
+    linkMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    deleteBusy.value = false;
+  }
+}
+
+async function deleteSelected() {
+  await removeAssetsByIds(
+    [...checkedAssetIds.value],
+    t('assets.deleteConfirm').replace('{n}', String(checkedAssetIds.value.length)),
+  );
+}
+
+async function deleteCurrentAsset() {
+  const asset = selectedAsset.value;
+  if (!asset) return;
+  await removeAssetsByIds(
+    [asset.id],
+    t('assets.deleteOneConfirm').replace('{name}', asset.workspaceRelative || asset.name),
+  );
+}
+
+async function deleteListedAsset(asset: Asset) {
+  selectedAsset.value = asset;
+  await removeAssetsByIds(
+    [asset.id],
+    t('assets.deleteOneConfirm').replace('{name}', asset.workspaceRelative || asset.name),
+  );
+}
+
+async function deleteSessionAssets(conversationId: string, title: string, count: number) {
+  const ids = assets.value.filter((asset) => asset.conversationId === conversationId).map((asset) => asset.id);
+  await removeAssetsByIds(
+    ids,
+    t('assets.deleteSessionConfirm').replace('{title}', title).replace('{n}', String(count || ids.length)),
+  );
+}
+
+function selectConversationFilter(conversationId: string) {
+  archiveScope.value = `conversation:${conversationId}`;
+  sessionPickerOpen.value = false;
+}
+
+function clearConversationFilter() {
+  archiveScope.value = 'all';
 }
 
 watch(mode, (value) => { void writeStored(ASSET_MODE_KEY, value); });
@@ -208,7 +319,7 @@ function employeeName(id: string | null) {
 }
 function conversationTitle(id: string | null) {
   if (!id) return null;
-  return props.conversations.find((item) => item.id === id)?.title ?? null;
+  return props.conversations.find((item) => item.id === id || item.serverSessionId === id)?.title ?? null;
 }
 function openConversationFromAsset(id: string | null) {
   if (!id) return;
@@ -269,6 +380,12 @@ async function loadProjectTree() {
   } finally {
     treeLoading.value = false;
   }
+}
+
+async function refreshProjectLibrary() {
+  if (mode.value !== 'projects' || treeLoading.value) return;
+  await loadProjects();
+  await loadProjectTree();
 }
 
 async function selectTreeEntry(entry: ProjectFileEntry) {
@@ -437,6 +554,12 @@ onMounted(async () => {
   if (savedMode === 'projects' || savedMode === 'archive') mode.value = savedMode;
   await Promise.all([loadProjects(), loadAssets()]);
   if (mode.value === 'projects') await loadProjectTree();
+  projectRefreshTimer = setInterval(() => { void refreshProjectLibrary(); }, 5_000);
+  window.addEventListener('focus', refreshProjectLibrary);
+});
+onBeforeUnmount(() => {
+  if (projectRefreshTimer) clearInterval(projectRefreshTimer);
+  window.removeEventListener('focus', refreshProjectLibrary);
 });
 </script>
 
@@ -543,21 +666,69 @@ onMounted(async () => {
         />
       </div>
 
-      <!-- 会话归档：列表 + 预览 + 未分类关联 -->
+      <!-- 会话资产：列表 + 预览 -->
       <div v-else class="mt-5 flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
         <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-sm lg:max-w-lg">
           <div class="shrink-0 border-b border-[var(--border)] p-4">
             <input v-model="archiveQuery" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]" :placeholder="t('assets.search')" />
-            <div class="mt-3 flex flex-wrap gap-2">
-              <button :class="['rounded-lg px-3 py-1.5 text-xs font-semibold', archiveScope === 'unlinked' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)]']" type="button" @click="archiveScope = 'unlinked'">{{ t('assets.scopeUnlinked') }} · {{ unlinkedCount }}</button>
-              <button :class="['rounded-lg px-3 py-1.5 text-xs font-semibold', archiveScope === 'all' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)]']" type="button" @click="archiveScope = 'all'">{{ t('assets.filterAll') }} · {{ assets.length }}</button>
-              <button
-                v-for="project in projectsWithWorkspace"
-                :key="project.id"
-                :class="['rounded-lg px-3 py-1.5 text-xs font-semibold', archiveScope === project.id ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)]']"
-                type="button"
-                @click="archiveScope = project.id"
-              >{{ project.name }}</button>
+            <div v-if="conversationGroups.length" class="mt-3 border-t border-[var(--border)] pt-3">
+              <div class="mb-2 flex items-center justify-between gap-2">
+                <p class="text-[10px] font-bold tracking-wide text-[var(--muted)]">{{ t('assets.byConversation') }}</p>
+                <span class="text-[10px] text-[var(--muted)]">{{ t('assets.sessionCount').replace('{n}', String(conversationGroups.length)) }}</span>
+              </div>
+              <div v-if="activeConversationFilter" class="mb-2 flex items-center gap-2 rounded-xl border border-[var(--accent)]/25 bg-[var(--accent-soft)]/50 px-2.5 py-2">
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-xs font-semibold" :title="activeConversationFilter.title">{{ activeConversationFilter.title }}</p>
+                  <p class="text-[10px] text-[var(--muted)]">{{ t('assets.sessionAssets').replace('{n}', String(activeConversationFilter.count)) }}</p>
+                </div>
+                <button
+                  class="shrink-0 rounded-lg border border-rose-500/35 px-2 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-500/10 disabled:opacity-40"
+                  type="button"
+                  :disabled="deleteBusy || !activeConversationFilter.count"
+                  @click="deleteSessionAssets(activeConversationFilter.id, activeConversationFilter.title, activeConversationFilter.count)"
+                >{{ t('assets.deleteSession') }}</button>
+                <button class="shrink-0 rounded-lg border border-[var(--border)] px-2 py-1 text-[10px] font-semibold" type="button" @click="clearConversationFilter">{{ t('assets.clearSessionFilter') }}</button>
+              </div>
+              <div class="relative">
+                <button
+                  class="flex w-full items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-left text-xs font-semibold hover:border-[var(--accent)]"
+                  type="button"
+                  @click="sessionPickerOpen = !sessionPickerOpen"
+                >
+                  <span class="truncate text-[var(--muted)]">{{ t('assets.searchSessions') }}</span>
+                  <span class="text-[var(--muted)]">{{ sessionPickerOpen ? '▴' : '▾' }}</span>
+                </button>
+                <div v-if="sessionPickerOpen" class="absolute left-0 right-0 z-20 mt-1 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl">
+                  <div class="border-b border-[var(--border)] p-2">
+                    <input
+                      v-model="sessionQuery"
+                      class="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+                      :placeholder="t('assets.searchSessions')"
+                      @keydown.escape="sessionPickerOpen = false"
+                    />
+                  </div>
+                  <div class="max-h-52 overflow-y-auto p-1">
+                    <p v-if="!filteredConversationGroups.length" class="px-2 py-4 text-center text-[11px] text-[var(--muted)]">{{ t('assets.noMatchingSessions') }}</p>
+                    <div
+                      v-for="group in filteredConversationGroups"
+                      :key="group.id"
+                      :class="['mb-0.5 flex items-center gap-1 rounded-lg px-1.5 py-1', archiveScope === `conversation:${group.id}` ? 'bg-[var(--accent-soft)]' : 'hover:bg-[var(--surface-muted)]']"
+                    >
+                      <button class="min-w-0 flex-1 truncate px-1 py-1.5 text-left text-xs font-semibold" type="button" :title="group.title" @click="selectConversationFilter(group.id)">
+                        <span class="block truncate">{{ group.title }}</span>
+                        <span class="mt-0.5 block text-[10px] font-medium text-[var(--muted)]">{{ t('assets.sessionAssets').replace('{n}', String(group.count)) }} · {{ formatDate(group.latest) }}</span>
+                      </button>
+                      <button
+                        class="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold text-rose-600 hover:bg-rose-500/10 disabled:opacity-40"
+                        type="button"
+                        :title="t('assets.deleteSession')"
+                        :disabled="deleteBusy"
+                        @click.stop="deleteSessionAssets(group.id, group.title, group.count)"
+                      >{{ t('assets.delete') }}</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="mt-3 flex flex-wrap gap-2">
               <button :class="['rounded-lg px-3 py-1.5 text-xs font-semibold', archiveType === 'all' ? 'bg-[var(--surface)] ring-1 ring-[var(--accent)]/40' : 'bg-[var(--surface-muted)] text-[var(--muted)]']" type="button" @click="archiveType = 'all'">ext</button>
@@ -566,8 +737,9 @@ onMounted(async () => {
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-semibold" type="button" @click="toggleCheckAll">{{ allFilteredChecked ? t('assets.uncheckAll') : t('assets.checkAll') }}</button>
               <span class="text-[11px] text-[var(--muted)]">{{ t('assets.checkedCount').replace('{n}', String(checkedCount)) }}</span>
-              <button class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-40" type="button" :disabled="!checkedCount || linkBusy" @click="linkPickerOpen = true; linkTargetProjectId = projectsWithWorkspace[0]?.id || ''">{{ t('assets.linkToProject') }}</button>
-              <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-semibold disabled:opacity-40" type="button" :disabled="!checkedCount || linkBusy" @click="unlinkSelected">{{ t('assets.unlinkFromProject') }}</button>
+              <button class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-40" type="button" :disabled="!checkedCount || linkBusy || deleteBusy" @click="linkPickerOpen = true; linkTargetProjectId = projectsWithWorkspace[0]?.id || ''">{{ t('assets.linkToProject') }}</button>
+              <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-semibold disabled:opacity-40" type="button" :disabled="!checkedCount || linkBusy || deleteBusy" @click="unlinkSelected">{{ t('assets.unlinkFromProject') }}</button>
+              <button class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 disabled:opacity-40" type="button" :disabled="!checkedCount || deleteBusy || linkBusy" @click="deleteSelected">{{ deleteBusy ? t('assets.deleting') : t('assets.deleteSelected') }}</button>
             </div>
             <p v-if="linkMessage" class="mt-2 text-[11px] text-[var(--muted)]">{{ linkMessage }}</p>
             <div v-if="linkPickerOpen" class="mt-3 rounded-xl border border-[var(--border)] bg-[var(--background)] p-3">
@@ -583,11 +755,11 @@ onMounted(async () => {
             </div>
           </div>
           <div class="min-h-0 flex-1 overflow-y-auto p-2">
-            <p v-if="!filteredAssets.length" class="px-4 py-12 text-center text-xs text-[var(--muted)]">{{ archiveScope === 'unlinked' ? t('assets.emptyUnlinked') : t('assets.emptyHint') }}</p>
+            <p v-if="!filteredAssets.length" class="px-4 py-12 text-center text-xs text-[var(--muted)]">{{ t('assets.emptyHint') }}</p>
             <div
               v-for="asset in filteredAssets"
               :key="asset.id"
-              :class="['mb-1 flex w-full items-center gap-2 rounded-xl px-2 py-2.5', selectedAsset?.id === asset.id ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/25' : 'hover:bg-[var(--surface-muted)]']"
+              :class="['group mb-1 flex w-full items-center gap-2 rounded-xl px-2 py-2.5', selectedAsset?.id === asset.id ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/25' : 'hover:bg-[var(--surface-muted)]']"
             >
               <input class="mx-1" type="checkbox" :checked="checkedAssetIds.includes(asset.id)" @click="toggleCheck(asset.id, $event)" />
               <button class="flex min-w-0 flex-1 items-center gap-3 text-left" type="button" @click="selectedAsset = asset">
@@ -601,6 +773,13 @@ onMounted(async () => {
                 </span>
                 <span class="rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--muted)]">{{ t('assets.storageLocalArchive') }}</span>
               </button>
+              <button
+                class="shrink-0 rounded-lg px-2 py-1 text-[10px] font-semibold text-rose-600 opacity-0 hover:bg-rose-500/10 group-hover:opacity-100 focus:opacity-100 disabled:opacity-40"
+                type="button"
+                :disabled="deleteBusy"
+                :title="t('assets.delete')"
+                @click.stop="deleteListedAsset(asset)"
+              >{{ t('assets.delete') }}</button>
             </div>
           </div>
         </div>
@@ -618,10 +797,13 @@ onMounted(async () => {
             :html-url="previewHtmlUrl"
             :text="previewText"
             :image-url="previewImageUrl"
+            :can-delete="Boolean(selectedAsset)"
+            :deleting="deleteBusy"
             @refresh="loadArchivePreview"
             @reveal="revealCurrent"
             @download="downloadCurrent"
             @open-browser="openInBrowser"
+            @delete="deleteCurrentAsset"
           />
           <div v-if="selectedAsset" class="shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 text-sm shadow-sm">
             <p class="text-[10px] font-bold uppercase tracking-[.12em] text-[var(--muted)]">{{ t('assets.sectionInfo') }}</p>

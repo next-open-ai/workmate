@@ -156,14 +156,18 @@ export function normalizeContract(
     : undefined;
   const acceptance =
     typeof input.acceptance === 'string' ? input.acceptance.trim().slice(0, 2000) : undefined;
+  const maxSteps =
+    typeof input.maxSteps === 'number' && input.maxSteps > 0
+      ? Math.min(64, Math.max(4, Math.floor(input.maxSteps)))
+      : undefined;
   const timeoutMs =
     typeof input.timeoutMs === 'number' && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : undefined;
   const maxAttempts =
     typeof input.maxAttempts === 'number' && input.maxAttempts > 0
       ? Math.min(10, Math.floor(input.maxAttempts))
       : undefined;
-  if (!outputs?.length && !acceptance && !timeoutMs && !maxAttempts) return undefined;
-  return { outputs, acceptance, timeoutMs, maxAttempts };
+  if (!outputs?.length && !acceptance && !maxSteps && !timeoutMs && !maxAttempts) return undefined;
+  return { outputs, acceptance, maxSteps, timeoutMs, maxAttempts };
 }
 
 /**
@@ -303,15 +307,7 @@ export function analyzeModeFit(
   tasks: Array<{ dependsOn?: string[] | number[] }>,
 ): { suggestedMode: ProjectMode; modeFitsPreferred: boolean; rationale: string } {
   const suggestedMode = inferCollaborationMode(tasks);
-  if (preferred === suggestedMode || preferred === 'dag') {
-    // dag accepts any shape; preferred dag always "fits"
-    if (preferred === 'dag') {
-      return {
-        suggestedMode: preferred,
-        modeFitsPreferred: true,
-        rationale: '已按 DAG 偏好保留显式依赖。',
-      };
-    }
+  if (preferred === suggestedMode) {
     return {
       suggestedMode,
       modeFitsPreferred: true,
@@ -330,4 +326,3 @@ export function analyzeModeFit(
     rationale: `目标更适合「${labels[suggestedMode]}」，与当前偏好「${labels[preferred]}」不一致。建议切换后按真实依赖调度。`,
   };
 }
-

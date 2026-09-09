@@ -22,11 +22,12 @@ export type { Employee, EmployeeDraft, EmployeeId } from './employees.js';
 export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
 export type CollaborationDelivery = 'synthesize' | 'direct';
 export interface CollaborationRun { employeeId: EmployeeId; task: string; status: 'running' | 'completed' | 'failed'; summary: string; activities: ToolActivity[]; error?: string; }
-export interface Message { id: string; role: 'user' | 'assistant'; content: string; activities?: ToolActivity[]; approvals?: ToolApproval[]; assets?: Asset[]; sources?: Array<SearchSource & { provider: string }>; collaborations?: CollaborationRun[]; collaborationDelivery?: CollaborationDelivery; /** Resolved execution engine for this assistant turn. */ engine?: 'pi' | 'agentscope' | 'dsh'; startedAt?: number; elapsedMs?: number; }
+export interface Message { id: string; role: 'user' | 'assistant'; content: string; reasoning?: string; activities?: ToolActivity[]; approvals?: ToolApproval[]; assets?: Asset[]; sources?: Array<SearchSource & { provider: string }>; collaborations?: CollaborationRun[]; collaborationDelivery?: CollaborationDelivery; /** Resolved execution engine for this assistant turn. */ engine?: 'pi' | 'agentscope' | 'dsh'; startedAt?: number; elapsedMs?: number; }
 export interface Conversation { id: string; title: string; employeeId: EmployeeId; messages: Message[]; updatedAt: number; serverSessionId?: string; }
-export interface ProjectTaskDraft { title: string; objective: string; employeeId: EmployeeId; skillIds: string[]; dependsOn?: number[]; contract?: { outputs?: string[]; acceptance?: string; timeoutMs?: number; maxAttempts?: number } };
+export interface ProjectTaskDraft { title: string; objective: string; employeeId: EmployeeId; skillIds: string[]; dependsOn?: number[]; contract?: { outputs?: string[]; acceptance?: string; maxSteps?: number; timeoutMs?: number; maxAttempts?: number } };
 export interface ProjectTaskTranscript {
   assistantContent: string;
+  reasoningContent?: string;
   activities: ToolActivity[];
   approvals: ToolApproval[];
   assets: Array<{ id: string; name: string; sizeBytes: number; runId?: string }>;
@@ -57,15 +58,6 @@ function isUserFacingDeliverablePath(relativePath: string) {
   if (base.startsWith('.') && base !== '.gitkeep') return false;
   const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1).toLowerCase() : '';
   return Boolean(ext) && !NEVER_DELIVERABLE_EXT.has(ext);
-}
-
-function alreadyHasAsset(assets: Asset[] | undefined, runId: string, relativePath: string) {
-  const base = relativePath.split('/').pop() || relativePath;
-  return Boolean(assets?.some((item) =>
-    item.id && (
-      (item.runId === runId && (item.workspaceRelative === relativePath || item.name === base))
-      || item.workspaceRelative === relativePath
-    )));
 }
 
 const view = ref<View>('chat');
@@ -282,13 +274,19 @@ export function useWorkspace() {
         const base: Message = {
           id: message.id,
           role: message.role,
-          content: message.content,
+          // Prefer live SSE text while the server still has an empty placeholder mid-run.
+          content: message.content || old?.content || '',
         };
         if (message.role === 'assistant' && old) {
+          if (old.reasoning) base.reasoning = old.reasoning;
           base.activities = old.activities ?? [];
           base.approvals = old.approvals ?? [];
           base.assets = old.assets ?? [];
           base.sources = old.sources ?? [];
+          base.collaborations = old.collaborations;
+          if (old.engine) base.engine = old.engine;
+          if (old.startedAt) base.startedAt = old.startedAt;
+          if (old.elapsedMs != null) base.elapsedMs = old.elapsedMs;
         }
         return base;
       });
@@ -299,7 +297,7 @@ export function useWorkspace() {
 
   async function archiveServerArtifact(conversation: Conversation, assistantMessage: Message, runId: string, relativePath: string) {
     const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!isUserFacingDeliverablePath(normalized) || alreadyHasAsset(assistantMessage.assets, runId, normalized)) return;
+    if (!isUserFacingDeliverablePath(normalized)) return;
     try {
       const asset = await archiveArtifact({
         runId,
@@ -307,7 +305,9 @@ export function useWorkspace() {
         conversationId: conversation.serverSessionId,
         employeeId: conversation.employeeId,
       });
-      if (!assistantMessage.assets?.some((item) => item.id === asset.id)) assistantMessage.assets?.push(asset as Asset);
+      const current = assistantMessage.assets?.findIndex((item) => item.id === asset.id) ?? -1;
+      if (current >= 0) assistantMessage.assets?.splice(current, 1, asset as Asset);
+      else assistantMessage.assets?.push(asset as Asset);
       serverBump();
     } catch (error) {
       const message = error instanceof Error ? error.message : '资产归档失败。';
@@ -391,6 +391,9 @@ export function useWorkspace() {
       }
       if (event.type === 'run.engine' && event.engine) {
         assistantMessage.engine = event.engine;
+        serverBump();
+      } else if (event.type === 'run.reasoning.delta' && event.text) {
+        assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${event.text}`;
         serverBump();
       } else if (event.type === 'run.delta' && event.text) {
         assistantMessage.content += event.text;
@@ -542,6 +545,7 @@ export function useWorkspace() {
         prompt: userMessage.content,
         conversationId: conversation.id,
         assistantContent: assistantMessage.content,
+        reasoningContent: assistantMessage.reasoning,
         activities: [...(assistantMessage.activities ?? [])],
         approvals: [...(assistantMessage.approvals ?? [])],
         assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })),
@@ -653,6 +657,14 @@ export function useWorkspace() {
               warnedSseGap = true;
               console.warn('[workmate] adopted run.transcript via poll (SSE gap or offline)');
             }
+          }
+        }
+        if (run?.reasoning) {
+          const localReasoning = assistantMessage.reasoning || '';
+          const remoteReasoning = run.reasoning;
+          if (remoteReasoning.length > localReasoning.length && (remoteReasoning.startsWith(localReasoning) || !localReasoning.trim())) {
+            assistantMessage.reasoning = remoteReasoning;
+            serverBump();
           }
         }
         if (run?.engine && assistantMessage.engine !== run.engine) {
@@ -918,8 +930,9 @@ export function useWorkspace() {
     conversations.value = [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt);
     void persist();
     const employee = currentEmployee.value;
-    const assistantMessage: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', activities: [], approvals: [], assets: [], collaborations: [], startedAt: Date.now() };
-    conversation.messages.push(assistantMessage);
+    conversation.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: '', activities: [], approvals: [], assets: [], collaborations: [], startedAt: Date.now() });
+    // Use the reactive proxy from the array so stream mutations invalidate UI computeds.
+    const assistantMessage = conversation.messages[conversation.messages.length - 1];
     const plannedCollaborators = [...new Set(options.collaboratorIds ?? [])].filter((cid) => cid !== employee.id).slice(0, 3);
     if (serverChatActive() && !plannedCollaborators.length) {
       // M0 server-backed turn: the orchestration server owns the run/approval
@@ -950,6 +963,7 @@ export function useWorkspace() {
             prompt: userMessage.content,
             conversationId: conversation.id,
             assistantContent: assistantMessage.content,
+            reasoningContent: assistantMessage.reasoning,
             activities: assistantMessage.activities ?? [],
             approvals: assistantMessage.approvals ?? [],
             assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })),
@@ -1039,7 +1053,7 @@ export function useWorkspace() {
         void persist();
         return {
           conversationId: conversation.id,
-          transcript: { prompt: userMessage.content, conversationId: conversation.id, assistantContent: assistantMessage.content, activities: [], approvals: [], assets: [] },
+          transcript: { prompt: userMessage.content, conversationId: conversation.id, assistantContent: assistantMessage.content, reasoningContent: assistantMessage.reasoning, activities: [], approvals: [], assets: [] },
         };
       }
       await streamChat({
@@ -1074,7 +1088,7 @@ export function useWorkspace() {
         conversations.value = [...conversations.value];
       }, (approval) => { if (!assistantMessage.approvals?.some((item) => item.skillId === approval.skillId && item.capability === approval.capability)) assistantMessage.approvals?.push(approval); conversations.value = [...conversations.value]; }, async (artifact) => {
         const normalized = artifact.path.replace(/\\/g, '/').replace(/^\/+/, '');
-        if (!isUserFacingDeliverablePath(normalized) || alreadyHasAsset(assistantMessage.assets, artifact.runId, normalized)) return;
+        if (!isUserFacingDeliverablePath(normalized)) return;
         try {
           const asset = await archiveArtifact({
             runId: artifact.runId,
@@ -1082,7 +1096,9 @@ export function useWorkspace() {
             conversationId: conversation.serverSessionId,
             employeeId: employee.id,
           });
-          if (!assistantMessage.assets?.some((item) => item.id === asset.id)) assistantMessage.assets?.push(asset);
+          const current = assistantMessage.assets?.findIndex((item) => item.id === asset.id) ?? -1;
+          if (current >= 0) assistantMessage.assets?.splice(current, 1, asset);
+          else assistantMessage.assets?.push(asset);
           conversations.value = [...conversations.value];
         } catch (error) {
           const message = error instanceof Error ? error.message : '资产归档失败。';
@@ -1101,6 +1117,7 @@ export function useWorkspace() {
           prompt: userMessage.content,
           conversationId: conversation.id,
           assistantContent: assistantMessage.content,
+          reasoningContent: assistantMessage.reasoning,
           activities: [...(assistantMessage.activities ?? [])],
           approvals: [...(assistantMessage.approvals ?? [])],
           assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })),
@@ -1125,6 +1142,7 @@ export function useWorkspace() {
           prompt: userMessage.content,
           conversationId: conversation.id,
           assistantContent: assistantMessage.content,
+          reasoningContent: assistantMessage.reasoning,
           activities: [...(assistantMessage.activities ?? [])],
           approvals: [...(assistantMessage.approvals ?? [])],
           assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })),
@@ -1256,7 +1274,7 @@ export function useWorkspace() {
 
     // Phase 2 — fill objectives + contracts for the fixed structure.
     let detailOut = '';
-    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxAttempts"?:number}}. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
+    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Use contract.maxSteps when one task obviously needs a materially larger or smaller tool-step budget than the default. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
     await streamChat({
       profile: { id: 'project-coordinator-detail', name: 'Project coordinator', instructions: 'Output valid JSON array only.', toolIds: [] },
       messages: [{ role: 'user', content: detailPrompt }],
@@ -1289,7 +1307,7 @@ export function useWorkspace() {
     const fit = analyzeModeFit(preferredMode, tasks);
     // Prefer structural inference; LLM suggestedMode is advisory when it disagrees with graph.
     const suggestedMode = fit.suggestedMode !== preferredMode ? fit.suggestedMode : (llmSuggested ?? fit.suggestedMode);
-    const modeFitsPreferred = suggestedMode === preferredMode || preferredMode === 'dag';
+    const modeFitsPreferred = suggestedMode === preferredMode;
     return {
       tasks,
       preferredMode,

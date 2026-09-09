@@ -15,6 +15,8 @@ export interface OrchestratorOptions {
   runner?: AgentRunner;
   dispatcher?: ExecutionDispatcher;
   runTimeoutMs?: number;
+  /** Project work is commonly longer than chat; defaults to 20 minutes. */
+  projectTaskTimeoutMs?: number;
   flushDelayMs?: number;
   maxConcurrentRunsGlobal?: number;
   maxConcurrentRunsPerUser?: number;
@@ -71,6 +73,11 @@ export class Orchestrator {
       hub: this.events,
       engine: this.engine,
       runTimeoutMs: options.runTimeoutMs ?? 600_000,
+      projectTaskTimeoutMs: options.projectTaskTimeoutMs,
+      maxConcurrentProjectTasks: Math.min(
+        options.maxConcurrentRunsGlobal ?? 4,
+        options.maxConcurrentRunsPerUser ?? 2,
+      ),
       contextResolver: options.contextResolver,
     });
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MemoryStore, Orchestrator, type Project } from '../index.js';
+import { MemoryStore, Orchestrator, type AgentRunner, type Project } from '../index.js';
 import { FakeRunner, runContext, waitFor } from './fake.js';
 
 async function createDraft(orch: Orchestrator, goal: string, mode: Project['mode'], tasks: Array<{ title: string; objective: string; dependsOn?: string[] }>) {
@@ -41,6 +41,52 @@ test('parallel project: all tasks run and the project completes', async () => {
     const runs = await orch.projects.listProjectRuns(project.id);
     assert.equal(runs.length, 1);
     assert.equal(runs[0].status, 'completed');
+  } finally {
+    await orch.close();
+  }
+});
+
+test('project scheduler does not mark dispatcher-waiting tasks as running', async () => {
+  const fake = new FakeRunner({ delayMs: 160 });
+  const orch = Orchestrator.memory({
+    runner: fake,
+    maxConcurrentRunsGlobal: 4,
+    maxConcurrentRunsPerUser: 1,
+  });
+  try {
+    const project = await createDraft(orch, '容量对齐', 'parallel', [
+      { title: '一', objective: 'A' },
+      { title: '二', objective: 'B' },
+      { title: '三', objective: 'C' },
+    ]);
+    await orch.projects.confirmProject(project.id, { defaultContext: runContext() });
+    await waitFor(async () => (await orch.projects.getProject(project.id))?.tasks.some((task) => task.status === 'running') === true);
+    const active = await orch.projects.getProject(project.id);
+    assert.equal(active?.tasks.filter((task) => task.status === 'running').length, 1);
+    assert.equal(active?.tasks.filter((task) => task.status === 'queued').length, 2);
+    await waitFor(async () => (await orch.projects.getProject(project.id))?.status === 'completed', 8_000);
+  } finally {
+    await orch.close();
+  }
+});
+
+test('failed task remains failed even when it emitted a partial artifact', async () => {
+  const runner: AgentRunner = {
+    async start(_request, emit) {
+      emit({ type: 'artifact.created', runId: 'partial-run', path: 'output/partial.md' });
+      emit({ type: 'run.failed', runId: 'partial-run', message: 'generation stopped before acceptance' });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const project = await createDraft(orch, '不能把部分文件当成功', 'parallel', [
+      { title: '生成', objective: '形成完整交付物' },
+    ]);
+    await orch.projects.confirmProject(project.id, { defaultContext: runContext() });
+    await waitFor(async () => (await orch.projects.getProject(project.id))?.status === 'failed');
+    const failed = await orch.projects.getProject(project.id);
+    assert.equal(failed?.tasks[0]?.status, 'failed');
+    assert.match(failed?.tasks[0]?.error ?? '', /stopped before acceptance/);
   } finally {
     await orch.close();
   }
@@ -269,6 +315,9 @@ test('inferCollaborationMode classifies common graphs', async () => {
   const fit = analyzeModeFit('parallel', [{ dependsOn: [] }, { dependsOn: [0] }]);
   assert.equal(fit.modeFitsPreferred, false);
   assert.equal(fit.suggestedMode, 'waterfall');
+  const emptyDag = analyzeModeFit('dag', [{ dependsOn: [] }, { dependsOn: [] }]);
+  assert.equal(emptyDag.modeFitsPreferred, false);
+  assert.equal(emptyDag.suggestedMode, 'parallel');
   assert.equal(buildAttemptKey('t1', 2, 3), 't1:plan2:attempt3');
 });
 

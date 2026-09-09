@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('workmateDesktop', {
   archiveArtifact: (artifact) => ipcRenderer.invoke('workmate:archive-artifact', artifact),
   linkAssetsToProject: (value) => ipcRenderer.invoke('workmate:link-assets-to-project', value),
   unlinkAssetsFromProject: (assetIds) => ipcRenderer.invoke('workmate:unlink-assets-from-project', assetIds),
+  deleteAssets: (assetIds) => ipcRenderer.invoke('workmate:delete-assets', assetIds),
   saveAsset: (assetId) => ipcRenderer.invoke('workmate:save-asset', assetId),
   revealAsset: (assetId) => ipcRenderer.invoke('workmate:reveal-asset', assetId),
   getChannelSettings: () => ipcRenderer.invoke('workmate:get-channel-settings'),

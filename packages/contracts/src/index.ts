@@ -81,6 +81,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     /** Resolved execution backend for this run (pi / agentscope / dsh). */
     engine: AgentEngineIdSchema.optional(),
   }),
+  z.object({ type: z.literal('reasoning.delta'), runId: z.string(), text: z.string() }),
   z.object({ type: z.literal('message.delta'), runId: z.string(), text: z.string() }),
   z.object({ type: z.literal('tool.started'), runId: z.string(), toolName: z.string(), summary: z.string() }),
   z.object({ type: z.literal('tool.completed'), runId: z.string(), toolName: z.string(), summary: z.string(), ok: z.boolean() }),

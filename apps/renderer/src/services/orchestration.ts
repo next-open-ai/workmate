@@ -80,6 +80,7 @@ export interface ServerRunRecord {
   startedAt: number;
   finishedAt?: number;
   transcript: string;
+  reasoning?: string;
   activities: ServerRunActivity[];
   approvals: ServerRunApproval[];
   artifacts: ServerRunArtifact[];
@@ -187,6 +188,7 @@ export interface ServerTask {
   contract?: {
     outputs?: string[];
     acceptance?: string;
+    maxSteps?: number;
     timeoutMs?: number;
     maxAttempts?: number;
   };
@@ -201,6 +203,7 @@ export interface ServerMessage {
   taskId?: string;
   createdAt: number;
   changeSetId?: string;
+  runId?: string;
 }
 
 export interface ServerProjectPlan {
@@ -262,6 +265,7 @@ export interface ServerProjectRun {
   error?: string;
   planVersion?: number;
   changeSetId?: string;
+  messages?: ServerMessage[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -276,6 +280,7 @@ export interface OrcEvent {
   taskId?: string;
   status?: string;
   text?: string;
+  reasoningText?: string;
   provider?: string;
   attemptNo?: number;
   engine?: 'pi' | 'agentscope' | 'dsh';
@@ -318,7 +323,7 @@ export async function createProject(input: {
   accessScope?: AccessScope;
   accessGrants?: AccessGrant[];
   coordinator?: { provider: string; model: string };
-  tasks: Array<{ id?: string; title: string; objective: string; employeeId: string; skillIds: string[]; dependsOn?: string[] }>;
+  tasks: Array<{ id?: string; title: string; objective: string; employeeId: string; skillIds: string[]; dependsOn?: string[]; contract?: ServerTask["contract"] }>;
 }): Promise<ServerProject> {
   const result = await request<{ project: ServerProject }>('/projects', { method: 'POST', body: JSON.stringify(input) });
   return result.project;
@@ -366,7 +371,7 @@ export async function confirmProject(id: string): Promise<{ project: ServerProje
 export async function replanProject(
   id: string,
   input: {
-    tasks: Array<{ id?: string; title: string; objective: string; employeeId: string; skillIds: string[]; dependsOn?: string[] }>;
+    tasks: Array<{ id?: string; title: string; objective: string; employeeId: string; skillIds: string[]; dependsOn?: string[]; contract?: ServerTask["contract"] }>;
     note?: string;
   },
 ): Promise<ServerProject> {

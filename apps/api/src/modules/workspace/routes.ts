@@ -44,7 +44,15 @@ function projectPath(root: string, relative: string) {
 function listProjectFiles(root: string, directory = projectRoot(root), relative = '', depth = 0, result: Array<{ relative: string; type: 'directory' | 'file' }> = []) {
   if (depth > 8 || !fs.existsSync(directory)) return result;
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.name === '.DS_Store' || entry.name === '.git' || entry.name === 'node_modules' || entry.name === '.python-packages') continue;
+    if (
+      entry.name === '.DS_Store'
+      || entry.name === '.git'
+      || entry.name === '.agents'
+      || entry.name === '.dsh-sessions'
+      || entry.name === '.workmate-dsh.cordis.yml'
+      || entry.name === 'node_modules'
+      || entry.name === '.python-packages'
+    ) continue;
     const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
     const target = path.join(directory, entry.name);
     if (entry.isDirectory()) {

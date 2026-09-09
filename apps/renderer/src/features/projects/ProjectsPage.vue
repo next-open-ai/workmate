@@ -8,7 +8,6 @@ import type {
 } from "../../app/workspace.js";
 import type { AuthUser } from "../../services/auth.js";
 import type { ProjectDraftResult } from "../../app/project-planning.js";
-import { modeLabel } from "../../app/project-planning.js";
 import { employeeDisplayName } from "../../app/employees.js";
 import type { ProviderConfig, ProviderId } from "../../app/model-config.js";
 import { useModelConfig } from "../../app/model-config.js";
@@ -25,8 +24,10 @@ import {
   type ProjectTask,
   type ProjectTaskInput,
 } from "../../app/projects.js";
+import { useProjectTemplates } from "../../app/project-templates.js";
 import { buildDependencyBlock, buildSummaryEvidence, fitObjective } from "../../app/context-budget.js";
 import ProjectConversationWorkspace from "./ProjectConversationWorkspace.vue";
+import ProjectDagPreview from "./ProjectDagPreview.vue";
 import * as orch from "../../services/orchestration.js";
 import { isDesktopShell } from "../../app/platform.js";
 import { getCurrentUser, listLocalUsers } from "../../services/auth.js";
@@ -58,6 +59,7 @@ const props = defineProps<{
 const { load: loadSkills, allowedSkillsFor } = useCapabilities();
 const { load: loadRuntimePrefs, get: getRuntimePrefs } = useEmployeeRuntimePrefs();
 const { connections: mcpConnections, load: loadMcp } = useMcpConfig();
+const { templates: savedTemplates, load: loadProjectTemplates, save: saveProjectTemplate, remove: removeProjectTemplate } = useProjectTemplates();
 const {
   projects,
   runs,
@@ -97,6 +99,7 @@ function managedModel(): string {
 function serverToTranscript(run: orch.ServerRunRecord): Transcript {
   return {
     assistantContent: run.transcript,
+    reasoningContent: run.reasoning,
     activities: run.activities.map((activity) => ({
       toolName: activity.toolName,
       summary: activity.summary,
@@ -160,7 +163,8 @@ function adoptServerProject(sp: orch.ServerProject, previous?: Project): Project
     workspacePath: sp.workspacePath,
     tasks: sp.tasks.map((task) => {
       const old = previousTasks.get(task.id);
-      const transcript = old?.transcript ? old.transcript : undefined;
+      const sameAttempt = Boolean(old?.runId && task.runId && old.runId === task.runId);
+      const transcript = sameAttempt && old?.transcript ? old.transcript : undefined;
       return {
         id: task.id,
         title: task.title,
@@ -182,20 +186,19 @@ function adoptServerProject(sp: orch.ServerProject, previous?: Project): Project
         planVersion: task.planVersion,
       };
     }),
-    messages: [...previousMessages],
+    messages: [],
     createdAt: sp.createdAt,
     updatedAt: sp.updatedAt,
     activeRunId: sp.activeRunId,
-    summary: sp.summary ?? previous?.summary,
+    summary: sp.summary,
     plan: sp.plan,
     planHistory: sp.planHistory,
     changeSets: sp.changeSets,
     managedServer: true,
   };
-  // Append any server-side messages we have not mirrored yet.
-  const known = new Set(project.messages.map((message) => message.id));
-  for (const message of sp.messages) {
-    if (!known.has(message.id)) {
+  const runChanged = Boolean(previous?.activeRunId && sp.activeRunId && previous.activeRunId !== sp.activeRunId);
+  if (runChanged || !previousMessages.length) {
+    for (const message of sp.messages) {
       project.messages.push({
         id: message.id,
         role: message.role,
@@ -203,9 +206,34 @@ function adoptServerProject(sp: orch.ServerProject, previous?: Project): Project
         employeeId: message.employeeId,
         taskId: message.taskId,
         createdAt: message.createdAt,
+        runId: message.runId ?? sp.activeRunId,
         assets: [],
         activities: [],
       });
+    }
+  } else {
+    const known = new Map(previousMessages.map((message) => [message.id, message]));
+    for (const message of sp.messages) {
+      const old = known.get(message.id);
+      if (old) {
+        project.messages.push({
+          ...old,
+          content: message.content || old.content,
+          runId: message.runId ?? old.runId ?? sp.activeRunId,
+        });
+      } else {
+        project.messages.push({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          employeeId: message.employeeId,
+          taskId: message.taskId,
+          createdAt: message.createdAt,
+          runId: message.runId ?? sp.activeRunId,
+          assets: [],
+          activities: [],
+        });
+      }
     }
   }
   return project;
@@ -280,6 +308,7 @@ async function hydrateManagedTask(
   if (existingMsg) {
     // Finalize the live-streamed message with the authoritative transcript.
     existingMsg.content = run.transcript || existingMsg.content;
+    existingMsg.reasoning = run.reasoning || existingMsg.reasoning;
     existingMsg.activities = task.transcript.activities;
     existingMsg.assets = task.transcript.assets;
   } else {
@@ -289,6 +318,7 @@ async function hydrateManagedTask(
       employeeId: task.employeeId,
       taskId,
       content: run.transcript || "(无文本输出)",
+      reasoning: run.reasoning || "",
       assets: task.transcript.assets,
       activities: task.transcript.activities,
       createdAt: Date.now(),
@@ -372,6 +402,7 @@ function ensureTaskTranscript(task: ProjectTask): NonNullable<ProjectTask["trans
   if (!task.transcript) {
     task.transcript = {
       assistantContent: "",
+        reasoningContent: "",
       activities: [],
       approvals: [],
       assets: [],
@@ -383,7 +414,10 @@ function ensureTaskTranscript(task: ProjectTask): NonNullable<ProjectTask["trans
 
 function ensureTaskMessage(project: Project, task: ProjectTask): ProjectMessage {
   const existing = project.messages.find(
-    (message) => message.taskId === task.id && message.role === "assistant",
+    (message) =>
+      message.taskId === task.id
+      && message.role === "assistant"
+      && (!project.activeRunId || !message.runId || message.runId === project.activeRunId),
   );
   if (existing) return existing;
   const message: ProjectMessage = {
@@ -395,6 +429,7 @@ function ensureTaskMessage(project: Project, task: ProjectTask): ProjectMessage 
     activities: [],
     assets: [],
     createdAt: Date.now(),
+    runId: project.activeRunId,
   };
   project.messages.push(message);
   return message;
@@ -415,6 +450,7 @@ function applyManagedEvent(projectId: string, event: orch.OrcEvent): void {
     // an approval-resumed (or retried) run does not append onto stale content.
     if (task.transcript && (task.transcript.assistantContent || task.transcript.activities.length)) {
       task.transcript.assistantContent = "";
+      task.transcript.reasoningContent = "";
       task.transcript.activities = [];
       task.transcript.approvals = [];
       task.transcript.assets = [];
@@ -422,6 +458,7 @@ function applyManagedEvent(projectId: string, event: orch.OrcEvent): void {
     const message = project.messages.find((m) => m.taskId === task.id && m.role === "assistant");
     if (message) {
       message.content = "";
+      message.reasoning = "";
       message.activities = [];
       message.approvals = [];
       message.assets = [];
@@ -432,6 +469,12 @@ function applyManagedEvent(projectId: string, event: orch.OrcEvent): void {
     transcript.assistantContent += event.text;
     const message = ensureTaskMessage(project, task);
     message.content += event.text;
+    bumpProject();
+  } else if (event.type === "run.reasoning.delta" && event.text) {
+    const transcript = ensureTaskTranscript(task);
+    transcript.reasoningContent = `${transcript.reasoningContent || ""}${event.text}`;
+    const message = ensureTaskMessage(project, task);
+    message.reasoning = `${message.reasoning || ""}${event.text}`;
     bumpProject();
   } else if (event.type === "run.activity" && event.activity) {
     const transcript = ensureTaskTranscript(task);
@@ -580,17 +623,21 @@ const selectedId = ref<string | null>(null);
 /** Bumped when agents publish files into the shared project workspace. */
 const fileTreeEpoch = ref(0);
 const creating = ref(false);
-const createStep = ref<1 | 2 | 3>(1);
+const createMethod = ref<"blank" | "template">("blank");
+const createStep = ref<1 | 2>(1);
 const planning = ref(false);
+const savingTemplate = ref(false);
 const error = ref("");
 const name = ref("");
 const goal = ref("");
-const mode = ref<ProjectMode>("parallel");
+const mode = ref<ProjectMode>("dag");
 const coordinatorId = ref<string>(props.models[0]?.id ?? "");
 const coordinator = computed(
   () => props.models.find((item) => item.id === coordinatorId.value) ?? props.models[0] ?? null,
 );
 const workspaceParent = ref("");
+const selectedTemplateId = ref("");
+const templateName = ref("");
 const draftTasks = ref<ProjectTaskInput[]>([]);
 const detailTaskId = ref<string | null>(null);
 const accessScope = ref<"private" | "org-shared" | "delegated">("private");
@@ -599,6 +646,7 @@ const localUsers = ref<AuthUser[]>([]);
 const currentUserId = ref<string>("");
 const visibilityFilter = ref<"all" | "mine" | "org-shared" | "delegated">("all");
 const searchQuery = ref("");
+const desktopBridge = () => (window as Window & { workmateDesktop?: any }).workmateDesktop;
 const shareableUsers = computed(() =>
   localUsers.value.filter((item) => item.id !== currentUserId.value),
 );
@@ -677,11 +725,6 @@ function taskRuntimeSummary(task: { employeeId: EmployeeId; skillIds?: string[];
     mcpSummary: summarizeNames(mcps, "未关联 MCP"),
   };
 }
-const modeSuggestion = ref<{
-  from: ProjectMode;
-  to: ProjectMode;
-  rationale: string;
-} | null>(null);
 const cancelling = new Set<string>();
 const selected = computed(
   () => projects.value.find((item) => item.id === selectedId.value) ?? null,
@@ -698,137 +741,13 @@ const detailTask = computed(
     selected.value?.tasks[0] ??
     null,
 );
-const templates: Array<{
-  id: ProjectMode;
-  icon: string;
-  name: string;
-  description: string;
-  hint: string;
-  tasks: ProjectTaskInput[];
-}> = [
-  {
-    id: "waterfall",
-    icon: "→",
-    name: "瀑布项目",
-    description: "按明确先后顺序交接，适合调研、方案、交付的线性流程。",
-    hint: "研究 → 方案 → 验证",
-    tasks: [
-      {
-        title: "需求与资料研究",
-        objective: "梳理目标、约束、关键事实与验收标准。",
-        employeeId: "research",
-        skillIds: [],
-      },
-      {
-        title: "制定解决方案",
-        objective: "基于研究结论形成可执行的方案与交付物。",
-        employeeId: "general",
-        skillIds: [],
-        dependsOn: [0],
-      },
-      {
-        title: "质量验证",
-        objective: "检查方案完整性、风险与交付质量。",
-        employeeId: "code",
-        skillIds: [],
-        dependsOn: [1],
-      },
-    ],
-  },
-  {
-    id: "parallel",
-    icon: "⇄",
-    name: "并发项目",
-    description: "多个相互独立的子任务同时运行，最后由协调员汇总。",
-    hint: "多员工并发 → 汇总",
-    tasks: [
-      {
-        title: "信息与事实分析",
-        objective: "独立分析目标中的信息、约束和机会。",
-        employeeId: "research",
-        skillIds: [],
-      },
-      {
-        title: "方案设计",
-        objective: "独立提出可执行方案和交付建议。",
-        employeeId: "general",
-        skillIds: [],
-      },
-      {
-        title: "技术与风险审查",
-        objective: "独立评估技术可行性、风险和验证方式。",
-        employeeId: "code",
-        skillIds: [],
-      },
-    ],
-  },
-  {
-    id: "discussion",
-    icon: "◎",
-    name: "讨论项目",
-    description: "不同员工先提出视角，再由主持员工整合观点并达成结论。",
-    hint: "多视角 → 主持整合",
-    tasks: [
-      {
-        title: "研究视角",
-        objective: "从事实、用户需求和证据角度提出观点与建议。",
-        employeeId: "research",
-        skillIds: [],
-      },
-      {
-        title: "实施视角",
-        objective: "从执行、成本和可行性角度提出观点与建议。",
-        employeeId: "code",
-        skillIds: [],
-      },
-      {
-        title: "主持人整合",
-        objective: "比较各方观点，明确共识、分歧、决策及后续行动。",
-        employeeId: "administrator",
-        skillIds: [],
-        dependsOn: [0, 1],
-      },
-    ],
-  },
-  {
-    id: "dag",
-    icon: "◇",
-    name: "DAG 项目",
-    description: "有向无环图：每个任务只在其前置结果准备好后运行。",
-    hint: "并发分支 → 汇合 → 审核",
-    tasks: [
-      {
-        title: "业务调研",
-        objective: "收集业务需求、事实和成功指标。",
-        employeeId: "research",
-        skillIds: [],
-      },
-      {
-        title: "技术探索",
-        objective: "评估技术路径、工具和实现风险。",
-        employeeId: "code",
-        skillIds: [],
-      },
-      {
-        title: "整合方案",
-        objective: "基于前两项结果制定统一实施方案。",
-        employeeId: "general",
-        skillIds: [],
-        dependsOn: [0, 1],
-      },
-      {
-        title: "最终评审",
-        objective: "审核完整方案、风险和交付质量。",
-        employeeId: "administrator",
-        skillIds: [],
-        dependsOn: [2],
-      },
-    ],
-  },
-];
-const template = computed(
-  () => templates.find((item) => item.id === mode.value) ?? templates[1],
-);
+const modeName = (mode?: ProjectMode) =>
+  ({
+    waterfall: "瀑布项目",
+    parallel: "并发项目",
+    discussion: "讨论项目",
+    dag: "DAG 项目",
+  })[mode ?? "dag"] ?? "DAG 项目";
 const { modelForEmployee } = useModelConfig();
 const modelLabel = (model: ProviderConfig) =>
   `${model.providerLabel || model.provider} · ${model.chatModel}`;
@@ -890,38 +809,43 @@ function date(value?: number) {
       }).format(value)
     : "—";
 }
-function chooseTemplate(next: ProjectMode) {
-  mode.value = next;
-  draftTasks.value = templateTasks(next);
+function cloneTaskDraft(task: ProjectTaskInput): ProjectTaskInput {
+  return {
+    ...task,
+    skillIds: [...(task.skillIds ?? [])],
+    dependsOn: task.dependsOn ? [...task.dependsOn] : [],
+    contract: task.contract
+      ? {
+          outputs: task.contract.outputs ? [...task.contract.outputs] : undefined,
+          acceptance: task.contract.acceptance,
+          maxSteps: task.contract.maxSteps,
+          timeoutMs: task.contract.timeoutMs,
+          maxAttempts: task.contract.maxAttempts,
+        }
+      : undefined,
+  };
 }
-function templateTasks(next = mode.value) {
-  return (templates.find((item) => item.id === next) ?? templates[1]).tasks.map(
-    (task) => ({
-      ...task,
-      skillIds: [...task.skillIds],
-      dependsOn: task.dependsOn ? [...task.dependsOn] : [],
-    }),
-  );
-}
-function openCreate() {
+function openCreate(method: "blank" | "template" = "blank", templateId = "") {
   creating.value = true;
+  createMethod.value = method;
   createStep.value = 1;
   error.value = "";
   name.value = "";
   goal.value = "";
-  mode.value = "parallel";
-  draftTasks.value = templateTasks();
-  modeSuggestion.value = null;
+  mode.value = "dag";
+  draftTasks.value = [];
   coordinatorId.value = props.models[0]?.id ?? "";
   workspaceParent.value = "";
   accessScope.value = "private";
   delegatedPermissions.value = {};
+  selectedTemplateId.value = "";
+  templateName.value = "";
+  if (method === "template" && templateId) applySavedTemplate(templateId);
 }
 function closeCreate() {
   creating.value = false;
   createStep.value = 1;
   error.value = "";
-  modeSuggestion.value = null;
 }
 async function continueCreate() {
   // 名称可选；描述与协调员模型必填。规划成功进入「确认运行」步骤。
@@ -931,7 +855,7 @@ async function continueCreate() {
   }
   if (planning.value) return;
   await generateTasks();
-  if (!error.value && draftTasks.value.length) createStep.value = 3;
+  if (!error.value && draftTasks.value.length) createStep.value = 2;
 }
 function addProjectMessage(project: Project, message: ProjectMessage) {
   project.messages.push(message);
@@ -944,48 +868,30 @@ async function generateTasks() {
   }
   planning.value = true;
   error.value = "";
-  modeSuggestion.value = null;
   try {
     const raw = await props.generateDraft(goal.value, coordinator.value, {
-      preferredMode: mode.value,
+      preferredMode: "dag",
     });
     const result: ProjectDraftResult = Array.isArray(raw)
       ? {
           tasks: raw,
-          preferredMode: mode.value,
-          suggestedMode: mode.value,
+          preferredMode: "dag",
+          suggestedMode: "dag",
           modeFitsPreferred: true,
           modeRationale: "",
         }
       : raw;
     draftTasks.value = result.tasks.map((task, index) => ({
       ...task,
-      dependsOn:
-        task.dependsOn?.length
-          ? task.dependsOn
-          : template.value.tasks[index]?.dependsOn ??
-            (mode.value === "waterfall" && index ? [index - 1] : []),
+      dependsOn: task.dependsOn?.length ? task.dependsOn : [],
     }));
-    if (!result.modeFitsPreferred && result.suggestedMode !== mode.value) {
-      modeSuggestion.value = {
-        from: mode.value,
-        to: result.suggestedMode,
-        rationale: result.modeRationale,
-      };
-    }
+    mode.value = "dag";
+    if (!templateName.value.trim()) templateName.value = `${name.value.trim() || goal.value.trim().slice(0, 24) || "项目"}模板`;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "生成任务草案失败。";
   } finally {
     planning.value = false;
   }
-}
-function acceptModeSuggestion() {
-  if (!modeSuggestion.value) return;
-  mode.value = modeSuggestion.value.to;
-  modeSuggestion.value = null;
-}
-function dismissModeSuggestion() {
-  modeSuggestion.value = null;
 }
 function toggleDelegatedUser(userId: string, checked: boolean) {
   if (checked) delegatedPermissions.value = { ...delegatedPermissions.value, [userId]: delegatedPermissions.value[userId] ?? "write" };
@@ -1030,10 +936,9 @@ async function confirmCreate() {
     return;
   }
   const workspacePath = isDesktopShell()
-    ? await window.workmateDesktop?.createProjectWorkspace({
-      name: name.value,
-      parentDirectory: workspaceParent.value || undefined,
-    })
+    ? (workspaceParent.value || await desktopBridge()?.createProjectWorkspace({
+      name: name.value || goal.value,
+    }))
     : await createManagedWorkspace(name.value);
   if (isDesktopShell() && !workspacePath) {
     error.value = "无法创建项目空间目录。";
@@ -1065,6 +970,7 @@ async function confirmCreate() {
         dependsOn: (task.dependsOn ?? [])
           .map((item) => ids[item])
           .filter(Boolean),
+        contract: task.contract,
       }));
     })(),
   });
@@ -1077,8 +983,62 @@ async function confirmCreate() {
 }
 async function chooseWorkspaceParent() {
   if (!isDesktopShell()) return;
-  const selected = await window.workmateDesktop?.pickProjectDirectory();
+  const selected = await desktopBridge()?.pickProjectDirectory();
   if (selected) workspaceParent.value = selected;
+}
+function applySavedTemplate(templateId: string) {
+  const hit = savedTemplates.value.find((item) => item.id === templateId);
+  selectedTemplateId.value = templateId;
+  if (!hit) return;
+  templateName.value = hit.name;
+  name.value = hit.basic.projectName ?? "";
+  goal.value = hit.basic.goal;
+  accessScope.value = hit.basic.accessScope;
+  if (hit.basic.coordinatorId && props.models.some((item) => item.id === hit.basic.coordinatorId)) {
+    coordinatorId.value = hit.basic.coordinatorId;
+  }
+  draftTasks.value = hit.tasks.map(cloneTaskDraft);
+}
+
+function toggleDraftDependency(taskIndex: number, dependencyIndex: number) {
+  if (dependencyIndex >= taskIndex) return;
+  const task = draftTasks.value[taskIndex];
+  if (!task) return;
+  const current = new Set(task.dependsOn ?? []);
+  if (current.has(dependencyIndex)) current.delete(dependencyIndex);
+  else current.add(dependencyIndex);
+  task.dependsOn = [...current].sort((a, b) => a - b);
+}
+async function saveCurrentDagAsTemplate() {
+  if (!draftTasks.value.length) {
+    error.value = "请先完成规划，再保存模板。";
+    return;
+  }
+  savingTemplate.value = true;
+  try {
+    const saved = await saveProjectTemplate({
+      id: selectedTemplateId.value || undefined,
+      name: templateName.value.trim() || name.value.trim() || goal.value.trim().slice(0, 24) || "项目模板",
+      basic: {
+        projectName: name.value.trim() || undefined,
+        goal: goal.value.trim(),
+        accessScope: accessScope.value,
+        coordinatorId: coordinatorId.value || undefined,
+      },
+      tasks: draftTasks.value.map(cloneTaskDraft),
+    });
+    selectedTemplateId.value = saved.id;
+    templateName.value = saved.name;
+  } finally {
+    savingTemplate.value = false;
+  }
+}
+async function deleteSavedTemplate(templateId: string) {
+  await removeProjectTemplate(templateId);
+  if (selectedTemplateId.value === templateId) {
+    selectedTemplateId.value = "";
+    templateName.value = "";
+  }
 }
 const autoStartedDrafts = new Set<string>();
 /** 进入项目对话即自动启动（仅草稿项目触发一次；状态离开 draft 后允许再次进入时重试）。 */
@@ -1197,7 +1157,7 @@ async function executeTask(project: Project, task: ProjectTask) {
       {
         projectId: project.id,
         taskId: task.id,
-        prompt: `项目模式：${template.value.name}\n项目目标：${project.goal}\n\n当前任务：${fitObjective(task.objective)}${dependencyContext(project, task)}\n\n请给出结构化结果：结论、关键依据、交付物/资产、风险与下一步。`,
+        prompt: `项目模式：${modeName(project.mode)}\n项目目标：${project.goal}\n\n当前任务：${fitObjective(task.objective)}${dependencyContext(project, task)}\n\n请给出结构化结果：结论、关键依据、交付物/资产、风险与下一步。`,
         employeeId: task.employeeId,
         skillIds: task.skillIds,
         permissionTier: task.permissionTier,
@@ -1412,6 +1372,15 @@ function buildReplannedTasks(
     dependsOn: (draft.dependsOn ?? [])
       .map((item) => ids[item])
       .filter(Boolean),
+    contract: draft.contract
+      ? {
+          outputs: draft.contract.outputs ? [...draft.contract.outputs] : undefined,
+          acceptance: draft.contract.acceptance,
+          maxSteps: draft.contract.maxSteps,
+          timeoutMs: draft.contract.timeoutMs,
+          maxAttempts: draft.contract.maxAttempts,
+        }
+      : undefined,
     permissionTier: "default" as const,
     status: "draft" as const,
     attempts: 0,
@@ -1490,6 +1459,7 @@ async function replanProjectRoster(project: Project, nextMemberIds: EmployeeId[]
           employeeId: task.employeeId,
           skillIds: task.skillIds,
           dependsOn: task.dependsOn,
+          contract: task.contract,
         })),
         note,
       });
@@ -1600,7 +1570,7 @@ async function dispatchProjectInstruction(
   await run(project);
 }
 onMounted(async () => {
-  await Promise.all([load(), loadSkills(), loadRuntimePrefs(), loadMcp()]);
+  await Promise.all([load(), loadSkills(), loadRuntimePrefs(), loadMcp(), loadProjectTemplates()]);
   const [users, me] = await Promise.all([
     listLocalUsers().catch(() => [] as AuthUser[]),
     getCurrentUser().catch(() => null),
@@ -1634,7 +1604,10 @@ onBeforeUnmount(() => {
           <h1 class="mt-2 text-4xl font-bold tracking-[-.045em]">我的项目</h1>
           <p class="mt-3 text-[var(--muted)]">默认只展示当前登录用户归属的项目。把复杂目标交给多个数字员工：先确认编排，再让任务在隔离上下文中可靠运行。</p>
         </div>
-        <button class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white" @click="openCreate">＋ 新建项目</button>
+        <div class="flex flex-wrap gap-2">
+          <button class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white" @click="openCreate('blank')">＋ 创建项目</button>
+          <button class="rounded-xl border border-[var(--accent)]/40 bg-[var(--surface)] px-4 py-2.5 text-sm font-semibold text-[var(--accent)]" @click="openCreate('template')">从模板创建</button>
+        </div>
       </header>
 
       <div v-if="!selected" class="mt-6 inline-flex w-fit rounded-xl bg-[var(--surface-muted)] p-1">
@@ -1643,84 +1616,70 @@ onBeforeUnmount(() => {
       </div>
 
       <div :class="[selected ? 'min-h-0 flex-1 overflow-hidden flex flex-col' : 'mt-6 min-h-0 flex-1 overflow-y-auto pr-1']">
-        <!-- 新建项目向导：①选模板 → ②信息与规划 → ③确认运行 -->
+        <!-- 新建项目向导：①信息与规划 → ②确认运行 -->
         <section v-if="creating" class="rounded-2xl border border-[var(--accent)]/30 bg-[var(--surface)] shadow-sm">
           <div class="flex items-start justify-between gap-4 border-b border-[var(--border)] px-6 py-5">
             <div class="min-w-0">
               <p class="text-[10px] font-bold tracking-[0.14em] text-[var(--accent)]">CREATE · PLAN · RUN</p>
               <h2 class="mt-1 text-xl font-bold tracking-tight">
-                {{ createStep === 1 ? '选择项目类型' : createStep === 2 ? '填写信息并规划' : '确认执行方案' }}
+                {{ createStep === 1 ? (createMethod === 'template' ? '从模板创建项目' : '创建项目并规划 DAG') : '确认执行方案' }}
               </h2>
               <p class="mt-1 text-sm text-[var(--muted)]">
-                {{ createStep === 1 ? '先选协作偏好，再填写目标与协调员模型。' : createStep === 2 ? '描述目标后，协调员分两阶段规划（结构→目标）；形态不匹配时会建议切换。' : '核对任务分工，确认后进入项目对话工作台由服务端调度。' }}
+                {{ createStep === 1 ? (createMethod === 'template' ? '选择现有模板复制为新项目草稿；复制后所有信息都可修改，原模板不会改变。' : '录入基本信息后，由规划器生成可编辑的 DAG 项目草稿。') : '核对项目资料、任务分工、依赖与目录后，确认进入项目对话工作台。' }}
               </p>
             </div>
             <button class="shrink-0 rounded-lg px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]" type="button" @click="closeCreate">关闭</button>
           </div>
           <div class="p-6">
             <ol class="mb-7 flex items-center gap-2 text-xs font-semibold">
-              <div v-for="step in [1, 2, 3]" :key="step" class="contents">
+              <div v-for="step in [1, 2]" :key="step" class="contents">
                 <span :class="['grid h-6 w-6 place-items-center rounded-full', createStep >= step ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-muted)] text-[var(--muted)]']">{{ step }}</span>
-                <span :class="createStep >= step ? 'text-[var(--text)]' : 'text-[var(--muted)]'">{{ step === 1 ? '选模板' : step === 2 ? '信息与规划' : '确认方案' }}</span>
-                <i v-if="step < 3" class="h-px w-8 bg-[var(--border)]" />
+                <span :class="createStep >= step ? 'text-[var(--text)]' : 'text-[var(--muted)]'">{{ step === 1 ? '信息与规划' : '确认方案' }}</span>
+                <i v-if="step < 2" class="h-px w-8 bg-[var(--border)]" />
               </div>
             </ol>
 
-            <!-- ① 模板 -->
+            <!-- ① 信息与规划 -->
             <div v-if="createStep === 1">
-              <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <button
-                  v-for="item in templates"
-                  :key="item.id"
-                  :class="['rounded-2xl border p-4 text-left transition', mode === item.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] shadow-sm' : 'border-[var(--border)] hover:border-[var(--accent)]/50']"
-                  @click="chooseTemplate(item.id)"
-                >
-                  <span class="grid h-9 w-9 place-items-center rounded-xl bg-[var(--surface-muted)] text-lg font-bold">{{ item.icon }}</span>
-                  <strong class="mt-4 block">{{ item.name }}</strong>
-                  <p class="mt-1 min-h-10 text-xs leading-relaxed text-[var(--muted)]">{{ item.description }}</p>
-                  <span class="mt-3 inline-block text-[11px] font-semibold text-[var(--accent)]">{{ item.hint }}</span>
-                </button>
-              </div>
-              <p class="mt-4 text-xs text-[var(--muted)]">协作类型是规划偏好：协调员会尽量按此形态建图；若目标无法匹配，规划后会弹出切换建议。</p>
-              <div class="mt-6 flex items-center justify-between">
-                <button class="text-sm text-[var(--muted)]" @click="closeCreate">取消</button>
-                <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" @click="createStep = 2">下一步：项目信息</button>
+              <div class="space-y-5">
+                <div v-if="createMethod === 'blank'" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/40 p-4">
+                  <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p class="text-[11px] font-bold tracking-[0.12em] text-[var(--muted)]">DAG PLANNER</p>
+                      <h3 class="mt-1 text-sm font-bold">由规划器直接生成 DAG</h3>
+                      <p class="mt-1 text-xs leading-5 text-[var(--muted)]">不再选择瀑布 / 并发 / 讨论模板，项目会统一进入 DAG 规划，再按真实依赖调度。</p>
+                    </div>
+                    <span class="rounded-full bg-[var(--accent-soft)] px-3 py-1 text-[11px] font-bold text-[var(--accent)]">默认模式：DAG</span>
+                  </div>
+                </div>
+
+                <div v-if="createMethod === 'template'" class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="text-[11px] font-bold tracking-[0.12em] text-[var(--muted)]">SAVED TEMPLATES</p>
+                      <h3 class="mt-1 text-sm font-bold">已保存模板</h3>
+                    </div>
+                    <span class="text-xs text-[var(--muted)]">{{ savedTemplates.length }} 个</span>
+                  </div>
+                  <div v-if="savedTemplates.length" class="mt-3 grid gap-2 md:grid-cols-2">
+                    <div v-for="item in savedTemplates" :key="item.id" class="rounded-xl border border-[var(--border)] bg-[var(--background)]/50 p-3">
+                      <div class="flex items-start justify-between gap-2">
+                        <button class="min-w-0 text-left" type="button" @click="applySavedTemplate(item.id)">
+                          <strong class="block truncate text-sm">{{ item.name }}</strong>
+                          <span class="mt-1 block text-xs text-[var(--muted)]">{{ item.tasks.length }} 个任务 · {{ modeName(item.mode) }}</span>
+                        </button>
+                        <button class="rounded-md px-2 py-1 text-[11px] text-rose-600 hover:bg-rose-50" type="button" @click="deleteSavedTemplate(item.id)">删除</button>
+                      </div>
+                    </div>
+                  </div>
+                  <p v-else class="mt-3 text-xs text-[var(--muted)]">当前还没有可用模板。请先创建项目并在确认页将方案保存为模板。</p>
+                </div>
               </div>
             </div>
 
             <p v-if="error" class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{{ error }}</p>
 
-            <!-- 协作类型切换建议（规划器认为当前偏好不匹配） -->
-            <div
-              v-if="modeSuggestion"
-              class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4"
-              @click.self="dismissModeSuggestion"
-            >
-              <div class="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl">
-                <p class="text-[10px] font-bold tracking-[0.14em] text-[var(--accent)]">COLLABORATION FIT</p>
-                <h3 class="mt-2 text-lg font-bold">建议切换协作类型</h3>
-                <p class="mt-2 text-sm leading-6 text-[var(--muted)]">{{ modeSuggestion.rationale }}</p>
-                <div class="mt-4 rounded-xl bg-[var(--surface-muted)] px-3 py-3 text-sm">
-                  <p><span class="text-[var(--muted)]">当前偏好：</span><strong>{{ modeLabel(modeSuggestion.from) }}</strong></p>
-                  <p class="mt-1"><span class="text-[var(--muted)]">建议切换：</span><strong class="text-[var(--accent)]">{{ modeLabel(modeSuggestion.to) }}</strong></p>
-                </div>
-                <div class="mt-5 flex justify-end gap-2">
-                  <button
-                    class="rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
-                    type="button"
-                    @click="dismissModeSuggestion"
-                  >保持 {{ modeLabel(modeSuggestion.from) }}</button>
-                  <button
-                    class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white"
-                    type="button"
-                    @click="acceptModeSuggestion"
-                  >切换为 {{ modeLabel(modeSuggestion.to) }}</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- ② 信息与规划：名称 → 描述 → 目录 → 底部操作 -->
-            <div v-if="createStep === 2" class="space-y-5">
+            <div v-if="createStep === 1" class="space-y-5 mt-5">
               <label class="block text-sm font-semibold">
                 项目名称
                 <span class="ml-1 font-normal text-[var(--muted)]">（可选）</span>
@@ -1745,7 +1704,7 @@ onBeforeUnmount(() => {
                   <div class="min-w-0">
                     <p class="text-[11px] font-bold tracking-wide text-[var(--muted)]">项目空间</p>
                     <p class="mt-1 break-all text-xs leading-5 text-[var(--text)]">
-                      {{ isDesktopShell() ? (workspaceParent || '默认保存到 ~/.workmate/projects/项目名称-随机标识') : '将创建服务端托管项目空间（默认位于 ~/.workmate/projects/项目名称-随机标识）。' }}
+                      {{ isDesktopShell() ? (workspaceParent || '未指定时默认创建到 ~/.workmate/projects/项目名称-随机标识；若已选择目录，则该目录本身就是项目根目录。') : '将创建服务端托管项目空间。' }}
                     </p>
                   </div>
                   <button
@@ -1758,7 +1717,7 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
                 <p class="mt-2 text-[11px] text-[var(--muted)]">
-                  当前模板：{{ template.name }} · {{ isDesktopShell() ? '交付物将写入该目录' : '交付物将写入服务端托管工作区，并可导入/导出 zip' }}
+                  {{ isDesktopShell() ? '若已选择目录，将直接以该目录作为工作主目录，不再额外套一层项目子目录。' : '交付物将写入服务端托管工作区，并可导入/导出 zip。' }}
                 </p>
               </div>
 
@@ -1814,9 +1773,9 @@ onBeforeUnmount(() => {
                 <button
                   class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)]"
                   type="button"
-                  @click="createStep = 1"
+                  @click="closeCreate"
                 >
-                  ← 返回上一步
+                  取消
                 </button>
 
                 <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end sm:gap-2.5">
@@ -1842,18 +1801,26 @@ onBeforeUnmount(() => {
                     @click="continueCreate"
                   >
                     <span v-if="planning" class="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" aria-hidden="true" />
-                    {{ planning ? '正在规划…' : '进行规划' }}
+                    {{ planning ? '正在规划…' : (createMethod === 'template' && draftTasks.length ? '按当前信息重新规划' : '进行规划') }}
+                  </button>
+                  <button
+                    v-if="draftTasks.length"
+                    class="inline-flex h-11 shrink-0 items-center justify-center whitespace-nowrap rounded-xl border border-[var(--border)] px-5 text-sm font-semibold text-[var(--muted)] hover:text-[var(--accent)]"
+                    type="button"
+                    @click="createStep = 2"
+                  >
+                    {{ createMethod === 'template' ? '编辑模板副本' : '使用当前方案' }}
                   </button>
                 </div>
               </div>
             </div>
 
-            <!-- ③ 确认运行（可编辑） -->
-            <div v-if="createStep === 3" class="space-y-5">
+            <!-- ② 确认运行（可编辑） -->
+            <div v-if="createStep === 2" class="space-y-5">
               <div class="flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <h3 class="font-bold">执行方案</h3>
-                  <p class="mt-1 text-xs text-[var(--muted)]">可编辑标题、目标与负责员工；确认后进入项目对话工作台。</p>
+                  <p class="mt-1 text-xs text-[var(--muted)]">可编辑标题、目标与负责员工；下方动画展示依赖与数据流。</p>
                 </div>
                 <button
                   class="rounded-lg border border-dashed border-[var(--accent)]/50 px-3 py-1.5 text-sm font-semibold text-[var(--accent)] hover:bg-[var(--accent-soft)]"
@@ -1863,6 +1830,10 @@ onBeforeUnmount(() => {
                   ＋ 添加任务
                 </button>
               </div>
+
+              <ProjectDagPreview
+                :tasks="draftTasks.map((task, index) => ({ id: `draft-${index}`, title: task.title || `任务 ${index + 1}`, subtitle: employeeName(task.employeeId), dependsOn: (task.dependsOn ?? []).map((dep) => `draft-${dep}`), status: 'draft' }))"
+              />
 
               <div class="space-y-2">
                 <article
@@ -1882,12 +1853,26 @@ onBeforeUnmount(() => {
                     <span class="rounded-full bg-[var(--surface)] px-2 py-1">MCP：{{ taskRuntimeSummary(task).mcpCount }}</span>
                     <span class="basis-full">执行画像 · Skill：{{ taskRuntimeSummary(task).skillSummary }} · MCP：{{ taskRuntimeSummary(task).mcpSummary }}</span>
                   </div>
+                  <div v-if="index > 0" class="md:col-span-4 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2">
+                    <span class="text-[11px] font-semibold text-[var(--muted)]">前置依赖（可多选）</span>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <label v-for="dependencyIndex in index" :key="dependencyIndex" class="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px]">
+                        <input
+                          :checked="(task.dependsOn ?? []).includes(dependencyIndex - 1)"
+                          type="checkbox"
+                          @change="toggleDraftDependency(index, dependencyIndex - 1)"
+                        />
+                        {{ draftTasks[dependencyIndex - 1]?.title || `任务 ${dependencyIndex}` }}
+                      </label>
+                    </div>
+                  </div>
                 </article>
               </div>
 
               <div class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/50 p-4 text-sm">
                 <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
                   <p><strong>项目：</strong>{{ name || '（未命名）' }}</p>
+                  <p><strong>形态：</strong>{{ modeName(mode) }}</p>
                   <p class="text-xs text-[var(--muted)]">{{ draftTasks.length }} 项任务</p>
                   <p v-if="coordinator" class="text-xs text-[var(--muted)]">
                     协调员 · {{ modelLabel(coordinator) }}
@@ -1896,8 +1881,30 @@ onBeforeUnmount(() => {
                 <p class="mt-2 text-[var(--muted)]">{{ goal }}</p>
               </div>
 
+              <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                  <label class="block flex-1">
+                    <span class="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--muted)]">存为模板</span>
+                    <input
+                      v-model="templateName"
+                      class="w-full rounded-xl border border-[var(--border)] bg-[var(--background)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]"
+                      placeholder="例如：官网建设标准 DAG"
+                    />
+                  </label>
+                  <button
+                    class="rounded-lg border border-[var(--accent)]/40 px-4 py-2.5 text-sm font-semibold text-[var(--accent)] hover:bg-[var(--accent-soft)] disabled:opacity-45"
+                    type="button"
+                    :disabled="savingTemplate || !draftTasks.length"
+                    @click="saveCurrentDagAsTemplate"
+                  >
+                    {{ savingTemplate ? '保存中…' : '存为模板' }}
+                  </button>
+                </div>
+                <p class="mt-2 text-xs text-[var(--muted)]">模板会保存项目基本信息与当前规划 DAG；下次新建项目时可直接载入，再按新项目修改基本信息。</p>
+              </div>
+
               <div class="flex flex-col gap-3 border-t border-[var(--border)] pt-4 sm:flex-row sm:items-center sm:justify-between">
-                <button class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)]" type="button" @click="createStep = 2">
+                <button class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)]" type="button" @click="createStep = 1">
                   ← 返回修改描述
                 </button>
                 <button
@@ -1950,7 +1957,7 @@ onBeforeUnmount(() => {
               >
                 <div class="flex justify-between gap-3">
                   <div class="flex flex-wrap gap-2">
-                    <span class="rounded-lg bg-[var(--accent-soft)] px-2 py-1 text-[11px] font-bold text-[var(--accent)]">{{ templates.find((item) => item.id === project.mode)?.name }}</span>
+                    <span class="rounded-lg bg-[var(--accent-soft)] px-2 py-1 text-[11px] font-bold text-[var(--accent)]">{{ modeName(project.mode) }}</span>
                     <span class="rounded-lg bg-[var(--surface-muted)] px-2 py-1 text-[11px] font-semibold text-[var(--muted)]">{{ accessScopeLabel(project.accessScope) }}</span>
                   </div>
                   <span :class="['rounded-full px-2 py-1 text-[10px] font-bold', statusStyle(project.status)]">{{ statusText(project.status) }}</span>
@@ -1965,20 +1972,24 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <div v-else class="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] p-14 text-center">
-            <h2 class="text-xl font-bold">选择一种项目编排方式</h2>
-            <p class="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-[var(--muted)]">瀑布、并发、讨论与 DAG 都从模板开始；在运行前可确认并调整任务草案。</p>
-            <button class="mt-6 rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white" @click="openCreate">创建第一个项目</button>
+            <h2 class="text-xl font-bold">创建一个由规划器驱动的 DAG 项目</h2>
+            <p class="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-[var(--muted)]">录入基本信息后，协调员会直接产出可编辑的 DAG 任务图；你也可以复用已保存模板。</p>
+            <div class="mt-6 flex justify-center gap-2">
+              <button class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white" @click="openCreate('blank')">创建第一个项目</button>
+              <button class="rounded-xl border border-[var(--accent)]/40 px-4 py-2.5 text-sm font-semibold text-[var(--accent)]" @click="openCreate('template')">从模板创建</button>
+            </div>
           </div>
           <div>
             <h2 class="text-lg font-bold">项目模板</h2>
-            <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <button v-for="item in templates" :key="item.id" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 text-left hover:border-[var(--accent)]" @click="openCreate(); chooseTemplate(item.id)">
-                <span class="text-lg font-bold text-[var(--accent)]">{{ item.icon }}</span>
+            <div v-if="savedTemplates.length" class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <button v-for="item in savedTemplates" :key="item.id" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 text-left hover:border-[var(--accent)]" @click="openCreate('template', item.id)">
+                <span class="text-lg font-bold text-[var(--accent)]">◇</span>
                 <strong class="mt-3 block">{{ item.name }}</strong>
-                <p class="mt-1 text-xs leading-relaxed text-[var(--muted)]">{{ item.description }}</p>
-                <span class="mt-3 inline-block text-[11px] font-semibold text-[var(--accent)]">{{ item.hint }}</span>
+                <p class="mt-1 text-xs leading-relaxed text-[var(--muted)]">{{ item.basic.goal || '已保存的项目基础信息与 DAG 任务图。' }}</p>
+                <span class="mt-3 inline-block text-[11px] font-semibold text-[var(--accent)]">{{ item.tasks.length }} 个任务</span>
               </button>
             </div>
+            <p v-else class="mt-3 text-sm text-[var(--muted)]">还没有保存过模板。先规划一个项目，再点击“存为模板”即可复用。</p>
           </div>
         </section>
 
@@ -1989,7 +2000,7 @@ onBeforeUnmount(() => {
             :employees="employees"
             :users="localUsers"
             :current-user-id="currentUserId"
-            :template-name="templates.find((item) => item.id === selected?.mode)?.name ?? '项目'"
+            :template-name="modeName(selected?.mode)"
             :running="selected?.status === 'running' || rosterBusy"
             :file-tree-epoch="fileTreeEpoch"
             @back="selectedId = null"

@@ -36,6 +36,7 @@ export interface AccessGrant {
 export interface ProjectTaskContract {
   outputs?: string[];
   acceptance?: string;
+  maxSteps?: number;
   timeoutMs?: number;
   maxAttempts?: number;
 }
@@ -85,9 +86,11 @@ export interface ProjectMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  reasoning?: string;
   employeeId?: EmployeeId;
   taskId?: string;
   createdAt: number;
+  runId?: string;
   activities?: ProjectTaskTranscript["activities"];
   approvals?: ProjectTaskTranscript["approvals"];
   assets?: ProjectTaskTranscript["assets"];
@@ -102,6 +105,7 @@ export interface ProjectRun {
   taskIds: string[];
   summary?: string;
   error?: string;
+  messages?: ProjectMessage[];
 }
 
 export interface Project {
@@ -252,23 +256,46 @@ export function useProjects() {
     await Promise.all([persist(), persistRuns()]);
   };
   const createRun = async (project: Project) => {
+    const restartAll = project.status === "completed" || project.status === "failed" || project.status === "cancelled";
+    const prior = runs.value.find((item) => item.projectId === project.id && item.status !== "running");
+    if (prior && project.messages.length) {
+      prior.messages = project.messages.map((message) => ({ ...message }));
+      if (!prior.summary && project.summary) prior.summary = project.summary;
+    }
     const run: ProjectRun = {
       id: crypto.randomUUID(),
       projectId: project.id,
       startedAt: Date.now(),
       status: "running",
       taskIds: project.tasks.map((task) => task.id),
+      messages: [],
     };
     project.activeRunId = run.id;
     project.status = "running";
     project.summary = undefined;
+    project.messages = [
+      {
+        id: crypto.randomUUID(),
+        role: "system",
+        content: prior
+          ? "新一轮调度已开始。上一轮对话已归档到历史运行。"
+          : "本轮调度已开始。",
+        createdAt: Date.now(),
+        runId: run.id,
+      },
+    ];
     project.tasks.forEach((task) => {
-      if (task.status !== "completed") {
-        task.status = "queued";
-        task.error = undefined;
-      }
+      if (task.status === "superseded") return;
+      if (!restartAll && task.status === "completed") return;
+      task.status = "queued";
+      task.error = undefined;
+      task.transcript = undefined;
+      task.runId = undefined;
+      task.startedAt = undefined;
+      task.finishedAt = undefined;
+      task.attempts = 0;
     });
-    runs.value = [run, ...runs.value];
+    runs.value = [run, ...runs.value.filter((item) => item.id !== run.id)];
     await Promise.all([update(project), persistRuns()]);
     return run;
   };

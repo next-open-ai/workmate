@@ -120,6 +120,20 @@ function rows(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
 }
 
+function taskNeedsExtendedBudget(task: ProjectTask) {
+  const text = `${task.title || ''}\n${task.objective || ''}\n${(task.contract?.outputs || []).join('\n')}`.toLowerCase();
+  return Boolean(task.contract?.outputs?.length)
+    || /素材|配图|资源|索引|整理|收集|research|调研|方案|线框|wireframe|html|markdown|readme|csv|报告|文档|设计|页面|原型|交付/.test(text);
+}
+
+function taskMaxSteps(task: ProjectTask, prefs: PrefsRow) {
+  const base = prefs.maxSteps && prefs.maxSteps >= 4 ? prefs.maxSteps : 50;
+  if (task.contract?.maxSteps && task.contract.maxSteps > 0) {
+    return Math.min(64, Math.max(4, Math.floor(task.contract.maxSteps)));
+  }
+  return taskNeedsExtendedBudget(task) ? Math.max(base, 40) : base;
+}
+
 /** Build the agent profile for an employee (KV catalog + preset fallback). */
 function profileFor(
   employeeId: string,
@@ -369,7 +383,7 @@ export async function resolveTaskContext(
   const tier = task.permissionTier ?? 'default';
   const searchMode = prefs.searchMode;
   const enableSearch = searchMode === 'llm-builtin' && (model.provider === 'qwen' || model.provider === 'openai-compatible');
-  const maxSteps = prefs.maxSteps && prefs.maxSteps >= 4 ? prefs.maxSteps : 28;
+  const maxSteps = taskMaxSteps(task, prefs);
   const runTimeoutMs = prefs.runTimeoutMs ?? 600_000;
   const mcpToolTimeoutMs = prefs.mcpToolTimeoutMs ?? 60_000;
   const engineRaw = String(prefs.engine || '').trim().toLowerCase();

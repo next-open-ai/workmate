@@ -2,7 +2,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentSkillRuntime } from '@workmate/contracts';
 
-const PDF_SKILL_ID = 'skill-baseline-pdf-report';
+/** Stable identifier used by the PDF Skill and its private runtime adapter. */
+export const PDF_SKILL_ID = 'skill-baseline-pdf-report';
 
 const PDF_SKILL_MD = `---
 name: PDF 报告生成
@@ -11,12 +12,9 @@ description: 用内置渲染脚本生成并校验中文 PDF。
 
 此 Skill 已提供可执行渲染器，**不要**自行探测字体、编写 ReportLab 脚本或读取虚构的 Skill 文件。
 
-最短路径：
-1. 用 \`write_workspace_file\` 一次写入 \`tmp/pdf-input.json\`，格式为 \`{"title":"...","content":"..."}\`；输入 JSON 是过程文件，**绝不可**写到 \`output/\`。
-2. 用 \`run_skill_script\` 执行 \`scripts/render_pdf.py\`，参数为 \`["tmp/pdf-input.json", "output/<文件名>.pdf"]\`。
-3. 脚本只会声明最终 PDF 为交付物；不要重新命名、复制或再次登记。面向用户回答时只说文件名，不要暴露内部的 \`output/\` 路径。
+首选路径：调用本 Skill 专属的 \`render_pdf_report\` 适配器，并传入 \`title\`、\`content\` 和 \`filename\`。它会在隔离工作区中处理输入 JSON、Python 依赖、渲染、PDF 校验和唯一交付物登记。
 
-只有脚本返回明确依赖错误时，才调用 \`install_python_dependency\` 安装 \`reportlab\` 后重试一次。
+不要自行编写 JSON、复制渲染器、调用 \`run_workspace_script\`，也不要将过程文件写入 \`output/\`。适配器成功后，面向用户只说文件名，不要暴露内部的 \`output/\` 路径。
 `;
 
 const PDF_RENDERER = String.raw`import json, os, sys

@@ -14,6 +14,16 @@ function textFromContentBlocks(content: unknown): string {
   return parts.join('');
 }
 
+function reasoningFromContentBlocks(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === 'thinking' && typeof block.thinking === 'string') parts.push(block.thinking);
+  }
+  return parts.join('');
+}
+
 /** Correlates dsh tool/call → tool/result (result events often omit `name`). */
 export type DshEventMapContext = {
   toolNamesByCallId: Map<string, string>;
@@ -60,12 +70,18 @@ export function mapDshSessionEvent(
       const chunk = isRecord(data.chunk) ? data.chunk : null;
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
         out.push({ type: 'message.delta', runId, text: chunk.text });
+      } else if (chunk?.type === 'thinking-delta' && typeof chunk.text === 'string' && chunk.text) {
+        out.push({ type: 'reasoning.delta', runId, text: chunk.text });
       }
       break;
     }
     case 'assistant/message': {
       const message = isRecord(data.message) ? data.message : null;
       const text = textFromContentBlocks(message?.content);
+      const reasoning = reasoningFromContentBlocks(message?.content);
+      if (reasoning) {
+        out.push({ type: 'reasoning.delta', runId, text: `\u0000${reasoning}` });
+      }
       if (text) {
         out.push({ type: 'message.delta', runId, text: `\u0000${text}` });
       }

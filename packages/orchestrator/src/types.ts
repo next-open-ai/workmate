@@ -177,6 +177,8 @@ export interface RunRecord {
   finishedAt?: number;
   /** Accumulated assistant text (final). */
   transcript: string;
+  /** Accumulated hidden reasoning / thinking text, never fed to later turns. */
+  reasoning?: string;
   activities: RunActivity[];
   approvals: RunApproval[];
   artifacts: RunArtifact[];
@@ -222,6 +224,8 @@ export interface ProjectTaskContract {
   outputs?: string[];
   /** Acceptance criteria in natural language. */
   acceptance?: string;
+  /** Soft step budget for one attempt. */
+  maxSteps?: number;
   /** Soft timeout for one attempt (ms). */
   timeoutMs?: number;
   /** Max attempts before the scheduler leaves the task failed. */
@@ -291,6 +295,8 @@ export interface ProjectMessage {
   taskId?: string;
   createdAt: number;
   changeSetId?: string;
+  /** Owning project-run id when known (helps separate current vs historical threads). */
+  runId?: string;
 }
 
 export interface ProjectRun {
@@ -315,6 +321,8 @@ export interface ProjectRun {
   planVersion?: number;
   /** Originating ChangeSet when this run was opened by an instruction. */
   changeSetId?: string;
+  /** Conversation snapshot archived when a later run starts. */
+  messages?: ProjectMessage[];
 }
 
 export interface Project {

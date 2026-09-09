@@ -10,6 +10,7 @@ import {
   type ProjectFileEntry,
 } from "../../app/project-files.js";
 import type { Project } from "../../app/projects.js";
+import { useProjects } from "../../app/projects.js";
 import type { AuthUser } from "../../services/auth.js";
 import { employeeDisplayName } from "../../app/employees";
 import { isDesktopShell } from "../../app/platform.js";
@@ -17,8 +18,10 @@ import { downloadAssetBestEffort } from "../../app/platform-actions.js";
 import { readStored, writeStored } from "../../app/storage.js";
 import { useTheme } from "../../app/theme.js";
 import { exportWorkspaceZip, importWorkspaceZip, listWorkspaceFiles, materializeWorkspaceAssets, readWorkspaceFile, syncWorkspaceRun, writeWorkspaceFile } from "../../services/api.js";
+import ProjectDagPreview from "./ProjectDagPreview.vue";
 
 const { resolvedTheme } = useTheme();
+const { runs: localRuns } = useProjects();
 function monacoTheme() {
   return resolvedTheme.value === "light" ? "vs" : "vs-dark";
 }
@@ -56,6 +59,9 @@ const addMemberOpen = ref(false);
 const sending = ref(false);
 const refreshing = ref(false);
 const filesError = ref("");
+const historyRuns = ref<orch.ServerProjectRun[]>([]);
+const historyOpen = ref(false);
+const historyLoading = ref(false);
 type FileEntry = ProjectFileEntry;
 const files = ref<FileEntry[]>([]);
 const selectedFile = ref('');
@@ -201,10 +207,76 @@ const shareSummary = computed(() => {
     : "请选择至少一位委托用户";
   return "仅 owner 可读写";
 });
+const archivedHistoryRuns = computed(() => {
+  if (props.project.managedServer) {
+    return historyRuns.value.filter((run) => run.status !== "running" && (run.messages?.length || run.summary));
+  }
+  return localRuns.value
+    .filter((run) => run.projectId === props.project.id && run.status !== "running" && (run.messages?.length || run.summary))
+    .map((run) => ({
+      id: run.id,
+      projectId: run.projectId,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      status: run.status,
+      taskIds: run.taskIds,
+      summary: run.summary,
+      error: run.error,
+      messages: (run.messages ?? []).map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        employeeId: message.employeeId,
+        taskId: message.taskId,
+        createdAt: message.createdAt,
+        runId: message.runId,
+      })),
+    }));
+});
+
+const dagPreviewTasks = computed(() => {
+  const taskIds = props.project.tasks.map((task) => task.id);
+  return props.project.tasks.map((task) => ({
+    id: task.id,
+    title: task.title,
+    subtitle: employeeName(task.employeeId),
+    status: task.status,
+    dependsOn: (task.dependsOn ?? []).filter((dep) => taskIds.includes(dep)),
+  }));
+});
+
+async function loadHistoryRuns() {
+  if (!props.project.managedServer) {
+    historyRuns.value = [];
+    return;
+  }
+  historyLoading.value = true;
+  try {
+    historyRuns.value = await orch.projectRuns(props.project.id);
+  } catch {
+    historyRuns.value = [];
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+function historyStatusText(status: string) {
+  return (
+    {
+      completed: "已完成",
+      failed: "失败",
+      cancelled: "已取消",
+      running: "执行中",
+    } as Record<string, string>
+  )[status] ?? status;
+}
 const TREE_WIDTH_KEY = "workmate.project.tree-width";
 const TREE_COLLAPSED_KEY = "workmate.project.tree-collapsed";
+const DAG_COLLAPSED_KEY = "workmate.project.dag-collapsed";
+const desktopBridge = () => (window as Window & { workmateDesktop?: any }).workmateDesktop;
 const treeWidth = ref(260);
 const treeCollapsed = ref(false);
+const dagCollapsed = ref(false);
 const resizingTree = ref(false);
 const MIN_TREE_WIDTH = 180;
 const MAX_TREE_WIDTH = 560;
@@ -222,10 +294,17 @@ const visibleFiles = computed(() =>
 );
 const editing = computed(() => Boolean(selectedFile.value));
 const effectiveTreeWidth = computed(() => (treeCollapsed.value ? COLLAPSED_TREE_WIDTH : treeWidth.value));
+let queuedFileReload = false;
+let queuedRecover = false;
 
 function setTreeCollapsed(value: boolean) {
   treeCollapsed.value = value;
   void writeStored(TREE_COLLAPSED_KEY, value ? "1" : "0");
+}
+
+function toggleDagCollapsed() {
+  dagCollapsed.value = !dagCollapsed.value;
+  void writeStored(DAG_COLLAPSED_KEY, dagCollapsed.value ? "1" : "0");
 }
 
 function startTreeResize(event: PointerEvent) {
@@ -290,8 +369,9 @@ async function copyWorkspacePath() {
 async function openWorkspaceFolder() {
   if (!props.project.workspacePath) return;
   try {
-    if (!window.workmateDesktop) throw new Error('desktop unavailable');
-    await window.workmateDesktop.revealProjectFile(props.project.workspacePath, '');
+    const desktop = desktopBridge();
+    if (!desktop) throw new Error('desktop unavailable');
+    await desktop.revealProjectFile(props.project.workspacePath, '');
   } catch {
     await copyWorkspacePath();
   }
@@ -393,6 +473,11 @@ async function recoverProjectFiles() {
 }
 
 async function loadFiles(options: { recover?: boolean } = {}) {
+  if (refreshing.value) {
+    queuedFileReload = true;
+    queuedRecover = queuedRecover || options.recover !== false;
+    return;
+  }
   filesError.value = '';
   if (!props.project.workspacePath) {
     files.value = [];
@@ -414,6 +499,12 @@ async function loadFiles(options: { recover?: boolean } = {}) {
     filesError.value = error instanceof Error ? error.message : '无法读取项目空间。';
   } finally {
     refreshing.value = false;
+    if (queuedFileReload) {
+      const nextRecover = queuedRecover;
+      queuedFileReload = false;
+      queuedRecover = false;
+      void loadFiles({ recover: nextRecover });
+    }
   }
 }
 
@@ -583,7 +674,8 @@ onMounted(() => {
     const savedWidth = Number(await readStored(TREE_WIDTH_KEY));
     if (Number.isFinite(savedWidth) && savedWidth >= MIN_TREE_WIDTH && savedWidth <= MAX_TREE_WIDTH) treeWidth.value = savedWidth;
     treeCollapsed.value = (await readStored(TREE_COLLAPSED_KEY)) === "1";
-    await loadFiles({ recover: true });
+    dagCollapsed.value = (await readStored(DAG_COLLAPSED_KEY)) === "1";
+    await Promise.all([loadFiles({ recover: true }), loadHistoryRuns()]);
   })();
 });
 // 运行期间自动刷新文件树：编程员工写入的工作区文件会随同步落到项目目录，
@@ -599,10 +691,16 @@ function ensureFileRefresh() {
 }
 ensureFileRefresh();
 watch(
-  () => [props.project.status, props.project.messages.length, totalAssets.value.length, props.project.workspacePath, props.fileTreeEpoch ?? 0] as const,
+  () => [props.project.id, props.project.status, props.project.workspacePath, props.fileTreeEpoch ?? 0] as const,
   () => {
     ensureFileRefresh();
     void loadFiles({ recover: true });
+  },
+);
+watch(
+  () => [props.project.id, props.project.activeRunId, props.project.status] as const,
+  () => {
+    void loadHistoryRuns();
   },
 );
 watch(
@@ -673,6 +771,21 @@ onBeforeUnmount(() => {
         >删除</button>
       </div>
     </header>
+
+    <div class="shrink-0 border-b border-[var(--border)] bg-[var(--background)]/35 px-6 py-4">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <p class="text-[10px] font-bold tracking-[0.14em] text-[var(--accent)]">DAG VIEW</p>
+          <p class="text-xs text-[var(--muted)]">任务依赖与数据流概览</p>
+        </div>
+        <button
+          class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-semibold hover:border-[var(--accent)]"
+          type="button"
+          @click="toggleDagCollapsed"
+        >{{ dagCollapsed ? '展开依赖图' : '收起依赖图' }}</button>
+      </div>
+      <ProjectDagPreview v-if="!dagCollapsed" :tasks="dagPreviewTasks" compact />
+    </div>
 
     <div
       class="grid min-h-0 flex-1 grid-cols-1 [grid-template-rows:minmax(0,1fr)]"
@@ -877,6 +990,54 @@ onBeforeUnmount(() => {
 
         <div class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
           <div :class="['mx-auto flex flex-col gap-5', editing ? 'max-w-none' : 'max-w-3xl']">
+            <details
+              v-if="archivedHistoryRuns.length"
+              class="rounded-2xl border border-[var(--border)] bg-[var(--surface)]"
+              :open="historyOpen"
+              @toggle="historyOpen = ($event.target as HTMLDetailsElement).open"
+            >
+              <summary class="cursor-pointer list-none px-4 py-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="text-[10px] font-bold tracking-[0.14em] text-[var(--accent)]">HISTORY</p>
+                    <strong class="text-sm">历史调度 · {{ archivedHistoryRuns.length }}</strong>
+                    <p class="mt-1 text-xs text-[var(--muted)]">上一轮对话已归档到这里；当前会话从新一轮开始。</p>
+                  </div>
+                  <span class="rounded-full bg-[var(--surface-muted)] px-2.5 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                    {{ historyOpen ? "收起" : "展开" }}
+                  </span>
+                </div>
+              </summary>
+              <div class="space-y-3 border-t border-[var(--border)] p-3">
+                <p v-if="historyLoading" class="px-1 text-xs text-[var(--muted)]">正在加载历史运行…</p>
+                <article
+                  v-for="run in archivedHistoryRuns"
+                  :key="run.id"
+                  class="rounded-xl border border-[var(--border)] bg-[var(--background)]/50 p-3"
+                >
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <strong class="text-xs">{{ new Date(run.startedAt).toLocaleString("zh-CN") }}</strong>
+                      <p class="mt-1 text-[11px] text-[var(--muted)]">{{ historyStatusText(run.status) }} · {{ run.messages?.length || 0 }} 条消息</p>
+                    </div>
+                    <span class="rounded-full bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">{{ run.id.slice(0, 8) }}</span>
+                  </div>
+                  <p v-if="run.summary" class="mt-2 whitespace-pre-wrap text-xs leading-5 text-[var(--muted)]">{{ run.summary }}</p>
+                  <div v-if="run.messages?.length" class="mt-3 max-h-56 space-y-2 overflow-y-auto">
+                    <div
+                      v-for="message in run.messages"
+                      :key="message.id"
+                      class="rounded-lg bg-[var(--surface)] px-2.5 py-2 text-xs"
+                    >
+                      <p class="text-[10px] font-semibold text-[var(--muted)]">
+                        {{ message.role === "user" ? "你" : message.role === "system" ? "调度器" : employeeName(message.employeeId) }}
+                      </p>
+                      <p class="mt-1 whitespace-pre-wrap leading-5 text-[var(--text)]">{{ message.content }}</p>
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </details>
             <article
               v-for="message in project.messages"
               :key="message.id"
@@ -901,6 +1062,13 @@ onBeforeUnmount(() => {
                         : 'rounded-tl-md border border-[var(--border)] bg-[var(--surface)] shadow-sm',
                   ]"
                 >{{ message.content || "正在生成项目任务结果…" }}</p>
+                <details
+                  v-if="message.role === 'assistant' && message.reasoning"
+                  class="mt-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs"
+                >
+                  <summary class="cursor-pointer px-3 py-2 text-[var(--muted)]">思维过程（与主回答分离）</summary>
+                  <pre class="border-t border-[var(--border)] p-3 whitespace-pre-wrap text-[var(--muted)]">{{ message.reasoning }}</pre>
+                </details>
                 <details
                   v-if="message.activities?.length"
                   class="mt-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs"
@@ -1135,7 +1303,7 @@ onBeforeUnmount(() => {
       <!-- 未选文件：成员与资产固定最右侧 -->
       <aside
         v-if="!editing"
-        class="min-h-0 border-l border-[var(--border)] bg-[var(--surface)]"
+        class="flex min-h-0 flex-col border-l border-[var(--border)] bg-[var(--surface)]"
       >
         <div
           v-if="project.managedServer"
@@ -1230,7 +1398,7 @@ onBeforeUnmount(() => {
           </div>
           <p class="mt-1 text-xs text-[var(--muted)]">点击成员查看执行细节；新增/移除会触发协调员重规划。</p>
         </div>
-        <div class="min-h-0 overflow-y-auto p-3">
+        <div class="min-h-0 flex-1 overflow-y-auto p-3">
           <div
             v-for="employee in members"
             :key="employee.id"
@@ -1310,6 +1478,13 @@ onBeforeUnmount(() => {
               v-if="task.transcript?.assistantContent"
               class="mt-3 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[var(--surface-muted)] p-3 font-sans text-xs leading-5"
             >{{ task.transcript.assistantContent }}</pre>
+            <details
+              v-if="task.transcript?.reasoningContent"
+              class="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-xs"
+            >
+              <summary class="cursor-pointer px-3 py-2 text-[var(--muted)]">思维过程（与主回答分离）</summary>
+              <pre class="border-t border-[var(--border)] p-3 whitespace-pre-wrap text-[var(--muted)]">{{ task.transcript.reasoningContent }}</pre>
+            </details>
             <div v-if="task.transcript?.activities?.length" class="mt-3 space-y-1">
               <p
                 v-for="(activity, index) in task.transcript.activities"

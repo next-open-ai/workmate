@@ -101,7 +101,7 @@ function parseAccessGrants(raw: unknown): AssetAccessGrant[] {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .map((item) => ({
-        subjectType: item?.subjectType === 'user' ? 'user' : 'user',
+        subjectType: 'user' as const,
         subjectId: String(item?.subjectId || '').trim(),
         permissions: Array.isArray(item?.permissions)
           ? item.permissions.filter((value: unknown): value is 'read' | 'write' => value === 'read' || value === 'write')
@@ -133,7 +133,7 @@ function mapAssetRow(row: unknown[]) {
     orgId: orgId ? String(orgId) : null,
     ownerUserId: ownerUserId ? String(ownerUserId) : (userId ? String(userId) : null),
     userId: userId ? String(userId) : (ownerUserId ? String(ownerUserId) : null),
-    accessScope: accessScope === 'org-shared' || accessScope === 'delegated' ? accessScope : 'private',
+    accessScope: (accessScope === 'org-shared' || accessScope === 'delegated' ? accessScope : 'private') as 'private' | 'org-shared' | 'delegated',
     accessGrants: parseAccessGrants(accessGrants),
   };
 }
@@ -185,8 +185,38 @@ async function archiveArtifact(value: { runId?: string; relativePath?: string; c
   const sizeBytes = fs.statSync(source).size;
   if (sizeBytes > 100 * 1024 * 1024) throw new Error('Generated artifact exceeds the 100 MB asset limit.');
   const sha256 = createHash('sha256').update(fs.readFileSync(source)).digest('hex');
-  const existing = assetRows(db.exec(`${ASSET_SELECT} WHERE run_id = ? AND workspace_relative = ? AND sha256 = ? LIMIT 1`, [runId, relativePath, sha256]))[0];
-  if (existing) return existing;
+  const workspaceRelative = relativePath.replace(/^output\//, '');
+  // A deliverable can be written in several append calls. The first
+  // artifact.created event must not freeze an early, partial copy in the asset
+  // library: refresh the same run/path asset in place whenever its contents
+  // change, while keeping a repeated event for unchanged content idempotent.
+  const existing = assetRows(db.exec(`${ASSET_SELECT} WHERE run_id = ? AND workspace_relative = ? LIMIT 1`, [runId, workspaceRelative]))[0];
+  if (existing) {
+    if (existing.sha256 !== sha256 || existing.sizeBytes !== sizeBytes) {
+      const target = path.resolve(dataDir(), existing.relativePath);
+      if (!target.startsWith(`${path.resolve(dataDir(), 'assets')}${path.sep}`)) {
+        throw new Error('Existing asset location is invalid.');
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.copyFileSync(source, target, 0);
+      db.run('UPDATE assets SET name = ?, mime_type = ?, size_bytes = ?, sha256 = ? WHERE id = ?', [
+        name,
+        assetMimeType(name),
+        sizeBytes,
+        sha256,
+        existing.id,
+      ]);
+      flushDatabase(db);
+      return {
+        ...existing,
+        name,
+        mimeType: assetMimeType(name),
+        sizeBytes,
+        sha256,
+      };
+    }
+    return existing;
+  }
   const id = randomUUID();
   const targetFolder = path.join(dataDir(), 'assets', id);
   fs.mkdirSync(targetFolder, { recursive: true, mode: 0o700 });
@@ -204,10 +234,10 @@ async function archiveArtifact(value: { runId?: string; relativePath?: string; c
   const accessGrants = JSON.stringify(Array.isArray(value?.accessGrants) ? value.accessGrants : []);
   db.run(
     'INSERT INTO assets (id, name, relative_path, mime_type, size_bytes, created_at, conversation_id, employee_id, run_id, sha256, project_id, workspace_relative, org_id, owner_user_id, user_id, access_scope, access_grants) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, name, relativeAssetPath, assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, relativePath.replace(/^output\//, ''), orgId, ownerUserId, userId, accessScope, accessGrants],
+    [id, name, relativeAssetPath, assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative, orgId, ownerUserId, userId, accessScope, accessGrants],
   );
   flushDatabase(db);
-  return { id, name, relativePath: relativeAssetPath, mimeType: assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative: relativePath.replace(/^output\//, ''), orgId, ownerUserId, userId, accessScope, accessGrants: parseAccessGrants(accessGrants) };
+  return { id, name, relativePath: relativeAssetPath, mimeType: assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative, orgId, ownerUserId, userId, accessScope, accessGrants: parseAccessGrants(accessGrants) };
 }
 
 async function linkAssetsToProject(value: { projectId?: string; assetIds?: string[]; workspacePath?: string }) {
@@ -255,6 +285,31 @@ async function unlinkAssetsFromProject(assetIds: string[]) {
   }
   flushDatabase(db);
   return { updated };
+}
+
+async function deleteAssets(assetIds: string[]) {
+  const db = await database();
+  const ids = [...new Set((Array.isArray(assetIds) ? assetIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const assetsRoot = path.resolve(dataDir(), 'assets');
+  let deleted = 0;
+  for (const assetId of ids) {
+    const rows = assetRows(db.exec(`${ASSET_SELECT} WHERE id = ?`, [assetId]));
+    const row = rows[0];
+    if (!row) continue;
+    db.run('DELETE FROM assets WHERE id = ?', [assetId]);
+    deleted += 1;
+    const folder = path.resolve(assetsRoot, assetId);
+    if (folder.startsWith(`${assetsRoot}${path.sep}`) && fs.existsSync(folder)) {
+      fs.rmSync(folder, { recursive: true, force: true });
+    } else if (row.relativePath) {
+      const target = path.resolve(dataDir(), row.relativePath);
+      if (target.startsWith(`${assetsRoot}${path.sep}`) && fs.existsSync(target)) {
+        fs.rmSync(path.dirname(target), { recursive: true, force: true });
+      }
+    }
+  }
+  if (deleted) flushDatabase(db);
+  return { deleted };
 }
 
 function previewBinaryLimit(name: string) {
@@ -343,6 +398,23 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
         if (!canWriteOwnedResource(row, auth)) throw new Error('Asset not found.');
       }
       return await unlinkAssetsFromProject(assetIds);
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/assets/delete', async (request, reply) => {
+    const auth = requireAuth(request);
+    const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
+    try {
+      const assetIds = Array.isArray(body.assetIds) ? body.assetIds.map((id) => String(id || '')) : [];
+      if (!assetIds.length) return { deleted: 0 };
+      const db = await database();
+      for (const assetId of assetIds) {
+        const row = assetRows(db.exec(`${ASSET_SELECT} WHERE id = ?`, [assetId]))[0];
+        if (!row || !canWriteOwnedResource(row, auth)) throw new Error('Asset not found.');
+      }
+      return await deleteAssets(assetIds);
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
     }

@@ -12,7 +12,7 @@ export interface EmployeeRuntimePrefs {
   /** null / empty = follow workspace active model */
   defaultModelId: string | null;
   searchMode: EmployeeSearchMode;
-  /** Agent tool/LLM step budget; default 28 */
+  /** Agent tool/LLM step budget; default 50 */
   maxSteps: number;
   /** Whole-run wall-clock timeout in ms. */
   runTimeoutMs: number;
@@ -31,7 +31,7 @@ export interface EmployeeRuntimePrefs {
   engine: 'pi' | 'agentscope' | 'dsh' | null;
 }
 
-export const DEFAULT_MAX_STEPS = 28;
+export const DEFAULT_MAX_STEPS = 50;
 export const MIN_MAX_STEPS = 4;
 export const MAX_MAX_STEPS = 64;
 

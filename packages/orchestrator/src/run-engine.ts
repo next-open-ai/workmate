@@ -27,6 +27,8 @@ export interface ExecuteAttemptOptions {
   request: ChatRequest;
   /** Abort this attempt (user cancel / timeout). */
   signal?: AbortSignal;
+  /** Optional per-attempt deadline; project contracts may override the global default. */
+  timeoutMs?: number;
   /** Extra hub topics to publish structural events onto (e.g. project:<id>). */
   extraTopics?: string[];
 }
@@ -34,7 +36,45 @@ export interface ExecuteAttemptOptions {
 export const RUN_NS = 'run';
 
 function isDeltaLike(event: AgentEvent): boolean {
-  return event.type === 'message.delta';
+  return event.type === 'message.delta' || event.type === 'reasoning.delta';
+}
+
+function looksLikeReasoningBlock(text: string) {
+  const trimmed = text.replace(/\u0000/g, '').trim();
+  if (!trimmed) return false;
+  if (/<think[\s>]|<\/think>/i.test(trimmed)) return true;
+  return /^(let me\b|i(?:'| wi)ll\b|first[, ]|the workspace is\b|given the breadth\b|rather than\b|i have solid domain knowledge\b|i[' ]?ll proceed\b|let me write\b|我先|让我先|先检查一下|先看一下|我将先|下面我会)/i.test(trimmed);
+}
+
+function splitTaggedReasoning(raw: string, inThinkBlock: boolean) {
+  let visible = '';
+  let reasoning = '';
+  let rest = raw;
+  let active = inThinkBlock;
+  while (rest.length) {
+    if (active) {
+      const end = rest.search(/<\/think>/i);
+      if (end < 0) {
+        reasoning += rest;
+        rest = '';
+      } else {
+        reasoning += rest.slice(0, end);
+        rest = rest.slice(end).replace(/<\/think>/i, '');
+        active = false;
+      }
+      continue;
+    }
+    const start = rest.search(/<think(?:\s[^>]*)?>/i);
+    if (start < 0) {
+      visible += rest;
+      rest = '';
+    } else {
+      visible += rest.slice(0, start);
+      rest = rest.slice(start).replace(/<think(?:\s[^>]*)?>/i, '');
+      active = true;
+    }
+  }
+  return { visible, reasoning, inThinkBlock: active };
 }
 
 /**
@@ -119,6 +159,7 @@ export class RunEngine {
       status: 'running',
       startedAt: now,
       transcript: '',
+      reasoning: '',
       activities: [],
       approvals: [],
       artifacts: [],
@@ -141,12 +182,37 @@ export class RunEngine {
     // still executing and never advance to the next task.
     await this.save(run);
     publish({ type: 'run.started', runId, sessionId: options.sessionId, kind: options.kind, taskId: options.taskId, attemptNo });
+    let inThinkBlock = false;
 
     const emit = (event: AgentEvent) => {
-      if (event.type === 'message.delta' && event.text) {
-        run.transcript += event.text;
-        publish({ type: 'run.delta', runId, sessionId: options.sessionId, text: event.text });
+      if (event.type === 'reasoning.delta' && event.text) {
+        run.reasoning = `${run.reasoning || ''}${event.text}`;
+        publish({ type: 'run.reasoning.delta', runId, sessionId: options.sessionId, text: event.text });
         scheduleCheckpoint();
+        return;
+      }
+      if (event.type === 'message.delta' && event.text) {
+        const raw = event.text.startsWith('\u0000') ? event.text.slice(1) : event.text;
+        const tagged = splitTaggedReasoning(raw, inThinkBlock);
+        inThinkBlock = tagged.inThinkBlock;
+        let visible = tagged.visible;
+        let reasoning = tagged.reasoning;
+        if (!visible.trim() && !tagged.reasoning.trim() && looksLikeReasoningBlock(raw)) {
+          reasoning = `${reasoning}${raw}`;
+          visible = '';
+        } else if (!run.transcript.trim() && !tagged.reasoning.trim() && looksLikeReasoningBlock(raw)) {
+          reasoning = raw;
+          visible = '';
+        }
+        if (reasoning) {
+          run.reasoning = `${run.reasoning || ''}${reasoning}`;
+          publish({ type: 'run.reasoning.delta', runId, sessionId: options.sessionId, text: reasoning });
+        }
+        if (visible) {
+          run.transcript += visible;
+          publish({ type: 'run.delta', runId, sessionId: options.sessionId, text: visible });
+        }
+        if (visible || reasoning) scheduleCheckpoint();
         return;
       }
       run.eventLog.push(event);
@@ -299,13 +365,14 @@ export class RunEngine {
     };
 
     const abortController = new AbortController();
-    const onAbort = () => abortController.abort();
+    const onAbort = () => abortController.abort(signal?.reason);
     const signal = options.signal;
     if (signal) {
       if (signal.aborted) abortController.abort();
       else signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timeoutId = setTimeout(() => abortController.abort(new Error(`Run timed out after ${Math.round(this.runTimeoutMs / 1000)}s`)), this.runTimeoutMs);
+    const timeoutMs = Math.min(7_200_000, Math.max(5_000, options.timeoutMs ?? this.runTimeoutMs));
+    const timeoutId = setTimeout(() => abortController.abort(new Error(`Run timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
 
     try {
       await this.dispatcher.dispatch({

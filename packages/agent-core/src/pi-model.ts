@@ -75,10 +75,18 @@ export function createChatCompletionsPayloadPatch(config: ModelConfig) {
   const disableThinking = config.provider === 'ollama' && Boolean(config.disableThinking);
   const enableSearch = supportsBuiltinEnableSearch(config.provider) && Boolean(config.enableSearch);
   const disableDeepseekThinking = looksLikeDeepseek(config);
-  if (!disableThinking && !enableSearch && !disableDeepseekThinking) return undefined;
   return (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return;
     const body = payload as Record<string, unknown>;
+    // pi-ai 0.51.x currently accumulates streamed tool-call arguments in a
+    // single active block. When an OpenAI-compatible endpoint interleaves
+    // multiple parallel tool calls, their JSON fragments can be concatenated
+    // and the tool invocation fails with "Unexpected non-whitespace character
+    // after JSON". Workmate executes tools serially anyway, so explicitly
+    // request a single tool call per model turn.
+    if (Array.isArray(body.tools) && body.tools.length > 0) {
+      body.parallel_tool_calls = false;
+    }
     if (disableThinking) body.think = false;
     if (enableSearch) body.enable_search = true;
     if (disableDeepseekThinking) body.thinking = { type: 'disabled' };

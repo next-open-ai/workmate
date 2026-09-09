@@ -354,24 +354,42 @@ function collaborationStateClass(item: CollaborationRun) {
       : "text-rose-600";
 }
 
+function hasAssistantVisibleProgress(message: Message) {
+  return Boolean(
+    message.content.trim()
+    || message.reasoning?.trim()
+    || message.activities?.length
+    || message.collaborations?.length,
+  );
+}
+
 const pendingAssistantId = computed(() => {
   if (!sending.value || !props.conversation?.messages.length) return null;
   const last =
     props.conversation.messages[props.conversation.messages.length - 1];
-  if (last.role !== "assistant" || last.content.trim()) return null;
+  // Hide as soon as any visible progress arrives (answer text, reasoning, or tool UI).
+  if (last.role !== "assistant" || hasAssistantVisibleProgress(last)) return null;
   return last.id;
 });
 
 const showStandalonePending = computed(() => {
   if (!sending.value) return false;
   if (!props.conversation) return true;
-  return !pendingAssistantId.value;
+  const hasVisibleProgress = props.conversation.messages.some((message) =>
+    message.role === 'assistant' && hasAssistantVisibleProgress(message),
+  );
+  // This indicator means "still waiting for the first visible response", not
+  // "the whole run is active". A server-side mirror can temporarily contain
+  // an extra empty assistant placeholder, so inspect the whole conversation
+  // rather than only its last item.
+  return !hasVisibleProgress;
 });
 
 function isAwaitingReply(message: Message) {
-  return (
-    message.role === "assistant" && pendingAssistantId.value === message.id
-  );
+  if (message.role !== "assistant" || pendingAssistantId.value !== message.id) return false;
+  // Render-time guard: never keep the waiting bar once this message already
+  // shows progress (also covers stale computed after raw-object stream writes).
+  return !hasAssistantVisibleProgress(message);
 }
 
 const messageScrollRef = ref<HTMLElement | null>(null);
@@ -594,8 +612,15 @@ onBeforeUnmount(() => {
             >
               {{ message.content }}
             </p>
+            <details
+              v-if="message.role === 'assistant' && message.reasoning"
+              class="mt-2 overflow-hidden rounded-lg border border-[var(--border)]/80 bg-[var(--surface)]/92 text-[11px] shadow-[0_4px_14px_rgba(15,23,42,0.035)]"
+            >
+              <summary class="cursor-pointer px-2.5 py-1.5 text-[var(--muted)]">思维过程（与主回答分离）</summary>
+              <pre class="border-t border-[var(--border)] px-3 py-2.5 whitespace-pre-wrap text-[var(--muted)]">{{ message.reasoning }}</pre>
+            </details>
             <ChatReplyPending
-              v-else-if="isAwaitingReply(message)"
+              v-if="isAwaitingReply(message)"
               :accent="employee.color"
               :started-at="message.startedAt"
             />

@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { archiveWorkspaceArtifact, linkArchivedAssets, listArchivedAssets, unlinkArchivedAssets } from '../services/api.js';
+import { archiveWorkspaceArtifact, deleteArchivedAssets, linkArchivedAssets, listArchivedAssets, unlinkArchivedAssets } from '../services/api.js';
 
 export interface Asset {
   id: string;
@@ -64,5 +64,11 @@ export function useAssets() {
     await loadAssets();
     return result;
   };
-  return { assets, loading, loadAssets, archiveArtifact, linkAssetsToProject, unlinkAssetsFromProject };
+  const deleteAssets = async (assetIds: string[]) => {
+    const result = await deleteArchivedAssets(assetIds);
+    const removed = new Set(assetIds);
+    assets.value = assets.value.filter((asset) => !removed.has(asset.id));
+    return result;
+  };
+  return { assets, loading, loadAssets, archiveArtifact, linkAssetsToProject, unlinkAssetsFromProject, deleteAssets };
 }

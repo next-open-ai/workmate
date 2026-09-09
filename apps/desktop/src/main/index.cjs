@@ -236,6 +236,29 @@ function unlinkAssetsFromProject(assetIds) {
   return { updated };
 }
 
+function deleteAssets(assetIds) {
+  const ids = [...new Set((Array.isArray(assetIds) ? assetIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const assetsRoot = path.resolve(storageRoot(), 'assets');
+  let deleted = 0;
+  for (const assetId of ids) {
+    const row = assetRows(database.exec(`${ASSET_SELECT} WHERE id = ?`, [assetId]))[0];
+    if (!row) continue;
+    database.run('DELETE FROM assets WHERE id = ?', [assetId]);
+    deleted += 1;
+    const folder = path.resolve(assetsRoot, assetId);
+    if (folder.startsWith(`${assetsRoot}${path.sep}`) && existsSync(folder)) {
+      rmSync(folder, { recursive: true, force: true });
+    } else if (row.relativePath) {
+      const target = path.resolve(storageRoot(), row.relativePath);
+      if (target.startsWith(`${assetsRoot}${path.sep}`) && existsSync(target)) {
+        rmSync(path.dirname(target), { recursive: true, force: true });
+      }
+    }
+  }
+  if (deleted) flushDatabase();
+  return { deleted };
+}
+
 function safeProjectFolderName(value) { return String(value || '').trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff-]+/gi, '-').replace(/(^-|-$)/g, '').slice(0, 64) || 'project'; }
 function projectRoot(folder) { const root = path.resolve(String(folder || '')); if (!root || root === path.parse(root).root) throw new Error('Invalid project workspace.'); return root; }
 function projectPath(root, relative) { const normalized = String(relative || '').replace(/\\/g, '/').replace(/^\/+/, ''); if (!normalized || normalized.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid project file path.'); const target = path.resolve(projectRoot(root), normalized); if (!target.startsWith(`${projectRoot(root)}${path.sep}`)) throw new Error('Project file is outside its workspace.'); return target; }
@@ -1528,6 +1551,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('workmate:archive-artifact', (_, value) => archiveArtifact(value));
   ipcMain.handle('workmate:link-assets-to-project', (_, value) => linkAssetsToProject(value));
   ipcMain.handle('workmate:unlink-assets-from-project', (_, assetIds) => unlinkAssetsFromProject(assetIds));
+  ipcMain.handle('workmate:delete-assets', (_, assetIds) => deleteAssets(assetIds));
   ipcMain.handle('workmate:save-asset', async (_, assetId) => {
     const { row, target } = assetFile(assetId);
     const result = await dialog.showSaveDialog(mainWindow, { title: '下载资产', defaultPath: row.name });
