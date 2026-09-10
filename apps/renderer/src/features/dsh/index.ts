@@ -12,3 +12,15 @@ export {
   isDshEnvFixAction,
 } from './environment-ui.js';
 export type { DshInstallCardCopy, DshRemediationKind, DshRemediationPlan } from './environment-ui.js';
+export {
+  dshInstallState,
+  dshInstallPhaseLabel,
+  installDshRuntimeWithProgress,
+  isDshCheckMissing,
+} from './install-progress.js';
+export {
+  DSH_PREFERRED_PRESET_IDS,
+  demoteDshEmployeesToPi,
+  ensurePresetEmployeesPreferDsh,
+  restoreDemotedEmployeesToDsh,
+} from './engine-fallback.js';

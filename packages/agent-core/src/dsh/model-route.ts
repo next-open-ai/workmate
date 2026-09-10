@@ -102,7 +102,7 @@ export function mapWorkmateModelToDshRoute(model: ModelConfig): WorkmateDshModel
     apiKey: apiKey || 'ollama',
     displayName,
     contextWindow: 262_144,
-    maxTokens: 16_384,
+    maxTokens: 32_768,
     env,
   };
 }

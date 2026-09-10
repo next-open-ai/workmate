@@ -17,6 +17,7 @@ import {
 } from '@mariozechner/pi-coding-agent';
 import type { ModelConfig } from '@workmate/contracts';
 import { createChatCompletionsPayloadPatch, toPiModel } from './pi-model.js';
+import { extractContextAnchors, formatAnchorsBlock } from './context-sanitize.js';
 
 /** Soft budget for durable session memory (summary + uncovered turns). */
 export const SESSION_MEMORY_BUDGET_CHARS = 24_000;
@@ -24,12 +25,23 @@ export const SESSION_MEMORY_BUDGET_CHARS = 24_000;
 export const SESSION_MEMORY_KEEP_RECENT = 8;
 /** Cap stored session summary text. */
 export const SESSION_MEMORY_SUMMARY_MAX_CHARS = 3_500;
+/**
+ * Secondary compaction trigger after hygiene (chars).
+ * Token estimate is chars/4 and under-counts CJK; this catches ballooned Chinese/HTML-free contexts.
+ */
+export const COMPACTION_CHAR_THRESHOLD = 96_000;
+/** Soft share of context window before we force mid-run summarization (after hygiene). */
+export const COMPACTION_WINDOW_RATIO = 0.78;
 
 /** Shared prefix for durable session memory injection into chat history. */
 export const SESSION_SUMMARY_PREFIX = '[Workmate context summary]';
 
-const WORKMATE_SUMMARY_FOCUS =
-  'Workmate digital-employee session: preserve user goals, constraints, decisions, artifact paths, failed attempts, and unfinished work. Write in the same language as the user. Omit raw CSS/HTML dumps and tool JSON.';
+const WORKMATE_SUMMARY_FOCUS = [
+  'Workmate digital-employee session continuity brief.',
+  'MUST preserve: user goal, hard constraints, acceptance criteria, written file paths, blockers/errors, unfinished next step.',
+  'MUST omit: thinking/reasoning, raw CSS/HTML/JS bodies, full stdout/stderr dumps, duplicated tool JSON.',
+  'Write in the same language as the user. Prefer bullet lists over prose.',
+].join(' ');
 
 const FALLBACK_SYSTEM =
   'You are a context summarization assistant. Read the conversation and produce a structured continuity brief. Do NOT continue the conversation. ONLY output the summary.';
@@ -236,9 +248,47 @@ function findPreviousInjectedSummary(messages: AgentMessage[]): string | undefin
   return undefined;
 }
 
+function estimateMessageChars(messages: AgentMessage[]) {
+  let chars = 0;
+  for (const message of messages) {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') {
+      chars += content.length;
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const item = block as { text?: string; thinking?: string; arguments?: unknown };
+      if (typeof item.text === 'string') chars += item.text.length;
+      if (typeof item.thinking === 'string') chars += item.thinking.length;
+      if (item.arguments) chars += JSON.stringify(item.arguments).length;
+    }
+  }
+  return chars;
+}
+
+function mergeSummaryWithAnchors(summary: string, messagesForAnchors: AgentMessage[]) {
+  const anchors = extractContextAnchors(messagesForAnchors);
+  const anchorBlock = formatAnchorsBlock(anchors);
+  const body = summary.trim();
+  const merged = `${anchorBlock}\n\n${body}`.trim();
+  return merged.slice(0, SESSION_MEMORY_SUMMARY_MAX_CHARS + 1_200);
+}
+
+function needsCompaction(tokens: number, chars: number, contextWindow: number, settings: typeof DEFAULT_COMPACTION_SETTINGS) {
+  if (chars >= COMPACTION_CHAR_THRESHOLD) return true;
+  if (!shouldCompact(tokens, contextWindow, settings)) return false;
+  const boostCeiling = Math.floor(contextWindow * COMPACTION_WINDOW_RATIO);
+  return tokens >= boostCeiling;
+}
+
 /**
  * Mid-run context transform for pi Agent: when context is near the window,
- * summarize older messages with pi generateSummary and keep recent turns.
+ * summarize older messages with pi generateSummary, prepend deterministic
+ * anchors (goal / paths / errors), and keep recent turns verbatim.
+ *
+ * Callers should pass already-hygienized messages (thinking stripped, writes path-only).
  */
 export async function compactAgentContext(input: {
   messages: AgentMessage[];
@@ -253,11 +303,8 @@ export async function compactAgentContext(input: {
   const contextWindow = piModel.contextWindow || 128_000;
   const settings = DEFAULT_COMPACTION_SETTINGS;
   const tokens = estimateMessageTokens(messages);
-  if (!shouldCompact(tokens, contextWindow, settings)) return messages;
-
-  // 提配：刚触达默认压缩点时先继续执行，不中断；仅更接近窗口上限才摘要。
-  const boostCeiling = Math.floor(contextWindow * 0.88);
-  if (tokens < boostCeiling) return messages;
+  const chars = estimateMessageChars(messages);
+  if (!needsCompaction(tokens, chars, contextWindow, settings)) return messages;
 
   let keptTokens = 0;
   let cut = messages.length;
@@ -275,7 +322,11 @@ export async function compactAgentContext(input: {
   const older = messages.slice(0, cut);
   const recent = messages.slice(cut);
   const apiKey = resolveApiKey(input.model);
-  if (!apiKey) return messages;
+  if (!apiKey) {
+    // No key for LLM summary — still inject deterministic anchors so paths/goal survive.
+    const anchorsOnly = formatAnchorsBlock(extractContextAnchors(older));
+    return [...summaryAsAgentMessages(anchorsOnly, input.model), ...recent];
+  }
 
   const previousSummary = findPreviousInjectedSummary(older);
   try {
@@ -288,8 +339,12 @@ export async function compactAgentContext(input: {
       WORKMATE_SUMMARY_FOCUS,
       previousSummary,
     );
-    if (!summary?.trim()) return messages;
-    return [...summaryAsAgentMessages(summary.trim().slice(0, SESSION_MEMORY_SUMMARY_MAX_CHARS), input.model), ...recent];
+    if (!summary?.trim()) {
+      const anchorsOnly = formatAnchorsBlock(extractContextAnchors([...older, ...recent]));
+      return [...summaryAsAgentMessages(anchorsOnly, input.model), ...recent];
+    }
+    const merged = mergeSummaryWithAnchors(summary, [...older, ...recent]);
+    return [...summaryAsAgentMessages(merged, input.model), ...recent];
   } catch {
     const fallback = await summarizeFallback({
       messages: older,
@@ -297,9 +352,12 @@ export async function compactAgentContext(input: {
       previousSummary,
       signal: input.signal,
     });
-    if (!fallback) return messages;
-    return [...summaryAsAgentMessages(fallback, input.model), ...recent];
+    if (!fallback) {
+      const anchorsOnly = formatAnchorsBlock(extractContextAnchors([...older, ...recent]));
+      return [...summaryAsAgentMessages(anchorsOnly, input.model), ...recent];
+    }
+    const merged = mergeSummaryWithAnchors(fallback, [...older, ...recent]);
+    return [...summaryAsAgentMessages(merged, input.model), ...recent];
   }
 }
-
 export { convertToLlm, DEFAULT_COMPACTION_SETTINGS, shouldCompact };

@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { readdir, stat } from 'node:fs/promises';
 import type { AgentEvent, ChatRequest, McpConnectionRuntime } from '@workmate/contracts';
 import { DshJsonRpcClient } from './jsonrpc-client.js';
 import { resolveDshLaunch, resolveDshWorkspace } from './launch.js';
@@ -10,42 +9,17 @@ import { writeWorkmateDshCordis } from './cordis-compose.js';
 import { materializeWorkmateSkillsForDsh } from './skills-materialize.js';
 import { warmMcpConnections, type McpWarmResult } from '../mcp-runtime.js';
 import { openDshMcpBridges } from '../mcp-dsh-bridge.js';
-import { harvestWorkspaceDeliverables } from '../skill-runtime.js';
+import { DshCapabilityAdapter } from '../dsh-capability-adapter.js';
+import {
+  resolveWorkspaceMode,
+  snapshotWorkspaceFiles,
+  workspaceModeContract,
+} from '../workspace-mode.js';
 
 type DshMcpCatalog = {
   labels: string[];
   toolLines: string[];
 };
-
-const DSH_INTERNAL_ENTRIES = new Set([
-  '.agents',
-  '.dsh-sessions',
-  '.git',
-  '.python-packages',
-  'node_modules',
-]);
-
-async function snapshotProjectFiles(root: string): Promise<Map<string, string>> {
-  const files = new Map<string, string>();
-  const visit = async (directory: string, relative = '', depth = 0): Promise<void> => {
-    if (depth > 12 || files.size >= 2_000) return;
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (DSH_INTERNAL_ENTRIES.has(entry.name) || entry.name === '.workmate-dsh.cordis.yml') continue;
-      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      const target = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(target, childRelative, depth + 1);
-      } else if (entry.isFile() && childRelative.length <= 240) {
-        const info = await stat(target).catch(() => null);
-        if (info) files.set(childRelative, `${info.size}:${info.mtimeMs}`);
-      }
-      if (files.size >= 2_000) return;
-    }
-  };
-  await visit(root);
-  return files;
-}
 
 function cancellationEvent(runId: string, signal: AbortSignal): AgentEvent {
   const detail = signal.reason instanceof Error
@@ -80,15 +54,7 @@ function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
       + `For PDF / Word / slides / spreadsheet deliverables: load the matching document skill BEFORE ad-hoc bash exploration.`,
     );
   }
-  lines.push(input.projectWorkspacePath?.trim()
-    ? `[Project workspace contract]\n`
-      + `The current working directory is the final shared project root. Create and edit the actual project structure directly here. `
-      + `Use conventional root entry files when appropriate to the chosen stack. Do not wrap the project in output/. `
-      + `Keep temporary process files out of the final project tree.`
-    : `[Deliverables contract]\n`
-      + `Finished user-facing files (PDF, DOCX, HTML, Markdown, CSV, images, …) MUST be written under output/ `
-      + `(create the directory if needed). Prefer output/<clear-name>.pdf over workspace-root files. `
-      + `Do not leave the only copy of a deliverable under scripts/ or /tmp.`);
+  lines.push(workspaceModeContract(resolveWorkspaceMode(input.projectWorkspacePath)));
   const mcpNames = mcpCatalog?.labels?.length
     ? mcpCatalog.labels
     : (input.mcpConnections ?? [])
@@ -172,7 +138,13 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
       projectWorkspacePath: input.projectWorkspacePath,
     });
     const projectBound = Boolean(input.projectWorkspacePath?.trim());
-    const projectFilesBefore = projectBound ? await snapshotProjectFiles(cwd) : null;
+    const capabilityAdapter = new DshCapabilityAdapter({
+      runId,
+      workspaceRoot: cwd,
+      workspaceAccess: input.workspaceAccess ?? 'write',
+      workspaceMode: projectBound ? 'project' : 'conversation',
+    });
+    const projectFilesBefore = projectBound ? await snapshotWorkspaceFiles(cwd) : null;
     const route = mapWorkmateModelToDshRoute(input.model);
     const mcpEnabled = enabledMcpConnections(input.mcpConnections);
 
@@ -250,9 +222,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         const base = input.profile?.instructions?.slice(0, 4_000)
           || 'You are a careful coding agent working inside a Workmate workspace.';
         const mcpNames = mcpCatalog.labels;
-        const deliverable = projectBound
-          ? '\n\nThis cwd is the final shared project root. Write the real project structure directly here; do not create an output/ wrapper.'
-          : '\n\nFinished PDF/DOCX/HTML/Markdown must be saved under output/. Prefer loading document skills via the skill tool before ad-hoc PDF tooling.';
+        const deliverable = `\n\n${workspaceModeContract(projectBound ? 'project' : 'conversation')}\n\n${capabilityAdapter.systemPromptContract()}`;
         if (!mcpNames.length) return `${base}${deliverable}`;
         const discovered = mcpCatalog.toolLines.length
           ? `\nAvailable MCP tools:\n${mcpCatalog.toolLines.join('\n')}`
@@ -387,15 +357,16 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
 
       if (!failed) {
         if (projectFilesBefore) {
-          const after = await snapshotProjectFiles(cwd);
+          const after = await snapshotWorkspaceFiles(cwd);
           for (const [relative, fingerprint] of after) {
             if (projectFilesBefore.get(relative) === fingerprint) continue;
             yield { type: 'project.file.published', runId, path: relative, projectPath: relative };
           }
         } else {
-          // Standalone chat runs retain the output/ asset contract.
-          const harvested = await harvestWorkspaceDeliverables(cwd, { startedAtMs: runStartedAtMs }).catch(() => []);
-          for (const relative of harvested) {
+          // DSH owns its filesystem plugin; publish only after the successful
+          // run has ended and the shared capability adapter verifies each file.
+          const committed = await capabilityAdapter.commitCompletedArtifacts(runStartedAtMs).catch(() => []);
+          for (const relative of committed) {
             yield { type: 'artifact.created', runId, path: relative };
           }
         }

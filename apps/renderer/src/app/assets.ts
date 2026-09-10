@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { archiveWorkspaceArtifact, deleteArchivedAssets, linkArchivedAssets, listArchivedAssets, unlinkArchivedAssets } from '../services/api.js';
+import { archiveWorkspaceArtifact, archiveWorkspaceBundle, deleteArchivedAssets, linkArchivedAssets, listArchivedAssets, unlinkArchivedAssets } from '../services/api.js';
 
 export interface Asset {
   id: string;
@@ -25,6 +25,9 @@ export interface Asset {
   sha256: string;
   projectId: string | null;
   workspaceRelative: string | null;
+  kind: 'file' | 'bundle';
+  entryPath: string | null;
+  manifest: { version: number; entryPath: string; files: Array<{ path: string; bytes: number; sha256: string; mimeType: string }> } | null;
 }
 
 const assets = ref<Asset[]>([]);
@@ -54,6 +57,13 @@ export function useAssets() {
     if (!assets.value.some((item) => item.id === asset.id)) assets.value = [asset, ...assets.value];
     return asset;
   };
+  const archiveBundle = async (input: { runId: string; conversationId?: string; employeeId?: string; projectId?: string }) => {
+    const asset = (await archiveWorkspaceBundle(input)) as Asset;
+    const existingIndex = assets.value.findIndex((item) => item.id === asset.id);
+    if (existingIndex >= 0) assets.value.splice(existingIndex, 1, asset);
+    else assets.value = [asset, ...assets.value];
+    return asset;
+  };
   const linkAssetsToProject = async (input: { projectId: string; assetIds: string[]; workspacePath?: string }) => {
     const result = await linkArchivedAssets(input);
     await loadAssets();
@@ -70,5 +80,5 @@ export function useAssets() {
     assets.value = assets.value.filter((asset) => !removed.has(asset.id));
     return result;
   };
-  return { assets, loading, loadAssets, archiveArtifact, linkAssetsToProject, unlinkAssetsFromProject, deleteAssets };
+  return { assets, loading, loadAssets, archiveArtifact, archiveBundle, linkAssetsToProject, unlinkAssetsFromProject, deleteAssets };
 }

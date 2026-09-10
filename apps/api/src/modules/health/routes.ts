@@ -9,6 +9,8 @@ import {
   buildDshEnvironmentCheck,
   isDshEnvFixAction,
   runDshEnvironmentFix,
+  runDshEnvironmentFixWithProgress,
+  type DshInstallProgressEvent,
 } from '@workmate/agent-core';
 
 type EnvCheckItem = {
@@ -339,7 +341,7 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
     const actionId = String(body.actionId || '').trim() as EnvFixActionId | '';
     if (!actionId) return reply.code(400).send({ message: '缺少 actionId' });
     try {
-      // Optional heavy engine installs (e.g. dsh) may take several minutes.
+      // Prefer streaming endpoint for dsh; keep sync fallback for simple clients.
       if (isDshEnvFixAction(actionId)) {
         request.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
         reply.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
@@ -349,6 +351,44 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(400).send({ message, actionId });
+    }
+  });
+  app.post('/environment/dsh/install', async (request, reply) => {
+    const body = (request.body ?? {}) as { reinstall?: boolean };
+    const reinstall = Boolean(body.reinstall);
+    request.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const send = (payload: Record<string, unknown>) => {
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const onProgress = (event: DshInstallProgressEvent) => {
+      send(event);
+    };
+
+    try {
+      const result = await runDshEnvironmentFixWithProgress({ reinstall, onProgress });
+      send({
+        type: 'complete',
+        ok: true,
+        message: result.message,
+        detail: result.detail,
+        skipped: result.skipped,
+        actionId: 'fix-dsh',
+        report: buildEnvironmentReport(),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      send({ type: 'error', ok: false, message, actionId: 'fix-dsh' });
+    } finally {
+      reply.raw.end();
     }
   });
 };

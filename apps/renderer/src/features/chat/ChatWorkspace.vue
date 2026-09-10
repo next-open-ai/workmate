@@ -17,11 +17,12 @@ import { useCapabilities } from "../../app/capabilities";
 import { useEmployeeRuntimePrefs } from "../../app/employee-prefs";
 import { useMcpConfig, isAssociableMcp } from "../../app/mcp-config";
 import type { Asset } from "../../app/assets";
-import { downloadAssetBestEffort } from "../../app/platform-actions.js";
+import { downloadAssetBestEffort, previewAssetUrl } from "../../app/platform-actions.js";
 import { useI18n } from "../../app/i18n";
 import { useNotify } from "../../app/notify";
 import { employeeDisplayDescription, employeeDisplayName } from "../../app/employees";
 import { getServerRuntimeConfig } from "../../services/api";
+import { chatBusy } from "../../app/workspace";
 
 type EngineId = "pi" | "agentscope" | "dsh";
 function isEngineId(value: unknown): value is EngineId {
@@ -73,6 +74,8 @@ const collaborationDelivery = ref<CollaborationDelivery>("direct");
 const onlineSearch = ref(true);
 const autoSchedule = ref(false);
 const sending = ref(false);
+/** Local submit flag or workspace-level run (survives remount during auto-schedule). */
+const inputBusy = computed(() => sending.value || chatBusy.value);
 const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
 const { get: getEmployeePrefs } = useEmployeeRuntimePrefs();
@@ -166,7 +169,7 @@ function elapsedLabel(elapsedMs?: number) {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 async function submit() {
-  if (!draft.value.trim() || !props.modelConfigured || sending.value) return;
+  if (!draft.value.trim() || !props.modelConfigured || inputBusy.value) return;
   const text = draft.value;
   const selected = autoSchedule.value ? [] : [...collaboratorIds.value];
   const delivery = collaborationDelivery.value;
@@ -190,7 +193,7 @@ async function submit() {
   }
 }
 function stopGeneration() {
-  if (!sending.value) return;
+  if (!inputBusy.value) return;
   props.abortMessage?.();
 }
 async function approve(item: ToolApproval, scope: "session" | "always") {
@@ -219,10 +222,15 @@ function formatBytes(value: number) {
     : `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 function assetType(asset: Asset) {
+  if (asset.kind === "bundle") return "SITE";
   return asset.name.split(".").pop()?.toUpperCase() || "FILE";
 }
 async function downloadAsset(asset: Asset) {
   await downloadAssetBestEffort(asset.id);
+}
+async function openBundleFile(asset: Asset, relative: string) {
+  const url = await previewAssetUrl(asset.id, relative);
+  window.open(url, "_blank", "noopener");
 }
 function toggleCollaborator(id: EmployeeId) {
   if (autoSchedule.value) return;
@@ -395,7 +403,7 @@ function selectScheduleTask(taskId: string) {
 }
 
 function toggleAutoSchedule() {
-  if (sending.value) return;
+  if (inputBusy.value) return;
   autoSchedule.value = !autoSchedule.value;
   if (autoSchedule.value) {
     collaboratorIds.value = [];
@@ -405,7 +413,7 @@ function toggleAutoSchedule() {
 }
 
 const pendingAssistantId = computed(() => {
-  if (!sending.value || !props.conversation?.messages.length) return null;
+  if (!inputBusy.value || !props.conversation?.messages.length) return null;
   const last =
     props.conversation.messages[props.conversation.messages.length - 1];
   // Hide as soon as any visible progress arrives (answer text, reasoning, or tool UI).
@@ -414,7 +422,7 @@ const pendingAssistantId = computed(() => {
 });
 
 const showStandalonePending = computed(() => {
-  if (!sending.value) return false;
+  if (!inputBusy.value) return false;
   if (!props.conversation) return true;
   const hasVisibleProgress = props.conversation.messages.some((message) =>
     message.role === 'assistant' && hasAssistantVisibleProgress(message),
@@ -446,7 +454,7 @@ function isNearBottom(el: HTMLElement) {
 function scrollMessagesToBottom(force = false) {
   const el = messageScrollRef.value;
   if (!el) return;
-  if (!force && !stickToBottom.value && !sending.value) return;
+  if (!force && !stickToBottom.value && !inputBusy.value) return;
   el.scrollTo({ top: el.scrollHeight, behavior: force ? "auto" : "smooth" });
 }
 
@@ -477,6 +485,7 @@ const chatScrollSignal = computed(() => {
     last.assets?.length ?? 0,
     last.approvals?.length ?? 0,
     sending.value,
+    chatBusy.value,
     pendingAssistantId.value ?? "",
   ].join("\0");
 });
@@ -490,7 +499,7 @@ watch(
 );
 
 watch(chatScrollSignal, () => {
-  void nextTick(() => scrollMessagesToBottom(sending.value || stickToBottom.value));
+  void nextTick(() => scrollMessagesToBottom(inputBusy.value || stickToBottom.value));
 });
 
 watch(messageListRef, (el, _, onCleanup) => {
@@ -498,7 +507,7 @@ watch(messageListRef, (el, _, onCleanup) => {
   listResizeObserver = null;
   if (!el) return;
   listResizeObserver = new ResizeObserver(() => {
-    if (stickToBottom.value || sending.value) scrollMessagesToBottom(false);
+    if (stickToBottom.value || inputBusy.value) scrollMessagesToBottom(false);
   });
   listResizeObserver.observe(el);
   onCleanup(() => {
@@ -883,6 +892,9 @@ onBeforeUnmount(() => {
                     已归档至资产库 · {{ assetType(asset) }} ·
                     {{ formatBytes(asset.sizeBytes) }}
                   </p>
+                  <div v-if="asset.kind === 'bundle'" class="mt-2 max-h-24 overflow-y-auto rounded-lg bg-[var(--surface)]/70 p-1.5 font-mono text-[10px] text-[var(--muted)]">
+                    <button v-for="file in asset.manifest?.files || []" :key="file.path" class="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]" type="button" @click="openBundleFile(asset, file.path)">{{ file.path }}</button>
+                  </div>
                 </div>
                 <div class="flex shrink-0 gap-2">
                   <button
@@ -932,7 +944,7 @@ onBeforeUnmount(() => {
           rows="3"
           class="min-h-[76px] w-full resize-y border-0 bg-transparent p-0 outline-none"
           :placeholder="t('chat.placeholder')"
-          :disabled="!modelConfigured || sending"
+          :disabled="!modelConfigured || inputBusy"
           @input="handleDraftInput"
           @keydown="handleDraftKeydown"
         ></textarea>
@@ -1006,7 +1018,7 @@ onBeforeUnmount(() => {
             <button
               class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
               type="button"
-              :disabled="sending || autoSchedule"
+              :disabled="inputBusy || autoSchedule"
               :title="autoSchedule ? t('chat.autoScheduleBlocksCollaborators') : undefined"
               @click="collaboratorMenuOpen = !collaboratorMenuOpen"
             >
@@ -1081,14 +1093,14 @@ onBeforeUnmount(() => {
             type="button"
             role="switch"
             :aria-checked="autoSchedule"
-            :disabled="sending"
+            :disabled="inputBusy"
             :title="t('chat.autoScheduleHelp')"
             :class="[
               'group inline-flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold transition',
               autoSchedule
                 ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] shadow-[inset_0_0_0_1px_rgba(59,130,246,0.12)]'
                 : 'border-[var(--border)] bg-[var(--surface-muted)] text-[var(--muted)] hover:border-[var(--accent)]/35',
-              sending ? 'cursor-not-allowed opacity-50' : '',
+              inputBusy ? 'cursor-not-allowed opacity-50' : '',
             ]"
             @click="toggleAutoSchedule"
           >
@@ -1111,7 +1123,7 @@ onBeforeUnmount(() => {
             class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold"
             :title="t('chat.onlineSearchHelp')"
           >
-            <input v-model="onlineSearch" type="checkbox" :disabled="sending" />
+            <input v-model="onlineSearch" type="checkbox" :disabled="inputBusy" />
             <span :class="onlineSearch ? 'text-[var(--accent)]' : 'text-[var(--muted)]'">{{ t('chat.onlineSearch') }}</span>
           </label>
           <select
@@ -1129,8 +1141,8 @@ onBeforeUnmount(() => {
             >
               {{ item.providerLabel }} · {{ item.chatModel }}
             </option></select
-          ><button
-            v-if="sending"
+          >          <button
+            v-if="inputBusy"
             type="button"
             class="ml-auto grid h-9 w-9 place-items-center rounded-[10px] bg-[var(--danger,#c0392b)] text-sm font-semibold text-white"
             :title="t('chat.stop')"

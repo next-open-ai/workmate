@@ -48,6 +48,7 @@ ProjectRun { planVersion?, changeSetId?, ... }
 - `replanProject`：`mergeReplanTasks` 保留可复用 completed → Plan vN+1。
 - `lastAttemptKey`：`{taskId}:plan{v}:attempt{n}`，同键已完成则幂等跳过（P3）。
 - **上下文预算（简单提配）**：依赖证据 / 任务目标 / 项目汇总按 soft→boost 截断，**不中断执行**；步进压缩触达阈值时先提配再摘要（`context-budget.ts` / `context-compaction`）。
+- **运行时上下文卫生**：每轮 LLM 调用前剥离 thinking、写文件仅保留路径、命令结果包装截断，再按阈值压缩（详见 `docs/design/context-hygiene.md`）。
 
 ## 协调员两阶段规划（P2）与协作偏好
 

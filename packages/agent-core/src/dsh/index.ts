@@ -1,4 +1,5 @@
 export { streamAgentReplyViaDsh } from './stream.js';
+export { DshCapabilityAdapter } from '../dsh-capability-adapter.js';
 export { resolveDshLaunch, resolveDshWorkspace } from './launch.js';
 export { DshJsonRpcClient } from './jsonrpc-client.js';
 export {
@@ -14,6 +15,8 @@ export {
   DSH_RUNTIME_PACKAGES,
   dshRuntimeRoot,
   ensureDshRuntimeInstalled,
+  ensureDshRuntimeInstalledWithProgress,
+  enrichedProcessEnv,
   probeDshRuntime,
   resolveDshJsonrpcBin,
 } from './runtime-install.js';
@@ -28,12 +31,13 @@ export {
   isDshEnvFixAction,
   resolvePreferredDshRoot,
   runDshEnvironmentFix,
+  runDshEnvironmentFixWithProgress,
 } from './environment.js';
 export type { DshEventMapContext } from './map-events.js';
 export type { DshLaunchSpec } from './launch.js';
 export type { WorkmateDshModelRoute, DshPiAiApi } from './model-route.js';
 export type { WorkmateDshCordisOptions } from './cordis-compose.js';
-export type { DshRuntimeStatus } from './runtime-install.js';
+export type { DshInstallProgressEvent, DshInstallPhase, DshInstallResult, DshRuntimeStatus } from './runtime-install.js';
 export type {
   DshEnvCheckItem,
   DshEnvFixResult,

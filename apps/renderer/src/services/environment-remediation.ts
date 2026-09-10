@@ -3,7 +3,7 @@ import {
   DSH_ENV_FIX_ACTION_ID,
   buildDshRemediationPlan,
   isDshEnvFixAction,
-} from '../features/dsh';
+} from '../features/dsh/environment-ui';
 
 /** Whitelisted auto-fix actions executed by the API (desktop/web share this). */
 export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | typeof DSH_ENV_FIX_ACTION_ID;

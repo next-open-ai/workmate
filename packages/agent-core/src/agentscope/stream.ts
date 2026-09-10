@@ -2,6 +2,7 @@ import type { AgentEvent, ChatRequest } from '@workmate/contracts';
 import { chatRequestToRunParams } from './client.js';
 import { prepareAgentscopeHostTools, type HostToolCall } from './host-tools.js';
 import { acquireSharedAgentscopeRunSlot, ensureSharedAgentscopeRuntime, markSharedAgentscopeHandleUnhealthy } from './process.js';
+import { resolveAgentWorkspaceRoot } from '../workspace-mode.js';
 
 /** Silence between sidecar events before we abort a hung provider stream. */
 export const DEFAULT_STREAM_IDLE_MS = 150_000;
@@ -55,10 +56,13 @@ export async function* streamAgentReplyViaAgentscope(input: ChatRequest & {
 }): AsyncGenerator<AgentEvent> {
   const hostTools = await prepareAgentscopeHostTools(input);
   const streamIdleMs = resolveStreamIdleMs(input);
+  const baseParams = chatRequestToRunParams(input);
   const params = {
-    ...chatRequestToRunParams(input),
+    ...baseParams,
     ...hostTools.runtimePatch,
     streamIdleMs,
+    workspaceRoot: resolveAgentWorkspaceRoot({ runId: baseParams.runId, projectWorkspacePath: input.projectWorkspacePath }),
+    workspaceAccess: input.workspaceAccess ?? 'write',
     ...(input.sessionSummary ? { sessionSummary: input.sessionSummary } : {}),
   };
   const runId = params.runId;

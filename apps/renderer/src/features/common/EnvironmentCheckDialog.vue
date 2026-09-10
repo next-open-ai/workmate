@@ -3,6 +3,11 @@ import { computed, ref } from 'vue';
 import { runEnvironmentFix, type EnvFixActionId } from '../../services/api.js';
 import { environmentState, runEnvironmentCheck, type EnvProgressRow } from '../../services/environment.js';
 import { remediationForCheck } from '../../services/environment-remediation.js';
+import DshInstallProgressPanel from '../dsh/DshInstallProgressPanel.vue';
+import {
+  DSH_ENV_FIX_ACTION_ID,
+  installDshRuntimeWithProgress,
+} from '../dsh';
 
 /**
  * 环境检查弹窗：展示环境报告，完成后给出汇总与一键修复。
@@ -44,24 +49,33 @@ async function copyScript(id: string, script?: string) {
   }
 }
 
+function applyReport(next: NonNullable<typeof report.value>) {
+  environmentState.report.value = next;
+  environmentState.progressRows.value = next.checks.map((item) => ({
+    id: item.id,
+    name: item.name,
+    required: item.required,
+    state: 'done' as const,
+    status: item.status,
+    found: item.found,
+  }));
+}
+
 async function applyFix(actionId: EnvFixActionId, uiKey: string) {
   fixingId.value = uiKey;
   fixError.value = '';
   try {
-    const result = await runEnvironmentFix(actionId);
-    if (result.report) {
-      environmentState.report.value = result.report;
-      environmentState.progressRows.value = result.report.checks.map((item) => ({
-        id: item.id,
-        name: item.name,
-        required: item.required,
-        state: 'done' as const,
-        status: item.status,
-        found: item.found,
-      }));
-    } else {
-      await runEnvironmentCheck();
+    if (actionId === DSH_ENV_FIX_ACTION_ID) {
+      const { demoteDshEmployeesToPi } = await import('../dsh/engine-fallback');
+      await demoteDshEmployeesToPi().catch(() => undefined);
+      const result = await installDshRuntimeWithProgress({ reinstall: true, source: 'manual' });
+      if (result.report) applyReport(result.report);
+      else await runEnvironmentCheck();
+      return;
     }
+    const result = await runEnvironmentFix(actionId);
+    if (result.report) applyReport(result.report);
+    else await runEnvironmentCheck();
   } catch (cause) {
     fixError.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
@@ -123,6 +137,9 @@ function applyCheckFix(check: (typeof problems.value)[number]) {
         </ul>
         <p v-if="errorMessage" class="mt-3 text-sm text-rose-600">检查失败：{{ errorMessage }}</p>
         <p v-if="fixError" class="mt-3 text-sm text-rose-600">修复失败：{{ fixError }}</p>
+        <div class="mt-3">
+          <DshInstallProgressPanel compact />
+        </div>
 
         <div v-if="!checking && problems.length" class="mt-4 grid gap-3">
           <p class="text-sm font-semibold text-rose-600">需要处理的项目与解决方案</p>

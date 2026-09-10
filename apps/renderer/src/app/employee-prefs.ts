@@ -32,6 +32,8 @@ export interface EmployeeRuntimePrefs {
 }
 
 export const DEFAULT_MAX_STEPS = 50;
+/** Research turns should synthesize evidence, not spin in document/tool loops. */
+export const RESEARCH_DEFAULT_MAX_STEPS = 10;
 export const MIN_MAX_STEPS = 4;
 export const MAX_MAX_STEPS = 64;
 
@@ -43,10 +45,10 @@ export const DEFAULT_MCP_TOOL_TIMEOUT_MS = 60_000;
 export const MIN_MCP_TOOL_TIMEOUT_MS = 5_000;
 export const MAX_MCP_TOOL_TIMEOUT_MS = 300_000;
 
-export const defaultEmployeeRuntimePrefs = (): EmployeeRuntimePrefs => ({
+export const defaultEmployeeRuntimePrefs = (employeeId?: string): EmployeeRuntimePrefs => ({
   defaultModelId: null,
   searchMode: 'inherit',
-  maxSteps: DEFAULT_MAX_STEPS,
+  maxSteps: employeeId === 'research' ? RESEARCH_DEFAULT_MAX_STEPS : DEFAULT_MAX_STEPS,
   runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
   mcpToolTimeoutMs: DEFAULT_MCP_TOOL_TIMEOUT_MS,
   mcpIds: [],
@@ -141,7 +143,7 @@ export function useEmployeeRuntimePrefs() {
   };
 
   const get = (employeeId: string): EmployeeRuntimePrefs =>
-    prefsByEmployee.value[employeeId] ? { ...prefsByEmployee.value[employeeId] } : defaultEmployeeRuntimePrefs();
+    prefsByEmployee.value[employeeId] ? { ...prefsByEmployee.value[employeeId] } : defaultEmployeeRuntimePrefs(employeeId);
 
   const set = async (employeeId: string, patch: Partial<EmployeeRuntimePrefs>) => {
     const next = normalizeOne({ ...get(employeeId), ...patch });

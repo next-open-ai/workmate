@@ -107,6 +107,8 @@ const permissionTierByEmployee = ref<Record<string, ExecutionLevel>>({});
 const sessionGrants = new Map<string, Set<ToolApproval['capability']>>();
 /** Aborts the in-flight chat/MCP run (and closes server-side resources via disconnect). */
 let activeRunAbort: AbortController | null = null;
+/** True while addMessage / schedule is in flight (survives ChatWorkspace remount). */
+export const chatBusy = ref(false);
 
 function isAbortError(error: unknown) {
   return Boolean(error && typeof error === 'object' && 'name' in error && (error as { name?: string }).name === 'AbortError');
@@ -159,7 +161,22 @@ function friendlyAssistantError(raw: string) {
   const text = raw.trim();
   if (!text) return '请求失败，请稍后重试。';
   if (NETWORK_ERROR_RE.test(text)) return FRIENDLY_NETWORK_ERROR;
+  if (/Bad control character|Unterminated string|Bad escaped character|in string literal in JSON|Expected ',' or '}' after property value|Expected ',' or '\]'|JSON at position|Unexpected non-whitespace/i.test(text)) {
+    return '工具参数 JSON 解析失败（常见原因：单次写入过大被截断）。请改用分阶段写入（start → append(seq) → finish，每片 ≤3.5KB）后重试。';
+  }
   return text;
+}
+
+/** Explicit policy / budget failures must fail the schedule node — never soft-complete. */
+function isHardScheduleFailure(raw: unknown): boolean {
+  const text = raw instanceof Error ? raw.message : String(raw || '');
+  return /工具调用步数超过上限|步数超过上限|轮次\s*\/\s*步骤上限|max steps|step limit|run timeout|运行超时|已自动中止/i.test(text);
+}
+
+function isSoftCompletableStreamError(raw: unknown): boolean {
+  if (isHardScheduleFailure(raw)) return false;
+  const text = raw instanceof Error ? raw.message : String(raw || '');
+  return NETWORK_ERROR_RE.test(text) || /模型流已中断|stream.*interrupt|unexpected end|incomplete/i.test(text);
 }
 
 function appendUnfinishedDeliverableNotice(message: Message) {
@@ -195,7 +212,10 @@ function profileInstructions(employee: Employee, extra = '') {
           : employee.id === 'general' ? 'Focus on clear answers, writing quality, and practical next steps.'
             : 'Be helpful, accurate, and concise.');
   const roleBrief = employee.description?.trim() ? ` Role brief: ${employee.description.trim()}` : '';
-  return `You are Workmate's digital employee "${role}" (${employee.id}).${roleBrief} ${focus} Reply in the user's language. ${extra}`.trim();
+  const researchMode = employee.id === 'research'
+    ? ' Research output mode: deliver a concise Markdown or structured research brief with findings, evidence/source pointers, uncertainty, and next actions. Do not narrate planning or self-correction. Use only the minimum relevant tools; after a failed file operation, state the concrete blocker instead of repeatedly retrying the same write/read path.'
+    : '';
+  return `You are Workmate's digital employee "${role}" (${employee.id}).${roleBrief} ${focus} Reply in the user's language.${researchMode} ${extra}`.trim();
 }
 
 function collaboratorFocus(employee: Employee) {
@@ -234,7 +254,7 @@ export function useWorkspace() {
   const { runtimePayload: kbRuntimePayload, load: loadKnowledgeConfig } = useKnowledgeConfig();
   void loadKnowledgeConfig();
   const { allowedSkillsFor, policyFor, skills, setExecutionPolicy } = useCapabilities();
-  const { archiveArtifact } = useAssets();
+  const { archiveArtifact, archiveBundle } = useAssets();
   const { config: autoScheduleConfig, load: loadAutoScheduleConfig } = useAutoScheduleConfig();
   void loadAutoScheduleConfig();
   const { modelForEmployee } = useModelConfig();
@@ -341,12 +361,12 @@ export function useWorkspace() {
     const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
     if (!isUserFacingDeliverablePath(normalized)) return;
     try {
-      const asset = await archiveArtifact({
-        runId,
-        relativePath: normalized,
-        conversationId: conversation.serverSessionId,
-        employeeId: conversation.employeeId,
-      });
+      // A website is one deliverable package.  Its CSS, scripts and images must
+      // stay beside index.html so relative URLs keep working when previewed.
+      if (normalized !== 'output/index.html' && normalized.startsWith('output/')) return;
+      const asset = normalized === 'output/index.html'
+        ? await archiveBundle({ runId, conversationId: conversation.serverSessionId, employeeId: conversation.employeeId })
+        : await archiveArtifact({ runId, relativePath: normalized, conversationId: conversation.serverSessionId, employeeId: conversation.employeeId });
       const current = assistantMessage.assets?.findIndex((item) => item.id === asset.id) ?? -1;
       if (current >= 0) assistantMessage.assets?.splice(current, 1, asset as Asset);
       else assistantMessage.assets?.push(asset as Asset);
@@ -959,6 +979,8 @@ export function useWorkspace() {
   };
   const addMessage = async (content: string, model: ProviderConfig, options: { employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
     const text = content.trim(); if (!text) return undefined;
+    chatBusy.value = true;
+    try {
     if (options.employeeId) currentEmployeeId.value = options.employeeId;
     if (options.newConversation) activeConversationId.value = null;
     let conversation = activeConversation.value;
@@ -1088,7 +1110,13 @@ export function useWorkspace() {
             const dependencyBrief = task.dependsOn
               .map((dep) => byId.get(dep))
               .filter((item): item is ScheduleTaskRun => Boolean(item?.summary.trim()))
-              .map((item) => `### ${item.title}\n${item.summary}`)
+              .map((item) => {
+                // Keep upstream context short — full agent narration + pasted CSS derails the next node.
+                const summary = item.summary.trim().slice(0, 1_200);
+                const assets = (item.assets ?? []).map((asset) => asset.name).filter(Boolean).slice(0, 12);
+                const assetLine = assets.length ? `\n上游已归档文件：${assets.join(', ')}` : '';
+                return `### ${item.title}\n${summary}${item.summary.trim().length > 1_200 ? '…' : ''}${assetLine}`;
+              })
               .join('\n\n');
             const upstreamAssets = task.dependsOn
               .flatMap((dep) => byId.get(dep)?.assets ?? [])
@@ -1105,32 +1133,44 @@ export function useWorkspace() {
               `任务目标：${task.objective}`,
               dependencyBrief ? `上游任务结果：\n${dependencyBrief}` : '',
               sharedWorkspace
-                ? '本轮自动调度共用同一工作区：上游交付文件已同步到当前工作区（通常在 output/ 下）。请直接读取/沿用这些文件，不要假设隔离环境。'
+                ? '本轮自动调度会把上游已归档的交付文件同步到当前运行工作区（对话模式）。请按文件名复用，不要把整份 CSS/JS 读回上下文。成品仍须写入 output/。'
                 : '上游交付仅以文字摘要提供；请依据摘要继续，不要依赖其它节点的隔离工作区路径。',
-              '请完成本任务并给出可执行结论。如需交付文件，请写入 output/ 目录。',
+              '【对话模式】成品文件必须写入 output/（如 output/index.html、output/assets/…）。网站类任务优先用 CSS 渐变/内联 SVG 占位图，禁止反复编写图片生成脚本。写成功后不要整文件回读。',
             ].filter(Boolean).join('\n\n');
 
+            // Dual workspace modes (pi / dsh / …):
+            // - Conversation mode (this chat auto-schedule path): NO projectWorkspacePath.
+            //   Agents write under output/ → artifact.created → session asset library.
+            // - Project mode (Projects / runProjectTask): pass projectWorkspacePath so the
+            //   agent cwd is the project root → project.file.published → project file tree.
+            // sharedWorkspace below is only a DAG handoff cache (materialize upstream assets),
+            // not project mode — never pass it as projectWorkspacePath.
             await streamChat({
               profile: {
                 id: agent.id,
                 name: labelEmployee(agent),
                 toolIds: skills.map((skill) => skill.id),
-                instructions: profileInstructions(agent, 'You are executing one node in an auto-scheduled DAG. Complete only this assigned task. Upstream deliverables may already exist in the shared workspace under output/. Prefer reusing them. Write new deliverables under output/ when needed. Reply in the user\'s language.'),
+                instructions: profileInstructions(agent, 'You are executing one node in an auto-scheduled DAG. Complete only this assigned task. Upstream deliverables may already exist under output/ — reuse by path, do not re-read entire CSS/JS into context. Write every finished user-facing file under output/. For websites prefer CSS gradients/inline SVG placeholders over image-generator scripts. Reply in the user\'s language. Keep visible progress updates on separate lines.'),
               },
               messages: [{ role: 'user', content: prompt }],
               model: toModelPayload(agentModel, { enableSearch: opts.enableBuiltinSearch }),
               skills,
               searchProviders: opts.searchProviders,
-              mcpConnections: opts.mcpConnections,
+              // dsh coding runs already have write/bash; baseline stock/filesystem MCPs
+              // slow boot and distract the agent (e.g. mcp filesystem vs dsh write).
+              mcpConnections: opts.engine === 'dsh' ? [] : opts.mcpConnections,
               knowledgeBases: opts.knowledgeBases,
-              ...(sharedWorkspace ? { projectWorkspacePath: sharedWorkspace } : {}),
               maxSteps: opts.maxSteps,
               runTimeoutMs: opts.runTimeoutMs,
               mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
               ...(opts.engine ? { engine: opts.engine } : {}),
               signal: runAbort.signal,
             }, (delta) => {
-              task.summary += delta;
+              const chunk = String(delta || '');
+              if (!chunk) return;
+              // Stream deltas already carry their own spaces/newlines — do not inject
+              // separators (that turns Chinese tokens into a vertical column in <pre>).
+              task.summary += chunk;
               bump();
             }, (activity) => {
               const existing = task.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
@@ -1189,8 +1229,12 @@ export function useWorkspace() {
               task.status = 'cancelled';
               task.error = cause instanceof Error ? cause.message : '已中止';
               markActivitiesInterrupted(task.activities);
-            } else if (task.summary.trim().length >= 80 || (task.assets?.length ?? 0) > 0) {
-              // Stream may drop at the end after useful work; prefer soft-complete over false failure.
+            } else if (
+              !isHardScheduleFailure(cause)
+              && isSoftCompletableStreamError(cause)
+              && (task.summary.trim().length >= 80 || (task.assets?.length ?? 0) > 0)
+            ) {
+              // Only soft-complete genuine mid-stream network drops after useful work.
               task.status = 'completed';
               task.error = undefined;
               if (sharedWorkspace && lastRunId) {
@@ -1199,17 +1243,48 @@ export function useWorkspace() {
             } else {
               task.status = 'failed';
               task.error = friendlyAssistantError(cause instanceof Error ? cause.message : '任务执行失败');
+              markActivitiesInterrupted(task.activities);
             }
           }
           bump();
         }));
+
+        // Fail fast: any hard failure cancels the rest of the DAG immediately.
+        const failedInWave = ready.some((id) => byId.get(id)?.status === 'failed');
+        if (failedInWave) {
+          for (const id of [...pending]) {
+            const task = byId.get(id)!;
+            task.status = 'cancelled';
+            task.error = '上游任务失败，已取消后续调度';
+            pending.delete(id);
+          }
+          bump();
+          break;
+        }
       }
 
       throwIfAborted();
 
       const failed = scheduleTasks.filter((task) => task.status === 'failed' || task.status === 'cancelled');
       const completed = scheduleTasks.filter((task) => task.status === 'completed');
-      assistantMessage.schedule!.status = failed.length && !completed.length ? 'failed' : 'completed';
+      const hardFailed = scheduleTasks.filter((task) => task.status === 'failed');
+      assistantMessage.schedule!.status = hardFailed.length
+        ? 'failed'
+        : failed.length && !completed.length
+          ? 'failed'
+          : 'completed';
+
+      if (hardFailed.length) {
+        const lead = hardFailed[0]!;
+        const detail = [lead.summary.trim(), lead.error ? `⚠ ${lead.error}` : '']
+          .filter(Boolean)
+          .join('\n\n');
+        assistantMessage.content = detail
+          || `⚠ 自动调度失败：${lead.error || '任务执行失败'}`;
+        appendAssistantNotice(assistantMessage, `⚠ ${hardFailed.length} 个任务失败，调度已中止（不再继续后续节点或最终汇总）。`);
+        bump();
+        return;
+      }
 
       const digest = completed.map((task) => {
         const name = labelEmployee(employees.value.find((item) => item.id === task.employeeId) ?? { id: task.employeeId, color: '#526fe0', initials: 'AI' } as Employee);
@@ -1282,6 +1357,8 @@ export function useWorkspace() {
         }
         void persist();
         return { conversationId: conversation.id, transcript: { prompt: userMessage.content, conversationId: conversation.id, assistantContent: assistantMessage.content, activities: assistantMessage.activities ?? [], approvals: assistantMessage.approvals ?? [], assets: (assistantMessage.assets ?? []).map((asset) => ({ id: asset.id, name: asset.name, sizeBytes: asset.sizeBytes })) } };
+      } finally {
+        if (activeRunAbort) activeRunAbort = null;
       }
     }
 
@@ -1503,6 +1580,9 @@ export function useWorkspace() {
     } finally {
       if (activeRunAbort === runAbort) activeRunAbort = null;
     }
+    } finally {
+      chatBusy.value = false;
+    }
   };
   const runAutomation = async (automation: Automation, model: ProviderConfig) => {
     const previousConversation = activeConversationId.value; const previousEmployee = currentEmployeeId.value;
@@ -1526,7 +1606,7 @@ export function useWorkspace() {
         id: employee.id,
         name: labelEmployee(employee),
         toolIds: skills.map((skill) => skill.id),
-        instructions: profileInstructions(employee, 'You are working on one assigned project task. Complete only this task, report concrete findings and deliverables in the user\'s language. Do not delegate further.'),
+        instructions: profileInstructions(employee, 'You are working on one assigned project task in PROJECT MODE. The workspace root is the shared project directory — write the real project tree there (do not wrap products in output/). Complete only this task, report concrete findings and deliverables in the user\'s language. Do not delegate further.'),
       },
       messages: [{ role: 'user', content: input.prompt }],
       model: toModelPayload(model, { enableSearch: opts.enableBuiltinSearch }),
@@ -1715,7 +1795,7 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
 
     // Phase 2 — fill objectives + contracts for the fixed structure.
     let detailOut = '';
-    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Use contract.maxSteps when one task obviously needs a materially larger or smaller tool-step budget than the default. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
+    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Set contract.maxSteps only when the task needs a budget different from the employee default. Research / compliance / evidence-brief tasks should use 8-12 steps; multi-page implementation may use a higher budget. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
     await streamChat({
       profile: { id: 'project-coordinator-detail', name: 'Project coordinator', instructions: 'Output valid JSON array only.', toolIds: [] },
       messages: [{ role: 'user', content: detailPrompt }],
@@ -1821,5 +1901,5 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
       await new Promise((resolve) => setTimeout(resolve, 350));
     }
   };
-  return { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load, setView, startChat, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride };
+  return { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, chatBusy, load, setView, startChat, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride };
 }

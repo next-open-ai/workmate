@@ -30,6 +30,15 @@ function dataDir(): string {
   return process.env.WORKMATE_DATA_DIR || path.join(os.homedir(), '.workmate');
 }
 
+function conversationStagingRoot(runId: string) {
+  const configured = process.env.WORKMATE_ASSET_STAGING_DIR?.trim() || process.env.WORKMATE_WORKSPACES_DIR?.trim();
+  return path.resolve(configured || path.join(dataDir(), 'assets', '.staging'), runId);
+}
+
+function legacyConversationWorkspaceRoot(runId: string) {
+  return path.resolve(dataDir(), 'workspaces', runId);
+}
+
 function databaseFile() {
   return path.join(dataDir(), 'workmate.sqlite');
 }
@@ -52,6 +61,9 @@ async function database(): Promise<SqlDatabase> {
       if (!cols.has('owner_user_id')) db.run('ALTER TABLE assets ADD COLUMN owner_user_id TEXT');
       if (!cols.has('access_scope')) db.run(`ALTER TABLE assets ADD COLUMN access_scope TEXT DEFAULT 'private'`);
       if (!cols.has('access_grants')) db.run('ALTER TABLE assets ADD COLUMN access_grants TEXT');
+      if (!cols.has('kind')) db.run(`ALTER TABLE assets ADD COLUMN kind TEXT DEFAULT 'file'`);
+      if (!cols.has('entry_path')) db.run('ALTER TABLE assets ADD COLUMN entry_path TEXT');
+      if (!cols.has('manifest_json')) db.run('ALTER TABLE assets ADD COLUMN manifest_json TEXT');
       db.run('CREATE INDEX IF NOT EXISTS assets_project_id ON assets(project_id)');
       // `output/` is a runtime-only delivery boundary.  Never expose it as a
       // user workspace folder, and keep linked project files at their natural
@@ -116,7 +128,7 @@ function parseAccessGrants(raw: unknown): AssetAccessGrant[] {
 }
 
 function mapAssetRow(row: unknown[]) {
-  const [id, name, relativePath, mimeType, sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative, orgId, ownerUserId, userId, accessScope, accessGrants] = row;
+  const [id, name, relativePath, mimeType, sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative, orgId, ownerUserId, userId, accessScope, accessGrants, kind, entryPath, manifestJson] = row;
   return {
     id: String(id),
     name: String(name),
@@ -135,6 +147,9 @@ function mapAssetRow(row: unknown[]) {
     userId: userId ? String(userId) : (ownerUserId ? String(ownerUserId) : null),
     accessScope: (accessScope === 'org-shared' || accessScope === 'delegated' ? accessScope : 'private') as 'private' | 'org-shared' | 'delegated',
     accessGrants: parseAccessGrants(accessGrants),
+    kind: kind === 'bundle' ? 'bundle' : 'file',
+    entryPath: entryPath ? String(entryPath) : null,
+    manifest: (() => { try { return manifestJson ? JSON.parse(String(manifestJson)) : null; } catch { return null; } })(),
   };
 }
 
@@ -142,7 +157,7 @@ function assetRows(result: Array<{ values?: unknown[][] }>) {
   return (result[0]?.values || []).map((row) => mapAssetRow(row));
 }
 
-const ASSET_SELECT = 'SELECT id, name, relative_path, mime_type, size_bytes, created_at, conversation_id, employee_id, run_id, sha256, project_id, workspace_relative, org_id, owner_user_id, user_id, access_scope, access_grants FROM assets';
+const ASSET_SELECT = 'SELECT id, name, relative_path, mime_type, size_bytes, created_at, conversation_id, employee_id, run_id, sha256, project_id, workspace_relative, org_id, owner_user_id, user_id, access_scope, access_grants, kind, entry_path, manifest_json FROM assets';
 
 async function listAssets(auth?: { orgId: string; userId: string }) {
   const db = await database();
@@ -175,8 +190,14 @@ async function archiveArtifact(value: { runId?: string; relativePath?: string; c
   if (parts[0] !== 'output' || parts.length < 2 || parts.some((part) => processDirs.has(part)) || !ext || neverExt.has(ext) || (base.startsWith('.') && base !== '.gitkeep')) {
     throw new Error('Only business deliverables under output/ can be archived to the asset library.');
   }
-  const workspaceRoot = path.resolve(dataDir(), 'workspaces', runId);
-  const source = path.resolve(workspaceRoot, relativePath);
+  let workspaceRoot = conversationStagingRoot(runId);
+  let source = path.resolve(workspaceRoot, relativePath);
+  // Retain read compatibility for runs created before staging moved under
+  // assets/.staging. New runs never use this legacy path.
+  if (!fs.existsSync(source)) {
+    workspaceRoot = legacyConversationWorkspaceRoot(runId);
+    source = path.resolve(workspaceRoot, relativePath);
+  }
   if (!source.startsWith(`${workspaceRoot}${path.sep}`) || !fs.existsSync(source) || !fs.statSync(source).isFile()) {
     throw new Error('Generated artifact is no longer available.');
   }
@@ -238,6 +259,55 @@ async function archiveArtifact(value: { runId?: string; relativePath?: string; c
   );
   flushDatabase(db);
   return { id, name, relativePath: relativeAssetPath, mimeType: assetMimeType(name), sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative, orgId, ownerUserId, userId, accessScope, accessGrants: parseAccessGrants(accessGrants) };
+}
+
+function bundleFiles(root: string, folder = root, out: Array<{ path: string; bytes: number; sha256: string; mimeType: string }> = []) {
+  for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const target = path.join(folder, entry.name);
+    if (entry.isDirectory()) bundleFiles(root, target, out);
+    else if (entry.isFile()) {
+      const relative = path.relative(root, target).split(path.sep).join('/');
+      const bytes = fs.statSync(target).size;
+      out.push({ path: relative, bytes, sha256: createHash('sha256').update(fs.readFileSync(target)).digest('hex'), mimeType: assetMimeType(relative) });
+    }
+  }
+  return out;
+}
+
+async function archiveBundle(value: Parameters<typeof archiveArtifact>[0]) {
+  const runId = String(value.runId || '');
+  let workspaceRoot = conversationStagingRoot(runId);
+  let source = path.join(workspaceRoot, 'output');
+  if (!fs.existsSync(source)) {
+    workspaceRoot = legacyConversationWorkspaceRoot(runId);
+    source = path.join(workspaceRoot, 'output');
+  }
+  if (!/^[a-f0-9-]{20,}$/i.test(runId) || !fs.existsSync(source) || !fs.statSync(source).isDirectory()) throw new Error('Bundle output is unavailable.');
+  const files = bundleFiles(source);
+  const entry = files.some((item) => item.path === 'index.html') ? 'index.html' : files[0]?.path;
+  if (!files.length || !entry) throw new Error('Bundle has no deliverable files.');
+  const db = await database();
+  const manifest = { version: 1, files, entryPath: entry };
+  const sha256 = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const name = path.basename(entry) === 'index.html' ? '网站交付包' : path.basename(entry);
+  const sizeBytes = files.reduce((n, f) => n + f.bytes, 0);
+  const existing = assetRows(db.exec(`${ASSET_SELECT} WHERE run_id = ? AND kind = 'bundle' LIMIT 1`, [runId]))[0];
+  const id = existing?.id || randomUUID();
+  const assetRoot = path.join(dataDir(), 'assets', id);
+  const folder = path.join(assetRoot, 'files');
+  const temporary = path.join(dataDir(), 'assets', `.bundle-${id}-${randomUUID()}`);
+  fs.mkdirSync(temporary, { recursive: true, mode: 0o700 });
+  fs.cpSync(source, path.join(temporary, 'files'), { recursive: true });
+  fs.rmSync(assetRoot, { recursive: true, force: true });
+  fs.renameSync(temporary, assetRoot);
+  const relativePath = path.relative(dataDir(), path.join(folder, entry)).split(path.sep).join('/');
+  if (existing) {
+    db.run('UPDATE assets SET name=?,relative_path=?,mime_type=?,size_bytes=?,sha256=?,entry_path=?,manifest_json=? WHERE id=?', [name, relativePath, 'application/x-workmate-bundle', sizeBytes, sha256, entry, JSON.stringify(manifest), id]);
+  } else {
+    db.run('INSERT INTO assets (id,name,relative_path,mime_type,size_bytes,created_at,conversation_id,employee_id,run_id,sha256,project_id,workspace_relative,org_id,owner_user_id,user_id,access_scope,access_grants,kind,entry_path,manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [id,name,relativePath,'application/x-workmate-bundle',sizeBytes,Date.now(),value.conversationId||null,value.employeeId||null,runId,sha256,value.projectId||null,'output',value.orgId||null,value.ownerUserId||null,value.ownerUserId||null,value.accessScope||'private',JSON.stringify(value.accessGrants||[]),'bundle',entry,JSON.stringify(manifest)]);
+  }
+  flushDatabase(db); return assetRows(db.exec(`${ASSET_SELECT} WHERE id = ?`, [id]))[0];
 }
 
 async function linkAssetsToProject(value: { projectId?: string; assetIds?: string[]; workspacePath?: string }) {
@@ -365,6 +435,19 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.post('/assets/archive-bundle', async (request, reply) => {
+    const auth = requireAuth(request); const body = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {};
+    try {
+      const orch = getOrchestrator();
+      const conversationId = typeof body.conversationId === 'string' ? body.conversationId : undefined;
+      const projectId = typeof body.projectId === 'string' ? body.projectId : undefined;
+      if (conversationId && !canWriteOwnedResource(await orch.chat.getChatSession(conversationId), auth, { allowLegacyUnowned: true })) throw new Error('Chat session not found.');
+      if (projectId && !canWriteOwnedResource(await orch.projects.getProject(projectId), auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
+      return await archiveBundle({ runId: String(body.runId || ''), conversationId, employeeId: typeof body.employeeId === 'string' ? body.employeeId : undefined, projectId, orgId: auth.orgId, ownerUserId: auth.userId });
+    }
+    catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) }); }
+  });
+
   app.post('/assets/link', async (request, reply) => {
     const auth = requireAuth(request);
     const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
@@ -445,5 +528,29 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  app.get('/assets/bundle-content', async (request, reply) => {
+    const auth = requireAuth(request); const query = request.query && typeof request.query === 'object' ? request.query as Record<string, unknown> : {};
+    try {
+      const { row } = await assetFile(String(query.assetId || '')); if (!canReadOwnedResource(row, auth) || row.kind !== 'bundle') throw new Error('Asset not found.');
+      const relative = String(query.path || row.entryPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!relative || relative.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid bundle path.');
+      const target = path.resolve(dataDir(), 'assets', row.id, 'files', relative); const root = path.resolve(dataDir(), 'assets', row.id, 'files');
+      if (!target.startsWith(`${root}${path.sep}`) || !fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error('Bundle file is unavailable.');
+      reply.header('content-type', assetMimeType(relative)); return reply.send(fs.createReadStream(target));
+    } catch (error) { return reply.code(404).send({ message: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get('/assets/bundle/:assetId/*', async (request, reply) => {
+    const auth = requireAuth(request); const params = request.params as { assetId: string; '*': string };
+    try {
+      const { row } = await assetFile(params.assetId); if (!canReadOwnedResource(row, auth) || row.kind !== 'bundle') throw new Error('Asset not found.');
+      const relative = String(params['*'] || row.entryPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!relative || relative.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid bundle path.');
+      const root = path.resolve(dataDir(), 'assets', row.id, 'files'); const target = path.resolve(root, relative);
+      if (!target.startsWith(`${root}${path.sep}`) || !fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error('Bundle file is unavailable.');
+      reply.header('content-type', assetMimeType(relative)); return reply.send(fs.createReadStream(target));
+    } catch (error) { return reply.code(404).send({ message: error instanceof Error ? error.message : String(error) }); }
   });
 };

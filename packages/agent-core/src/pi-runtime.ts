@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { Agent, type AgentMessage } from '@mariozechner/pi-agent-core';
 import {
   createAssistantMessageEventStream,
@@ -9,7 +8,15 @@ import {
   type SimpleStreamOptions,
 } from '@mariozechner/pi-ai';
 import type { AgentEvent, AgentProfile, AgentSkillRuntime, ModelConfig, RunModelRef, TokenUsage } from '@workmate/contracts';
-import { createSkillExecutionTools, harvestWorkspaceDeliverables, isBusinessDeliverablePath, promoteWorkspaceDeliverablesToProject } from './skill-runtime.js';
+import { createSkillExecutionTools, isBusinessDeliverablePath } from './skill-runtime.js';
+import { withLenientJsonParse } from './json-repair.js';
+import { sanitizeToolPayloadsInMessages } from './context-sanitize.js';
+import {
+  resolveAgentWorkspaceRoot,
+  resolveWorkspaceMode,
+  snapshotWorkspaceFiles,
+  workspaceModeContract,
+} from './workspace-mode.js';
 import { createWebSearchTools } from './search-runtime.js';
 import { createKnowledgeTools } from './knowledge-runtime.js';
 import { createExperienceTools, recallExperienceBlock } from './experience/index.js';
@@ -21,6 +28,7 @@ import {
   toPiModel,
 } from './pi-model.js';
 import { collectAgentTools, extractToolDetails } from './pi-tools.js';
+import { createPiCapabilityTools } from './pi-capability-adapter.js';
 import {
   discoverPiSkillsUnder,
   formatAuthorizedSkillsCatalog,
@@ -60,11 +68,16 @@ function streamWithIdleTimeout<TApi extends string>(
   arm();
   void (async () => {
     try {
-      const source = streamSimple(model, context, { ...options, signal });
-      for await (const event of source) {
-        arm();
-        output.push(event);
-      }
+      // openai-completions finishes tool calls with bare JSON.parse; models often
+      // emit literal newlines inside write_workspace_file content. Patch parse for
+      // this stream so tool args survive (see json-repair.ts).
+      await withLenientJsonParse(async () => {
+        const source = streamSimple(model, context, { ...options, signal });
+        for await (const event of source) {
+          arm();
+          output.push(event);
+        }
+      });
     } catch (error) {
       const message = timedOut
         ? `Model stream idle after ${Math.round(idleMs / 1000)}s`
@@ -95,6 +108,9 @@ function streamWithIdleTimeout<TApi extends string>(
 function friendlyModelError(raw: string) {
   if (/reasoning_content/i.test(raw)) {
     return 'DeepSeek 思考模式在工具多轮调用中要求回传 reasoning_content，当前链路已自动关闭 thinking。请重试本轮以生成最终结论。';
+  }
+  if (/Bad control character|Unterminated string|Bad escaped character|in string literal in JSON|Expected ',' or '}' after property value|Expected ',' or '\]'|JSON at position|Unexpected non-whitespace/i.test(raw)) {
+    return '工具参数 JSON 解析失败（常见原因：单次写入过大被截断，或字符串内未转义引号）。请缩短本次写入，或先写基础文件后用 edit 补充。';
   }
   if (/connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR/i.test(raw)) {
     return '网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。';
@@ -141,33 +157,50 @@ function preloadedSkillInstructions(skills: AgentSkillRuntime[]) {
     .join('\n\n');
 }
 
-function skillFirstExecutionContract() {
+function skillFirstExecutionContract(projectBound = false) {
   return [
     'Skill-first execution contract:',
     '1) If the user task matches an authorized Skill, follow that Skill on the first turn instead of doing generic environment exploration.',
     '2) Do not narrate internal rewrites, indecision, or self-corrections in the user-facing reply. Keep progress updates short and action-oriented.',
-    '3) Prefer one minimal deterministic execution path: prepare content, write the generator once, install only clearly needed dependencies, run it, then register/publish the deliverable. If the final file is already under output/, registration is only an idempotent confirmation: never copy or rename it into a second deliverable.',
+    projectBound
+      ? '3) Prefer one minimal deterministic execution path: write the real project files at the project root, verify them, then stop. Do not wrap the product in output/.'
+      : '3) Prefer one minimal deterministic execution path: prepare content, write the generator once, install only clearly needed dependencies, run it, then register/publish the deliverable. If the final file is already under output/, registration is only an idempotent confirmation: never copy or rename it into a second deliverable.',
     '4) Avoid low-value probes (extra filesystem checks, repeated existence checks, duplicate rewrites) unless the previous tool result created a concrete blocker.',
     '5) Use MCP/search tools only when they are directly relevant to the user request or required by the matched Skill. Do not probe unrelated domains just because a tool is available.',
     '6) For document-generation tasks (PDF/Word/slides/spreadsheets/reports/itineraries), skip unrelated finance/market/stock/crypto tools unless the user explicitly asked for live market data.',
     '7) For artifact requests, aim to finish within a small number of tool steps; retry only with a specific fix derived from the last error.',
-    '8) Assume the run workspace already supports output/ deliverables. Put final user-facing files under output/ directly.',
+    projectBound
+      ? '8) This is a project-bound run. Write the real project tree at the workspace root (index.html, src/, assets/, …). Do not wrap the product in output/.'
+      : '8) Assume the run workspace already supports output/ deliverables. Put final user-facing files under output/ directly.',
     '9) For Python PDF generation, prefer standard library plus already-available packages first. Do not call install_python_dependency unless a concrete script/import failure shows the missing module.',
-    '10) For PDF tasks, avoid exploratory filesystem/MCP probes when the run workspace tools already cover writing and executing the generator.',
+    '10) For PDF / document / brief / website tasks, do NOT use filesystem MCP or finance/market MCP. For code and websites, use the standard read/write/edit/bash tools in the authorized workspace. Write a clean initial file, then use edit for focused follow-up changes. Once a final user-facing file is verified, call commit_artifact exactly once; only committed artifacts enter the asset library.',
     '11) If local project context is sparse, stop probing after 1-2 checks, state the assumption once, and proceed to the deliverable instead of repeatedly re-checking the workspace.',
-    '12) For research /素材整理 /设计方案 tasks, do not spend tool steps narrating your plan. Search or inspect only what directly changes the deliverable, then write the result.',
+    '12) For research /素材整理 /设计方案 /简报 tasks, do not spend tool steps narrating your plan. Search or inspect only what directly changes the deliverable, then write the result once.',
     '13) Never emit process narration such as "Let me think", "Let me check", "I will first", "我先看一下" as the final answer body. Use tools or write the file directly; keep visible text for conclusions and deliverables only.',
     '14) For project-task runs with explicit output filenames, prefer writing those files immediately after the minimum necessary inspection. If a public site blocks crawling or a fetch tool errors once, do not spiral into retries; proceed with the best grounded draft and clearly note any evidence limits inside the file.',
+    '15) Do not rewrite the same deliverable repeatedly to fix tiny typos unless acceptance requires it. Prefer one clean write, then stop.',
+    '16) After write_workspace_file / finish_workspace_write succeeds, do NOT read the whole file back. Trust path/bytes. Path-only history stubs mean success on disk — never re-call write with only path. Prefer CSS gradients / inline SVG over image-generator scripts.',
+    '17) Never paste prior CSS/JS source into your reasoning. Continue with the next unfinished page file.',
+    '18) Command/script outputs appear as [command-result] envelopes (head/tail). Treat them as truncated logs; do not ask to re-dump full stdout.',
   ].join('\n');
 }
 
 function looksLikeDocumentArtifactTask(userText: string, skills: AgentSkillRuntime[]) {
   const text = `${userText}\n${skills.map((skill) => `${skill.name}\n${skill.description}\n${skill.instructions || ''}`).join('\n')}`.toLowerCase();
-  return /(pdf|docx?|word|ppt|slides?|excel|spreadsheet|report|itinerary|travel|guide|brochure|行程|旅游|旅行|攻略|报告|手册|文档|海报)/i.test(text);
+  return /(pdf|docx?|word|ppt|slides?|excel|spreadsheet|report|itinerary|travel|guide|brochure|brief|readme|markdown|\.md|\.html|html|css|网站|页面|落地页|简报|验收|行程|旅游|旅行|攻略|报告|手册|文档|海报)/i.test(text);
 }
 
-function looksLikeFinanceTask(userText: string) {
-  return /(stock|stocks|market|markets|finance|financial|fund|crypto|trading|证券|股票|基金|行情|金融|大盘|港股|美股|加密)/i.test(userText);
+/** Live market / quote pulls — not brand tone words like 金融质感 / 证券从业背景. */
+function looksLikeLiveMarketTask(userText: string) {
+  return /(实时行情|今日行情|股价|报价|指数走势|k线|大盘走势|涨跌幅|get_.*quote|stock\s*sdk|akshare|拉取.*证券数据|证券数据|fund net value|crypto\s*price)/i.test(userText);
+}
+
+function looksLikeWorkspaceWritingTask(userText: string) {
+  return /(write_workspace_file|交付文件|写入.*\.md|产出.*页面|项目根|workspace root|output\/|html|css|简报|验收清单|readme)/i.test(userText);
+}
+
+function prefersNativeCodingTools(userText: string) {
+  return /(网站|网页|页面|html|css|javascript|typescript|react|vue|前端|landing page|website|web app|代码|code)/i.test(userText);
 }
 
 function sanitizeMcpPrefix(label: string) {
@@ -178,13 +211,36 @@ function sanitizeMcpPrefix(label: string) {
     .slice(0, 24);
 }
 
+/**
+ * Drop MCP tools that burn steps without helping the task.
+ * - filesystem always conflicts with write_workspace_file / project cwd
+ * - finance MCPs stay only for live market pulls (not “金融质感” brand copy)
+ */
 export function filterMcpToolsetForTask(
   mcp: Awaited<ReturnType<typeof loadMcpToolset>>,
   userText: string,
   skills: AgentSkillRuntime[],
+  opts?: { projectBound?: boolean },
 ) {
-  if (!looksLikeDocumentArtifactTask(userText, skills) || looksLikeFinanceTask(userText)) return mcp;
-  const blockedPrefixes = new Set(['akshare', 'tushare', 'sequential_thinking', 'sequentialthinking', 'filesystem', 'fetch']);
+  const writing = looksLikeDocumentArtifactTask(userText, skills)
+    || looksLikeWorkspaceWritingTask(userText)
+    || Boolean(opts?.projectBound);
+  const liveMarket = looksLikeLiveMarketTask(userText);
+  const needsFetch = /(竞品|调研|抓取|crawl|scrape|官网内容|网页正文)/i.test(userText);
+
+  const blockedPrefixes = new Set<string>();
+  if (writing || opts?.projectBound) {
+    blockedPrefixes.add('filesystem');
+    blockedPrefixes.add('sequential_thinking');
+    blockedPrefixes.add('sequentialthinking');
+  }
+  if (writing && !liveMarket) {
+    blockedPrefixes.add('akshare');
+    blockedPrefixes.add('tushare');
+    if (!needsFetch) blockedPrefixes.add('fetch');
+  }
+  if (!blockedPrefixes.size) return mcp;
+
   const keepTools = mcp.tools.filter((tool) => {
     const lower = tool.name.toLowerCase();
     for (const prefix of blockedPrefixes) {
@@ -214,6 +270,17 @@ function toolInputSummary(toolName: string, input: unknown) {
     const mode = value.mode === 'append' ? '追加' : '写入';
     return `正在${mode}运行工作区文件：${String(value.path || '')}`;
   }
+  if (toolName === 'write') return `正在写入工作区文件：${String(value.path || '')}`;
+  if (toolName === 'edit') return `正在更新工作区文件：${String(value.path || '')}`;
+  if (toolName === 'read') return `正在读取工作区文件：${String(value.path || '')}`;
+  if (toolName === 'bash') return '正在执行受控工作区命令。';
+  if (toolName === 'commit_artifact') return `正在提交业务交付物：${String(value.path || '')}`;
+  if (toolName === 'start_workspace_write') return `正在开始分阶段写入：${String(value.path || '')}`;
+  if (toolName === 'append_workspace_write') {
+    const seq = typeof value.seq === 'number' ? ` seq=${value.seq}` : '';
+    return `正在追加分阶段写入片段：${String(value.writeId || '').slice(0, 8)}…${seq}`;
+  }
+  if (toolName === 'finish_workspace_write') return `正在提交分阶段写入：${String(value.writeId || '').slice(0, 8)}…`;
   if (toolName === 'publish_to_project') {
     const dest = value.destPath ? ` → ${String(value.destPath)}` : '';
     return `正在发布到项目空间：${String(value.path || '')}${dest}`;
@@ -263,6 +330,24 @@ function toolResultSummary(toolName: string, output: unknown) {
   }
   if (toolName === 'write_workspace_file') {
     const mode = value.mode === 'append' ? '已追加' : '已写入';
+    return `${mode} ${String(value.path || '运行工作区文件')}${typeof value.totalBytes === 'number' ? `（共 ${value.totalBytes} 字节）` : '。'}`;
+  }
+  if (toolName === 'write') return '已写入工作区文件。';
+  if (toolName === 'edit') return '已更新工作区文件。';
+  if (toolName === 'read') return '已读取工作区文件。';
+  if (toolName === 'bash') return '工作区命令已执行。';
+  if (toolName === 'commit_artifact') {
+    return `交付物已提交：${String(value.path || '')}${typeof value.bytes === 'number' ? `（${value.bytes} 字节）` : ''}`;
+  }
+  if (toolName === 'start_workspace_write') {
+    return `已开始分阶段写入：${String(value.path || '')}（writeId ${String(value.writeId || '').slice(0, 8)}…）`;
+  }
+  if (toolName === 'append_workspace_write') {
+    const seq = typeof value.seq === 'number' ? `seq=${value.seq} ` : '';
+    return `已追加 ${seq}${String(value.appended ?? 0)} 字节（累计 ${String(value.totalBytes ?? 0)}，${String(value.parts ?? 0)} 片）`;
+  }
+  if (toolName === 'finish_workspace_write') {
+    const mode = value.mode === 'append' ? '已追加提交' : '已提交写入';
     return `${mode} ${String(value.path || '运行工作区文件')}${typeof value.totalBytes === 'number' ? `（共 ${value.totalBytes} 字节）` : '。'}`;
   }
   if (toolName === 'publish_to_project') {
@@ -391,7 +476,7 @@ function yieldArtifactEvents(
       }
     }
   }
-  if (toolName === 'write_workspace_file' || toolName === 'register_deliverable') {
+  if (toolName === 'write_workspace_file' || toolName === 'finish_workspace_write' || toolName === 'register_deliverable' || toolName === 'commit_artifact') {
     if (value.deliverable === true && typeof value.path === 'string') pushDeliverable(value.path);
   }
   if (toolName === 'publish_to_project') {
@@ -434,6 +519,8 @@ export async function* streamAgentReply(input: {
 }): AsyncGenerator<AgentEvent> {
   const runId = input.runId?.trim() || crypto.randomUUID();
   const projectRoot = input.projectWorkspacePath?.trim() || '';
+  const workspaceMode = resolveWorkspaceMode(projectRoot);
+  const projectBound = workspaceMode === 'project';
   yield { type: 'run.started', runId };
 
   const knowledgeTools = createKnowledgeTools({ knowledgeBases: input.knowledgeBases, model: input.model });
@@ -483,7 +570,7 @@ export async function* streamAgentReply(input: {
     const libraryDir = process.env.WORKMATE_SKILLS_DIR?.trim();
     const discovered = libraryDir ? discoverPiSkillsUnder(libraryDir) : [];
     const skills = mergeDiscoveredSkillDescriptions(skillsRaw, discovered);
-    const mcp = filterMcpToolsetForTask(mcpLoaded, lastUserText, skills);
+    const mcp = filterMcpToolsetForTask(mcpLoaded, lastUserText, skills, { projectBound });
     const preloadedSkills = preloadedSkillInstructions(skills);
     const kbLabels = (input.knowledgeBases ?? []).filter((item) => item.enabled).map((item) => item.name);
     const searchTools = createWebSearchTools(input.searchProviders ?? []);
@@ -506,11 +593,9 @@ export async function* streamAgentReply(input: {
       experienceTools.length
         ? 'Agent experience memory is available for this employee only. After a meaningful multi-step success (or a hard-won pitfall), call save_experience with a short structured card (situation/action/pitfall/whenNot). Use load_experience when pivoting to a task that may match prior work. Low-similarity loads return empty—do not invent memories.'
         : '',
-      skillFirstExecutionContract(),
-      projectRoot
-        ? 'This run is bound to a shared project workspace. Keep generators under the run workspace (prefer scripts/). Put finished business products under output/ (or write_workspace_file with deliverable=true / register_deliverable). Prefer publish_to_project for each finished output/ file so it appears in the project tree mid-run; end-of-run auto-promotes remaining output/ files.'
-        : '',
-      'Associated Skill instructions are preloaded before the first model turn whenever available, so prefer those specialized procedures immediately instead of exploring generic alternatives. Preloading is for reasoning only: if you need packaged Skill files or bundled Skill scripts, call load_skill for that relevant user Skill first. Workspace and artifact operations are platform Tools, not a Skill: follow each Tool schema and result exactly. Skill files are read-only. Finished business deliverables MUST be under output/, while inputs and temporary files MUST stay outside output/. Never claim an operation ran unless its Tool returned a successful result. For artifact requests, do not stop at a plan: produce and verify the file, then register it. Once a verified deliverable exists, stop calling tools and return the result. In the user-facing answer, refer to the delivered asset by its filename, not its internal output/ path. Use reasonable defaults for non-critical details; if a required permission, script, dependency, or output path is unavailable, state the exact blocker and the one next user action.',
+      skillFirstExecutionContract(projectBound),
+      workspaceModeContract(workspaceMode),
+      'Associated Skill instructions are preloaded before the first model turn whenever available, so prefer those specialized procedures immediately instead of exploring generic alternatives. Preloading is for reasoning only: if you need packaged Skill files or bundled Skill scripts, call load_skill for that relevant user Skill first. Workspace and artifact operations are platform Tools, not a Skill: follow each Tool schema and result exactly. Skill files are read-only. Never claim an operation ran unless its Tool returned a successful result. For artifact requests, do not stop at a plan: produce and verify the file, then commit it with commit_artifact. Once a verified deliverable exists, stop calling tools and return the result. In the user-facing answer, refer to the delivered asset by its filename, not its internal workspace path. Use reasonable defaults for non-critical details; if a required permission, script, dependency, or output path is unavailable, state the exact blocker and the one next user action.',
       'Agent runtime: Workmate pi-agent-core + pi-coding-agent skills catalog.',
     ].filter(Boolean).join('\n\n');
 
@@ -521,8 +606,27 @@ export async function* streamAgentReply(input: {
     const maxSteps = requestedMaxSteps;
     const piModel = toPiModel(input.model);
     const onPayload = createChatCompletionsPayloadPatch(input.model);
+    const workspaceRoot = resolveAgentWorkspaceRoot({
+      runId,
+      projectWorkspacePath: projectRoot || undefined,
+    });
+    const platformTools = createSkillExecutionTools({ skills, runId, projectRoot: projectRoot || undefined, workspaceAccess: input.workspaceAccess });
+    // Websites and code use Pi's native tools. Keep legacy workspace tools only
+    // for non-coding Skills during the migration window.
+    const skillTools = prefersNativeCodingTools(lastUserText)
+      ? platformTools.filter((tool) => !new Set([
+        'write_workspace_file', 'start_workspace_write', 'append_workspace_write',
+        'finish_workspace_write', 'register_deliverable',
+      ]).has(tool.name))
+      : platformTools;
     const agentTools = collectAgentTools(
-      createSkillExecutionTools({ skills, runId, projectRoot: projectRoot || undefined, workspaceAccess: input.workspaceAccess }),
+      createPiCapabilityTools({
+        runId,
+        workspaceRoot,
+        workspaceAccess: input.workspaceAccess ?? 'write',
+        workspaceMode,
+      }),
+      skillTools,
       searchTools,
       knowledgeTools,
       experienceTools,
@@ -536,6 +640,9 @@ export async function* streamAgentReply(input: {
     let usageSteps = 0;
     const modelRef = modelRefFromConfig(input.model);
     const emittedArtifactPaths = new Set<string>();
+    const projectFilesBefore = projectBound
+      ? await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>())
+      : null;
 
     const agent = new Agent({
       initialState: {
@@ -546,13 +653,17 @@ export async function* streamAgentReply(input: {
         messages: [],
       },
       convertToLlm,
-      transformContext: async (messages, signal) =>
-        compactAgentContext({
-          messages,
+      // Per-turn hygiene then optional summary (docs/design/context-hygiene.md):
+      // strip thinking → path-only writes → wrap/truncate command results → compact.
+      transformContext: async (messages, signal) => {
+        const sanitized = sanitizeToolPayloadsInMessages(messages);
+        return compactAgentContext({
+          messages: sanitized,
           model: input.model,
           piModel,
           signal,
-        }),
+        });
+      },
       getApiKey: () => input.model.apiKey || (input.model.provider === 'ollama' ? 'ollama' : undefined),
       streamFn: (model, context, options) =>
         streamWithIdleTimeout(model, context, {
@@ -709,31 +820,12 @@ export async function* streamAgentReply(input: {
               : '工具未能完成请求；请查看上方执行记录中的权限或输入原因。',
           });
         }
-        if (projectRoot) {
-          const workspaceRoot = path.join(
-            process.env.WORKMATE_WORKSPACES_DIR || path.join(process.cwd(), '.workmate-workspaces'),
-            runId,
-          );
-          const published = await promoteWorkspaceDeliverablesToProject(workspaceRoot, projectRoot);
-          for (const item of published) {
-            enqueue({ type: 'project.file.published', runId, path: item.path, projectPath: item.projectPath });
-            const normalized = item.path.replace(/\\/g, '/').replace(/^\/+/, '');
-            if (!isBusinessDeliverablePath(normalized) || emittedArtifactPaths.has(normalized)) continue;
-            emittedArtifactPaths.add(normalized);
-            enqueue({ type: 'artifact.created', runId, path: normalized });
-          }
-        } else {
-          // Non-project runs: still stage root PDFs into output/ and emit asset cards.
-          const workspaceRoot = path.join(
-            process.env.WORKMATE_WORKSPACES_DIR || path.join(process.cwd(), '.workmate-workspaces'),
-            runId,
-          );
-          const harvested = await harvestWorkspaceDeliverables(workspaceRoot).catch(() => []);
-          for (const relative of harvested) {
-            const normalized = relative.replace(/\\/g, '/').replace(/^\/+/, '');
-            if (!isBusinessDeliverablePath(normalized) || emittedArtifactPaths.has(normalized)) continue;
-            emittedArtifactPaths.add(normalized);
-            enqueue({ type: 'artifact.created', runId, path: normalized });
+        if (projectBound && projectFilesBefore) {
+          // Project mode: cwd is project root — publish changed files (aligned with dsh).
+          const after = await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>());
+          for (const [relative, fingerprint] of after) {
+            if (projectFilesBefore.get(relative) === fingerprint) continue;
+            enqueue({ type: 'project.file.published', runId, path: relative, projectPath: relative });
           }
         }
         enqueue({ type: 'run.completed', runId });

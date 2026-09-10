@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, screen, protoco
 const { fork, execFile, spawnSync } = require('node:child_process');
 const { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } = require('node:fs');
 const { createHash, randomBytes, randomUUID } = require('node:crypto');
-const { tmpdir } = require('node:os');
+const { homedir, tmpdir } = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const {
@@ -408,6 +408,8 @@ function readAssetPreview(assetId) {
 }
 
 function registerAssetPreviewRoot(assetId) {
+  const bundleRoot = path.join(storageRoot(), 'assets', String(assetId || ''), 'files');
+  if (existsSync(bundleRoot) && statSync(bundleRoot).isDirectory()) return registerPreviewRoot(bundleRoot);
   const { target } = assetFile(assetId);
   return registerPreviewRoot(path.dirname(target));
 }
@@ -422,6 +424,8 @@ async function openAbsolutePathInBrowser(absolutePath) {
 }
 
 function openAssetInBrowser(assetId) {
+  const bundleEntry = path.join(storageRoot(), 'assets', String(assetId || ''), 'files', 'index.html');
+  if (existsSync(bundleEntry)) return openAbsolutePathInBrowser(bundleEntry);
   const { target } = assetFile(assetId);
   return openAbsolutePathInBrowser(target);
 }
@@ -1062,34 +1066,73 @@ function bundledAgentscopePython(runtimeRoot = bundledAgentscopeRoot()) {
   return 'python3';
 }
 
+/**
+ * Packaged Electron GUI apps inherit a tiny PATH (no nvm / Homebrew).
+ * Prepend common Node/npm locations so API child can run on-demand installs.
+ */
+function enrichDesktopPathEnv(base = process.env) {
+  const home = homedir();
+  const extras = [];
+  const push = (dir) => {
+    if (dir && existsSync(dir) && !extras.includes(dir)) extras.push(dir);
+  };
+  if (process.platform === 'darwin') {
+    push('/opt/homebrew/bin');
+    push('/usr/local/bin');
+  } else if (process.platform === 'linux') {
+    push('/usr/local/bin');
+    push('/home/linuxbrew/.linuxbrew/bin');
+  }
+  push(path.join(home, '.local', 'bin'));
+  push(path.join(home, '.volta', 'bin'));
+  push(path.join(home, '.fnm', 'current', 'bin'));
+  push(path.join(home, '.asdf', 'shims'));
+  const nvmRoot = (process.env.NVM_DIR || '').trim() || path.join(home, '.nvm');
+  const nvmVersions = path.join(nvmRoot, 'versions', 'node');
+  if (existsSync(nvmVersions)) {
+    try {
+      const versions = readdirSync(nvmVersions)
+        .filter((name) => /^v\d+\.\d+\.\d+/.test(name))
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      for (const version of versions.slice(0, 8)) {
+        push(path.join(nvmVersions, version, 'bin'));
+      }
+    } catch (_) { /* ignore */ }
+  }
+  const sep = path.delimiter;
+  const current = base.PATH || base.Path || '';
+  return { ...base, PATH: [...extras, ...String(current).split(sep).filter(Boolean)].join(sep) };
+}
+
 function startApi() {
   const agentscopeRoot = process.env.WORKMATE_AGENTSCOPE_ROOT || bundledAgentscopeRoot();
   const dshRoot = siblingDshRoot();
+  const childEnv = enrichDesktopPathEnv({
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    WORKMATE_API_PORT: String(apiPort),
+    WORKMATE_INTERNAL_TOKEN: apiInternalToken,
+    WORKMATE_DATA_DIR: storageRoot(),
+    WORKMATE_SKILLS_DIR: path.join(storageRoot(), 'skills'),
+    WORKMATE_WORKSPACES_DIR: path.join(storageRoot(), 'workspaces'),
+    WORKMATE_KNOWLEDGE_DIR: path.join(storageRoot(), 'knowledge'),
+    WORKMATE_EXPERIENCE_DIR: path.join(storageRoot(), 'experience'),
+    // Do NOT default-inject WORKMATE_AGENT_ENGINE=pi — that permanently
+    // overrides employee/runtime engine settings. Only forward when the
+    // parent process already set it (ops / explicit shell export).
+    ...(process.env.WORKMATE_AGENT_ENGINE
+      ? { WORKMATE_AGENT_ENGINE: process.env.WORKMATE_AGENT_ENGINE }
+      : {}),
+    ...(dshRoot ? { WORKMATE_DSH_ROOT: dshRoot } : {}),
+    WORKMATE_AGENTSCOPE_ENABLED: process.env.WORKMATE_AGENTSCOPE_ENABLED || '0',
+    WORKMATE_AGENTSCOPE_PYTHON: bundledAgentscopePython(agentscopeRoot),
+    WORKMATE_AGENTSCOPE_ROOT: agentscopeRoot,
+    // The API is unpacked under Resources together with its minimal
+    // production dependency closure, not the desktop workspace node_modules.
+    ...(app.isPackaged ? { NODE_PATH: path.join(process.resourcesPath, 'api', 'node_deps') } : {}),
+  });
   apiProcess = fork(apiEntry(), [], {
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      WORKMATE_API_PORT: String(apiPort),
-      WORKMATE_INTERNAL_TOKEN: apiInternalToken,
-      WORKMATE_DATA_DIR: storageRoot(),
-      WORKMATE_SKILLS_DIR: path.join(storageRoot(), 'skills'),
-      WORKMATE_WORKSPACES_DIR: path.join(storageRoot(), 'workspaces'),
-      WORKMATE_KNOWLEDGE_DIR: path.join(storageRoot(), 'knowledge'),
-      WORKMATE_EXPERIENCE_DIR: path.join(storageRoot(), 'experience'),
-      // Do NOT default-inject WORKMATE_AGENT_ENGINE=pi — that permanently
-      // overrides employee/runtime engine settings. Only forward when the
-      // parent process already set it (ops / explicit shell export).
-      ...(process.env.WORKMATE_AGENT_ENGINE
-        ? { WORKMATE_AGENT_ENGINE: process.env.WORKMATE_AGENT_ENGINE }
-        : {}),
-      ...(dshRoot ? { WORKMATE_DSH_ROOT: dshRoot } : {}),
-      WORKMATE_AGENTSCOPE_ENABLED: process.env.WORKMATE_AGENTSCOPE_ENABLED || '0',
-      WORKMATE_AGENTSCOPE_PYTHON: bundledAgentscopePython(agentscopeRoot),
-      WORKMATE_AGENTSCOPE_ROOT: agentscopeRoot,
-      // The API is unpacked under Resources together with its minimal
-      // production dependency closure, not the desktop workspace node_modules.
-      ...(app.isPackaged ? { NODE_PATH: path.join(process.resourcesPath, 'api', 'node_deps') } : {}),
-    },
+    env: childEnv,
     stdio: 'inherit',
   });
   // M0 keyring: the child requests a decrypted snapshot of model and

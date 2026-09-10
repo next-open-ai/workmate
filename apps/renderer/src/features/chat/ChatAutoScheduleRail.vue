@@ -56,9 +56,10 @@ const planningHints = computed(() => [
 ]);
 
 watch(
-  () => props.schedule.selectedTaskId,
-  (id) => {
-    if (id) detailOpen.value = true;
+  () => props.schedule.status,
+  (status) => {
+    // New planning round: keep the rail, do not reopen agent detail overlay.
+    if (status === 'planning') detailOpen.value = false;
   },
 );
 
@@ -75,6 +76,28 @@ function employeeInitials(id: EmployeeId) {
   const raw = props.employees.find((item) => item.id === id)?.initials || id.slice(0, 2);
   return String(raw).slice(0, 2).toUpperCase();
 }
+
+/** Repair summaries corrupted by per-chunk newlines (vertical CJK columns). */
+function formatScheduleSummary(raw: string) {
+  const text = String(raw || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return '';
+  const lines = text.split('\n');
+  const shortLines = lines.filter((line) => line.trim().length > 0 && line.trim().length <= 12).length;
+  const nonEmpty = lines.filter((line) => line.trim().length > 0).length;
+  // If most lines are tiny fragments, rejoin into readable paragraphs.
+  if (nonEmpty >= 4 && shortLines / nonEmpty >= 0.6) {
+    return lines
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('')
+      .replace(/([。！？；!?;])\s*/g, '$1\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+  return text.replace(/\n{3,}/g, '\n\n');
+}
+
+const detailSummary = computed(() => formatScheduleSummary(selectedTask.value?.summary || ''));
 
 function taskStateLabel(task: ScheduleTaskRun) {
   return ({
@@ -107,6 +130,7 @@ function statusClass(status: ScheduleTaskRun['status']) {
 }
 
 function tileClass(task: ScheduleTaskRun) {
+  // Highlight running agents on the rail; detail overlay only opens on explicit click.
   if (selectedTask.value?.id === task.id && detailOpen.value) {
     return 'border-[var(--accent)] bg-[var(--accent-soft)] shadow-sm';
   }
@@ -305,14 +329,20 @@ function closeDetail() {
         <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           <article class="rounded-2xl border border-[var(--border)] p-4">
             <h3 class="text-sm font-bold">{{ selectedTask.title }}</h3>
-            <p class="mt-1 text-xs leading-5 text-[var(--muted)]">{{ selectedTask.objective }}</p>
+            <div class="mt-2 rounded-xl border border-[var(--border)]/80 bg-[var(--surface-muted)]/40 px-3 py-2">
+              <p class="text-[10px] font-bold tracking-wide text-[var(--muted)]">任务目标</p>
+              <p class="mt-1 text-xs leading-5 text-[var(--text)]">{{ selectedTask.objective }}</p>
+            </div>
             <p v-if="selectedTask.error" class="mt-3 rounded-lg bg-rose-500/10 px-2.5 py-2 text-xs text-rose-700">{{ selectedTask.error }}</p>
-            <pre
-              v-if="selectedTask.summary"
-              class="mt-3 max-h-[50vh] overflow-y-auto whitespace-pre-wrap rounded-xl bg-[var(--surface-muted)] p-3 font-sans text-xs leading-5"
-            >{{ selectedTask.summary }}</pre>
+            <div v-if="detailSummary" class="mt-3 min-w-0">
+              <p class="text-[10px] font-bold tracking-wide text-[var(--muted)]">执行进展</p>
+              <div
+                class="mt-1.5 max-h-[42vh] w-full min-w-0 overflow-y-auto break-words rounded-xl bg-[var(--surface-muted)] p-3 text-xs leading-6 text-[var(--text)] whitespace-pre-wrap [overflow-wrap:anywhere]"
+              >{{ detailSummary }}</div>
+            </div>
             <p v-else class="mt-3 text-xs text-[var(--muted)]">{{ t('chat.autoScheduleNoOutput') }}</p>
             <div v-if="selectedTask.activities?.length" class="mt-3 space-y-1">
+              <p class="text-[10px] font-bold tracking-wide text-[var(--muted)]">工具活动 · {{ selectedTask.activities.length }}</p>
               <p
                 v-for="(activity, index) in selectedTask.activities"
                 :key="`${activity.toolName}-${index}`"
@@ -328,6 +358,12 @@ function closeDetail() {
                 <li v-for="asset in selectedTask.assets" :key="asset.id" class="truncate">{{ asset.name }}</li>
               </ul>
             </div>
+            <p
+              v-else-if="selectedTask.status === 'running'"
+              class="mt-3 rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2 text-[11px] leading-5 text-[var(--muted)]"
+            >
+              任务仍在执行中。成品需写入 <code class="rounded bg-[var(--surface-muted)] px-1">output/</code>，通常在本节点结束后才会归档到对话资产区。
+            </p>
           </article>
         </div>
       </aside>

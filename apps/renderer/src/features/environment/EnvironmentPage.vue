@@ -7,11 +7,20 @@ import {
   detectPlatform,
   remediationForCheck,
 } from '../../services/environment-remediation.js';
+import DshInstallProgressPanel from '../dsh/DshInstallProgressPanel.vue';
+import {
+  DSH_ENV_CHECK_ID,
+  DSH_ENV_FIX_ACTION_ID,
+  dshInstallState,
+  installDshRuntimeWithProgress,
+} from '../dsh';
 
 /**
- * 「环境检查」页面：启动时体检结果的可视化（Python/工具链/数据目录），
- * 缺项给出可执行的修复指引、一键修复与 Docker 片段。
+ * 「环境检查」页面：启动时体检结果的可视化，
+ * 缺项给出可执行的修复指引、一键修复与 Docker 片段；支持返回上一层。
  */
+
+const emit = defineEmits<{ close: []; back: [] }>();
 
 const report = computed(() => environmentState.report.value);
 const runStatus = computed(() => environmentState.runStatus.value);
@@ -22,23 +31,58 @@ const copiedKey = ref('');
 const fixingId = ref('');
 const fixMessage = ref('');
 const fixError = ref('');
+const expandedIds = ref<Set<string>>(new Set());
 
-const stateMeta: Record<'ok' | 'warn' | 'error', { label: string; badge: string; dot: string }> = {
-  ok: { label: '正常', badge: 'bg-emerald-500/10 text-emerald-600', dot: 'bg-emerald-500' },
-  warn: { label: '建议处理', badge: 'bg-amber-500/10 text-amber-600', dot: 'bg-amber-500' },
-  error: { label: '需要处理', badge: 'bg-rose-500/10 text-rose-600', dot: 'bg-rose-500' },
+const stateMeta: Record<'ok' | 'warn' | 'error', { label: string; badge: string; rail: string; soft: string }> = {
+  ok: { label: '正常', badge: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400', rail: 'bg-emerald-500', soft: 'border-emerald-500/20' },
+  warn: { label: '建议处理', badge: 'bg-amber-500/12 text-amber-700 dark:text-amber-400', rail: 'bg-amber-500', soft: 'border-amber-500/25' },
+  error: { label: '需要处理', badge: 'bg-rose-500/12 text-rose-700 dark:text-rose-400', rail: 'bg-rose-500', soft: 'border-rose-500/25' },
 };
 
-const statusText = {
-  idle: '尚未检查',
-  checking: '检查中…',
-  ready: '已检查',
-};
+const overall = computed(() => {
+  const summary = report.value?.summary;
+  if (!summary) return { label: '尚未检查', tone: 'text-[var(--muted)]', bar: 'bg-[var(--border)]' };
+  if (summary.error > 0) return { label: '有待处理项', tone: 'text-rose-600', bar: 'bg-rose-500' };
+  if (summary.warn > 0) return { label: '建议优化', tone: 'text-amber-600', bar: 'bg-amber-500' };
+  return { label: '环境就绪', tone: 'text-emerald-600', bar: 'bg-emerald-500' };
+});
+
+const okRatio = computed(() => {
+  const total = report.value?.summary.total ?? 0;
+  if (!total) return 0;
+  return Math.round(((report.value?.summary.ok ?? 0) / total) * 100);
+});
+
+const installingDsh = computed(() => dshInstallState.busy.value || (
+  dshInstallState.phase.value !== 'idle'
+  && dshInstallState.source.value === 'manual'
+));
+
+function isExpanded(id: string) {
+  if (fixingId.value === id) return true;
+  if (id === DSH_ENV_CHECK_ID && installingDsh.value) return true;
+  return expandedIds.value.has(id);
+}
+
+function toggleExpanded(id: string) {
+  const next = new Set(expandedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedIds.value = next;
+}
 
 async function rerun() {
   fixMessage.value = '';
   fixError.value = '';
   await runEnvironmentCheck();
+  seedExpanded();
+}
+
+function seedExpanded() {
+  const ids = (report.value?.checks ?? [])
+    .filter((check) => check.status !== 'ok')
+    .map((check) => check.id);
+  expandedIds.value = new Set(ids.slice(0, 1));
 }
 
 function remediation(check: NonNullable<typeof report.value>['checks'][number]) {
@@ -56,25 +100,36 @@ async function copyScript(id: string, script?: string) {
   }
 }
 
+function applyReport(next: NonNullable<typeof report.value>) {
+  environmentState.report.value = next;
+  environmentState.progressRows.value = next.checks.map((item) => ({
+    id: item.id,
+    name: item.name,
+    required: item.required,
+    state: 'done' as const,
+    status: item.status,
+    found: item.found,
+  }));
+  seedExpanded();
+}
+
 async function applyFix(actionId: EnvFixActionId, uiKey: string) {
   fixingId.value = uiKey;
   fixMessage.value = '';
   fixError.value = '';
   try {
-    const result = await runEnvironmentFix(actionId);
-    if (result.report) {
-      environmentState.report.value = result.report;
-      environmentState.progressRows.value = result.report.checks.map((item) => ({
-        id: item.id,
-        name: item.name,
-        required: item.required,
-        state: 'done' as const,
-        status: item.status,
-        found: item.found,
-      }));
-    } else {
-      await runEnvironmentCheck();
+    if (actionId === DSH_ENV_FIX_ACTION_ID) {
+      const { demoteDshEmployeesToPi } = await import('../dsh/engine-fallback');
+      await demoteDshEmployeesToPi().catch(() => undefined);
+      const result = await installDshRuntimeWithProgress({ reinstall: true, source: 'manual' });
+      if (result.report) applyReport(result.report);
+      else await runEnvironmentCheck();
+      fixMessage.value = result.message;
+      return;
     }
+    const result = await runEnvironmentFix(actionId);
+    if (result.report) applyReport(result.report);
+    else await runEnvironmentCheck();
     fixMessage.value = result.message;
   } catch (cause) {
     fixError.value = cause instanceof Error ? cause.message : String(cause);
@@ -91,189 +146,290 @@ async function applyAllAutoFixes() {
   }
 }
 
-onMounted(() => {
-  void runEnvironmentCheck();
+function goBack() {
+  emit('back');
+  emit('close');
+}
+
+onMounted(async () => {
+  await runEnvironmentCheck();
+  seedExpanded();
 });
 </script>
 
 <template>
-  <section class="mx-auto flex h-full max-w-4xl flex-col overflow-auto px-6 py-8 sm:px-10">
-    <header class="mb-6 flex flex-wrap items-end justify-between gap-4">
-      <div>
-        <p class="text-[11px] font-extrabold uppercase tracking-[.13em] text-[var(--accent)]">Workmate / ENVIRONMENT</p>
-        <h1 class="mt-1 text-3xl font-bold tracking-[-.03em]">环境检查</h1>
-        <p class="mt-2 max-w-2xl text-sm text-[var(--muted)]">
-          检查项会按桌面、Web、Docker 运行形态调整。缺项会给出详细说明、建议脚本；对可安全处理的项支持一键修复；Docker 另提供 Dockerfile / Compose 片段。
-        </p>
+  <section class="relative flex h-full flex-col overflow-hidden">
+    <div
+      class="pointer-events-none absolute inset-0 opacity-80"
+      aria-hidden="true"
+      style="background:
+        radial-gradient(ellipse 70% 45% at 12% -10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 55%),
+        radial-gradient(ellipse 50% 40% at 90% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 50%),
+        linear-gradient(180deg, color-mix(in srgb, var(--surface-muted) 55%, transparent), transparent 42%);"
+    />
+
+    <header class="relative z-10 shrink-0 border-b border-[var(--border)]/80 bg-[var(--surface)]/80 px-5 py-3 backdrop-blur-md sm:px-8">
+      <div class="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3">
+        <div class="flex min-w-0 items-center gap-3">
+          <button
+            class="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--muted)] transition hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+            type="button"
+            @click="goBack"
+          >
+            <span aria-hidden="true">←</span>
+            返回
+          </button>
+          <div class="min-w-0">
+            <p class="text-[10px] font-bold tracking-[0.16em] text-[var(--accent)]">ENVIRONMENT</p>
+            <h1 class="truncate text-lg font-semibold tracking-tight sm:text-xl">环境检查</h1>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-semibold hover:bg-[var(--surface-muted)] disabled:opacity-60"
+            type="button"
+            :disabled="runStatus === 'checking' || Boolean(fixingId)"
+            @click="rerun"
+          >
+            {{ runStatus === 'checking' ? '检查中…' : '重新检查' }}
+          </button>
+          <button
+            class="grid h-9 w-9 place-items-center rounded-lg text-lg text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
+            type="button"
+            aria-label="关闭"
+            title="关闭"
+            @click="goBack"
+          >
+            ×
+          </button>
+        </div>
       </div>
-      <button
-        class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-60"
-        type="button"
-        :disabled="runStatus === 'checking' || Boolean(fixingId)"
-        @click="rerun"
-      >
-        重新检查
-      </button>
     </header>
 
-    <div v-if="runStatus === 'checking'" class="mb-4 text-sm text-[var(--muted)]">正在检查本地环境…</div>
-    <div v-if="fixMessage" class="mb-3 rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-600">{{ fixMessage }}</div>
-    <div v-if="fixError" class="mb-3 rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-600">修复失败：{{ fixError }}</div>
-
-    <!-- 汇总条 -->
-    <div v-if="report" class="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
-      <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-center">
-        <p class="text-2xl font-bold">{{ report.summary.total }}</p>
-        <p class="text-xs text-[var(--muted)]">检查项</p>
-      </div>
-      <div class="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 text-center">
-        <p class="text-2xl font-bold text-emerald-600">{{ report.summary.ok }}</p>
-        <p class="text-xs text-[var(--muted)]">正常</p>
-      </div>
-      <div class="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-center">
-        <p class="text-2xl font-bold text-amber-600">{{ report.summary.warn }}</p>
-        <p class="text-xs text-[var(--muted)]">建议</p>
-      </div>
-      <div class="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3 text-center">
-        <p class="text-2xl font-bold text-rose-600">{{ report.summary.error }}</p>
-        <p class="text-xs text-[var(--muted)]">需处理</p>
-      </div>
-      <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-center">
-        <p class="text-sm font-semibold">{{ report.platform }}</p>
-        <p class="text-xs text-[var(--muted)]">{{ statusText[runStatus] }}</p>
-      </div>
-    </div>
-
-    <div v-if="errorMessage" class="mb-4 rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-600">
-      检查失败：{{ errorMessage }}
-    </div>
-
-    <div v-if="pack" class="mb-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 class="font-semibold">修复工具包（{{ pack.problems }} 项）</h2>
-          <p class="mt-1 text-xs text-[var(--muted)]">
-            可复制主机脚本；Docker 场景请优先改镜像/Compose。白名单一键修复：数据目录、ensurepip、AgentScope init。dsh 编码引擎请单项安装（体积较大）。
-          </p>
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <button
-            v-if="pack.autoFixIds.length"
-            class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-60"
-            type="button"
-            :disabled="Boolean(fixingId)"
-            @click="applyAllAutoFixes"
-          >
-            {{ fixingId.startsWith('all:') ? '修复中…' : `一键修复可自动项（${pack.autoFixIds.length}）` }}
-          </button>
-          <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-host', pack.hostScript)">
-            {{ copiedKey === 'pack-host' ? '已复制' : '复制主机脚本' }}
-          </button>
-          <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-docker', pack.dockerSnippet)">
-            {{ copiedKey === 'pack-docker' ? '已复制' : '复制 Dockerfile 片段' }}
-          </button>
-          <button v-if="platformKind.docker" class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-compose', pack.composeSnippet)">
-            {{ copiedKey === 'pack-compose' ? '已复制' : '复制 Compose 片段' }}
-          </button>
-        </div>
-      </div>
-      <details class="mt-3">
-        <summary class="cursor-pointer text-xs font-semibold text-[var(--accent)]">预览主机脚本</summary>
-        <pre class="mt-2 overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ pack.hostScript }}</code></pre>
-      </details>
-      <details v-if="platformKind.docker || pack.dockerSnippet.includes('RUN ')" class="mt-2">
-        <summary class="cursor-pointer text-xs font-semibold text-[var(--accent)]">预览 Dockerfile 片段</summary>
-        <pre class="mt-2 overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ pack.dockerSnippet }}</code></pre>
-      </details>
-      <details v-if="platformKind.docker" class="mt-2">
-        <summary class="cursor-pointer text-xs font-semibold text-[var(--accent)]">预览 Compose 挂载示例</summary>
-        <pre class="mt-2 overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ pack.composeSnippet }}</code></pre>
-      </details>
-    </div>
-
-    <div class="grid gap-3">
-      <div
-        v-for="check in report?.checks ?? []"
-        :key="check.id"
-        class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <div class="flex items-center gap-2">
-              <span :class="['h-2.5 w-2.5 shrink-0 rounded-full', stateMeta[check.status].dot]" />
-              <h2 class="truncate font-semibold">{{ check.name }}</h2>
-              <span :class="['shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold', stateMeta[check.status].badge]">
-                {{ stateMeta[check.status].label }}
-              </span>
+    <div class="relative z-10 min-h-0 flex-1 overflow-auto px-5 py-6 sm:px-8">
+      <div class="mx-auto flex max-w-4xl flex-col gap-5">
+        <!-- 总体状态 -->
+        <div
+          v-if="report"
+          class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 shadow-[0_12px_40px_-28px_rgba(15,23,42,0.45)]"
+        >
+          <div class="flex flex-wrap items-end justify-between gap-4 px-5 py-4 sm:px-6">
+            <div>
+              <p :class="['text-sm font-semibold', overall.tone]">{{ overall.label }}</p>
+              <p class="mt-1 text-xs text-[var(--muted)]">
+                {{ report.platform }} · {{ report.summary.ok }}/{{ report.summary.total }} 项正常
+                <span v-if="report.checkedAt"> · {{ new Date(report.checkedAt).toLocaleString() }}</span>
+              </p>
             </div>
-            <p class="mt-1 text-sm text-[var(--muted)]">要求：{{ check.required }}</p>
-            <p class="mt-0.5 text-sm">
-              <template v-if="check.command">检测命令：<code class="rounded bg-[var(--surface-muted)] px-1.5 py-0.5 text-xs">{{ check.command }}</code> · </template>
-              当前：<span class="font-medium">{{ check.found }}</span>
-            </p>
-          </div>
-          <button
-            v-if="check.status !== 'ok' && remediation(check)?.canAutoFix && remediation(check)?.actionId"
-            class="shrink-0 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-60"
-            type="button"
-            :disabled="Boolean(fixingId)"
-            @click="applyFix(remediation(check)!.actionId!, check.id)"
-          >
-            {{ fixingId === check.id ? '修复中…' : '一键修复' }}
-          </button>
-        </div>
-        <details v-if="check.status !== 'ok'" class="mt-3 rounded-lg bg-[var(--surface-muted)]/60 px-3 py-2 text-sm" open>
-          <summary class="cursor-pointer font-medium text-[var(--accent)]">如何修复（点击展开）</summary>
-          <ul class="mt-2 list-disc space-y-1 pl-5 text-[var(--muted)]">
-            <li v-for="(line, index) in check.help.split('\n').filter((item) => item.trim())" :key="index">
-              <code v-if="line.trim().startsWith('brew ') || line.trim().startsWith('winget ') || line.trim().startsWith('sudo ') || line.trim().startsWith('xcode-select ') || line.trim().startsWith('python ') || line.trim().startsWith('chmod ') || line.trim().startsWith('dnf ') || line.trim().startsWith('apt')" class="rounded bg-[var(--surface-muted)] px-1 py-0.5 text-xs">{{ line.trim() }}</code>
-              <template v-else>{{ line.trim() }}</template>
-            </li>
-          </ul>
-          <div v-if="remediation(check)" class="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3">
-            <p class="text-sm font-semibold">{{ remediation(check)?.summary }}</p>
-            <ul class="mt-2 list-disc space-y-1 pl-5 text-[var(--muted)]">
-              <li v-for="(line, index) in remediation(check)?.steps ?? []" :key="`step-${index}`">{{ line }}</li>
-            </ul>
-            <div v-if="remediation(check)?.logic?.length" class="mt-3">
-              <p class="text-xs font-semibold uppercase tracking-[.08em] text-[var(--muted)]">处理逻辑</p>
-              <ul class="mt-1 list-disc space-y-1 pl-5 text-[var(--muted)]">
-                <li v-for="(line, index) in remediation(check)?.logic ?? []" :key="`logic-${index}`">{{ line }}</li>
-              </ul>
-            </div>
-            <div v-if="remediation(check)?.script" class="mt-3">
-              <div class="mb-1 flex items-center justify-between gap-2">
-                <p class="text-xs font-semibold uppercase tracking-[.08em] text-[var(--muted)]">建议脚本</p>
-                <button class="rounded border border-[var(--border)] px-2 py-1 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript(check.id, remediation(check)?.script)">
-                  {{ copiedKey === check.id ? '已复制' : '复制脚本' }}
-                </button>
-              </div>
-              <pre class="overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ remediation(check)?.script }}</code></pre>
-            </div>
-            <div v-if="remediation(check)?.dockerSnippet" class="mt-3">
-              <div class="mb-1 flex items-center justify-between gap-2">
-                <p class="text-xs font-semibold uppercase tracking-[.08em] text-[var(--muted)]">Dockerfile 片段</p>
-                <button class="rounded border border-[var(--border)] px-2 py-1 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript(`${check.id}-docker`, remediation(check)?.dockerSnippet)">
-                  {{ copiedKey === `${check.id}-docker` ? '已复制' : '复制' }}
-                </button>
-              </div>
-              <pre class="overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ remediation(check)?.dockerSnippet }}</code></pre>
-            </div>
-            <div v-if="remediation(check)?.composeSnippet" class="mt-3">
-              <div class="mb-1 flex items-center justify-between gap-2">
-                <p class="text-xs font-semibold uppercase tracking-[.08em] text-[var(--muted)]">Compose 片段</p>
-                <button class="rounded border border-[var(--border)] px-2 py-1 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript(`${check.id}-compose`, remediation(check)?.composeSnippet)">
-                  {{ copiedKey === `${check.id}-compose` ? '已复制' : '复制' }}
-                </button>
-              </div>
-              <pre class="overflow-auto rounded-lg bg-[#0b1020] p-3 text-xs leading-relaxed text-slate-100"><code>{{ remediation(check)?.composeSnippet }}</code></pre>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-emerald-500/10 px-2.5 py-1 font-semibold text-emerald-700 dark:text-emerald-400">正常 {{ report.summary.ok }}</span>
+              <span class="rounded-full bg-amber-500/10 px-2.5 py-1 font-semibold text-amber-700 dark:text-amber-400">建议 {{ report.summary.warn }}</span>
+              <span class="rounded-full bg-rose-500/10 px-2.5 py-1 font-semibold text-rose-700 dark:text-rose-400">需处理 {{ report.summary.error }}</span>
             </div>
           </div>
-        </details>
-        <p v-else class="mt-2 text-sm text-[var(--muted)]">{{ check.help }}</p>
+          <div class="h-1.5 bg-[var(--surface-muted)]">
+            <div
+              class="h-full rounded-r-full transition-all duration-500"
+              :class="overall.bar"
+              :style="{ width: `${Math.max(okRatio, report.summary.total ? 4 : 0)}%` }"
+            />
+          </div>
+        </div>
+
+        <div v-if="runStatus === 'checking' && !report" class="flex items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)]/80 px-5 py-4 text-sm text-[var(--muted)]">
+          <span class="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent" />
+          正在检查本地环境…
+        </div>
+
+        <div v-if="fixMessage" class="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-400">
+          {{ fixMessage }}
+        </div>
+        <div v-if="fixError" class="rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-700 dark:text-rose-400">
+          {{ fixError }}
+        </div>
+        <div v-if="errorMessage" class="rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-700 dark:text-rose-400">
+          检查失败：{{ errorMessage }}
+        </div>
+
+        <!-- 安装进度置顶（安装中吸顶，完成后仍可回看） -->
+        <div
+          v-if="dshInstallState.busy.value || dshInstallState.phase.value !== 'idle'"
+          :class="dshInstallState.busy.value ? 'sticky top-0 z-20' : ''"
+        >
+          <DshInstallProgressPanel />
+        </div>
+
+        <!-- 修复工具包 -->
+        <div v-if="pack && pack.problems > 0" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-5 py-4 sm:px-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h2 class="text-sm font-semibold">修复工具包 · {{ pack.problems }} 项</h2>
+              <p class="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
+                可复制主机 / Docker 脚本。白名单可自动修复（数据目录、ensurepip、AgentScope）。dsh 体积约 200MB，请单项安装并查看进度。
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-if="pack.autoFixIds.length"
+                class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-60"
+                type="button"
+                :disabled="Boolean(fixingId)"
+                @click="applyAllAutoFixes"
+              >
+                {{ fixingId.startsWith('all:') ? '修复中…' : `一键修复可自动项（${pack.autoFixIds.length}）` }}
+              </button>
+              <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-host', pack.hostScript)">
+                {{ copiedKey === 'pack-host' ? '已复制' : '复制主机脚本' }}
+              </button>
+              <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="copyScript('pack-docker', pack.dockerSnippet)">
+                {{ copiedKey === 'pack-docker' ? '已复制' : 'Dockerfile' }}
+              </button>
+              <button
+                v-if="platformKind.docker"
+                class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]"
+                type="button"
+                @click="copyScript('pack-compose', pack.composeSnippet)"
+              >
+                {{ copiedKey === 'pack-compose' ? '已复制' : 'Compose' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 检查项列表 -->
+        <div class="grid gap-3">
+          <article
+            v-for="check in report?.checks ?? []"
+            :key="check.id"
+            :class="[
+              'overflow-hidden rounded-2xl border bg-[var(--surface)]/95 transition-shadow',
+              stateMeta[check.status].soft,
+              check.status === 'ok' ? 'border-[var(--border)]' : 'shadow-[0_10px_30px_-24px_rgba(15,23,42,0.55)]',
+            ]"
+          >
+            <div class="flex">
+              <div :class="['w-1 shrink-0 self-stretch', stateMeta[check.status].rail]" />
+              <div class="min-w-0 flex-1 p-4 sm:p-5">
+                <div class="flex items-start justify-between gap-3">
+                  <button
+                    class="min-w-0 flex-1 text-left"
+                    type="button"
+                    @click="check.status !== 'ok' ? toggleExpanded(check.id) : undefined"
+                  >
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h2 class="text-[15px] font-semibold tracking-tight">{{ check.name }}</h2>
+                      <span :class="['rounded-full px-2 py-0.5 text-[11px] font-semibold', stateMeta[check.status].badge]">
+                        {{ stateMeta[check.status].label }}
+                      </span>
+                    </div>
+                    <p class="mt-1.5 text-xs leading-5 text-[var(--muted)]">
+                      要求 {{ check.required }}
+                      <span class="mx-1.5 text-[var(--border)]">·</span>
+                      当前 <span class="font-medium text-[var(--text)]">{{ check.found }}</span>
+                    </p>
+                  </button>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <button
+                      v-if="check.status !== 'ok' && remediation(check)?.canAutoFix && remediation(check)?.actionId"
+                      class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:opacity-90 disabled:opacity-60"
+                      type="button"
+                      :disabled="Boolean(fixingId) || dshInstallState.busy.value"
+                      @click="applyFix(remediation(check)!.actionId!, check.id)"
+                    >
+                      {{
+                        fixingId === check.id || (check.id === DSH_ENV_CHECK_ID && dshInstallState.busy.value)
+                          ? (check.id === DSH_ENV_CHECK_ID ? '安装中…' : '修复中…')
+                          : '一键修复'
+                      }}
+                    </button>
+                    <button
+                      v-if="check.status !== 'ok'"
+                      class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-muted)]"
+                      type="button"
+                      :aria-expanded="isExpanded(check.id)"
+                      :aria-label="isExpanded(check.id) ? '收起说明' : '展开说明'"
+                      @click="toggleExpanded(check.id)"
+                    >
+                      <span class="text-xs font-bold transition-transform" :class="isExpanded(check.id) ? 'rotate-180' : ''">▾</span>
+                    </button>
+                  </div>
+                </div>
+
+                <p v-if="check.status === 'ok'" class="mt-2 text-xs leading-5 text-[var(--muted)]">
+                  {{ check.help }}
+                </p>
+
+                <div v-else-if="isExpanded(check.id)" class="mt-4 space-y-3 border-t border-[var(--border)]/70 pt-4">
+                  <ul class="space-y-1.5 text-sm leading-6 text-[var(--muted)]">
+                    <li v-for="(line, index) in check.help.split('\n').filter((item) => item.trim())" :key="index" class="flex gap-2">
+                      <span class="mt-2 h-1 w-1 shrink-0 rounded-full bg-[var(--accent)]/70" />
+                      <code
+                        v-if="/^(brew |winget |sudo |xcode-select |python |chmod |dnf |apt |mkdir |cd |npm )/.test(line.trim())"
+                        class="rounded-md bg-[var(--surface-muted)] px-1.5 py-0.5 font-mono text-[12px] text-[var(--text)]"
+                      >{{ line.trim() }}</code>
+                      <span v-else>{{ line.trim() }}</span>
+                    </li>
+                  </ul>
+
+                  <div v-if="remediation(check)" class="rounded-xl bg-[var(--surface-muted)]/55 px-4 py-3">
+                    <p class="text-sm font-semibold">{{ remediation(check)?.summary }}</p>
+                    <ul class="mt-2 space-y-1 text-xs leading-5 text-[var(--muted)]">
+                      <li v-for="(line, index) in remediation(check)?.steps ?? []" :key="`step-${index}`">{{ line }}</li>
+                    </ul>
+                    <ul v-if="remediation(check)?.logic?.length" class="mt-2 space-y-1 border-t border-[var(--border)]/60 pt-2 text-xs leading-5 text-[var(--muted)]">
+                      <li v-for="(line, index) in remediation(check)?.logic ?? []" :key="`logic-${index}`">{{ line }}</li>
+                    </ul>
+
+                    <div v-if="remediation(check)?.script" class="mt-3">
+                      <div class="mb-1.5 flex items-center justify-between gap-2">
+                        <p class="text-[11px] font-semibold tracking-wide text-[var(--muted)]">建议脚本</p>
+                        <button
+                          class="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold hover:bg-[var(--surface)]"
+                          type="button"
+                          @click="copyScript(check.id, remediation(check)?.script)"
+                        >
+                          {{ copiedKey === check.id ? '已复制' : '复制' }}
+                        </button>
+                      </div>
+                      <pre class="overflow-auto rounded-xl bg-[#0f172a] p-3 text-[11px] leading-relaxed text-slate-100"><code>{{ remediation(check)?.script }}</code></pre>
+                    </div>
+
+                    <div v-if="remediation(check)?.dockerSnippet" class="mt-3">
+                      <div class="mb-1.5 flex items-center justify-between gap-2">
+                        <p class="text-[11px] font-semibold tracking-wide text-[var(--muted)]">Dockerfile</p>
+                        <button
+                          class="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold hover:bg-[var(--surface)]"
+                          type="button"
+                          @click="copyScript(`${check.id}-docker`, remediation(check)?.dockerSnippet)"
+                        >
+                          {{ copiedKey === `${check.id}-docker` ? '已复制' : '复制' }}
+                        </button>
+                      </div>
+                      <pre class="overflow-auto rounded-xl bg-[#0f172a] p-3 text-[11px] leading-relaxed text-slate-100"><code>{{ remediation(check)?.dockerSnippet }}</code></pre>
+                    </div>
+
+                    <div v-if="remediation(check)?.composeSnippet" class="mt-3">
+                      <div class="mb-1.5 flex items-center justify-between gap-2">
+                        <p class="text-[11px] font-semibold tracking-wide text-[var(--muted)]">Compose</p>
+                        <button
+                          class="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold hover:bg-[var(--surface)]"
+                          type="button"
+                          @click="copyScript(`${check.id}-compose`, remediation(check)?.composeSnippet)"
+                        >
+                          {{ copiedKey === `${check.id}-compose` ? '已复制' : '复制' }}
+                        </button>
+                      </div>
+                      <pre class="overflow-auto rounded-xl bg-[#0f172a] p-3 text-[11px] leading-relaxed text-slate-100"><code>{{ remediation(check)?.composeSnippet }}</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <p v-if="report?.checks.length === 0" class="py-10 text-center text-sm text-[var(--muted)]">暂无检查结果。</p>
       </div>
     </div>
-
-    <p v-if="report?.checks.length === 0" class="py-6 text-center text-sm text-[var(--muted)]">暂无检查结果。</p>
   </section>
 </template>

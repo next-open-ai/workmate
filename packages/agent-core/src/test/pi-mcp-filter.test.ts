@@ -55,3 +55,48 @@ test('document artifact tasks hide irrelevant finance and sequential-thinking MC
   assert.deepEqual(filtered.labels, ['Amap Maps']);
   assert.equal(filtered.instructions, '');
 });
+
+test('brand-tone finance words do not keep market MCP; filesystem stays blocked in project mode', () => {
+  const filtered = filterMcpToolsetForTask({
+    tools: [
+      tool('mcp_akshare_list_akshare_categories_tool'),
+      tool('mcp_filesystem_list_directory'),
+      tool('mcp_memory_read_graph'),
+    ],
+    toolDescriptors: [
+      { name: 'mcp_akshare_list_akshare_categories_tool', description: 'finance', inputSchema: { type: 'object' } },
+      { name: 'mcp_filesystem_list_directory', description: 'filesystem', inputSchema: { type: 'object' } },
+      { name: 'mcp_memory_read_graph', description: 'memory', inputSchema: { type: 'object' } },
+    ],
+    labels: ['Akshare', 'Filesystem', 'Memory'],
+    instructions: 'Available MCP tools for this run: ...',
+    close: async () => undefined,
+  }, '收敛目标与交付边界，输出行动简报（受众含证券从业背景假设与金融质感）', [skill({
+    id: 'skill-baseline-docx',
+    name: 'Word 文档撰写',
+    description: '起草正式文档',
+    instructions: 'Write the brief under the project root.',
+  })], { projectBound: true });
+
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_memory_read_graph']);
+  assert.deepEqual(filtered.labels, ['Memory']);
+});
+
+test('live market tasks keep akshare tools', () => {
+  const filtered = filterMcpToolsetForTask({
+    tools: [
+      tool('mcp_akshare_get_a_share_quotes'),
+      tool('mcp_filesystem_list_directory'),
+    ],
+    toolDescriptors: [
+      { name: 'mcp_akshare_get_a_share_quotes', description: 'quotes', inputSchema: { type: 'object' } },
+      { name: 'mcp_filesystem_list_directory', description: 'filesystem', inputSchema: { type: 'object' } },
+    ],
+    labels: ['Akshare', 'Filesystem'],
+    instructions: '',
+    close: async () => undefined,
+  }, '拉取今日实时行情与股价涨跌幅并写入报告', [skill()]);
+
+  assert.ok(filtered.tools.some((item) => item.name.includes('akshare')));
+  assert.ok(!filtered.tools.some((item) => item.name.includes('filesystem')));
+});

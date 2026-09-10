@@ -52,8 +52,15 @@ function runWorkspaceRoot(runId: string) {
 function isRetryableRunFailure(error?: string | null) {
   const text = String(error || '');
   if (!text) return false;
-  return /reasoning_content|Expected ',' or '\]' after array element in JSON|Unexpected token .* in JSON|Unterminated string|JSON at position|Invalid input|tool arguments/i.test(text)
+  return /reasoning_content|Expected ',' or '\]' after array element in JSON|Unexpected token .* in JSON|Unterminated string|Bad control character|JSON at position|Invalid input|tool arguments/i.test(text)
     || /network|timeout|timed out|socket hang up|econnreset|econnaborted|fetch failed/i.test(text.toLowerCase());
+}
+
+/** Step-budget abort after real deliverables should not fail the whole DAG node. */
+function isStepBudgetFailureWithDeliverables(run: RunRecord) {
+  const text = String(run.error || '');
+  if (!/工具调用步数超过上限|步数超过上限|max steps|step limit/i.test(text)) return false;
+  return (run.artifacts?.length ?? 0) > 0;
 }
 
 export interface ProjectTaskDraft {
@@ -1202,6 +1209,10 @@ export class ProjectService {
       } else if (run.status === 'waiting-approval') {
         target.status = 'running';
         target.error = '任务等待审批后继续。';
+      } else if (run.status === 'failed' && isStepBudgetFailureWithDeliverables(run)) {
+        // Files already landed in the project; treat as completed so downstream DAG can continue.
+        target.status = 'completed';
+        target.error = undefined;
       } else if (run.status === 'failed' && target.attempts < maxAttempts && isRetryableRunFailure(run.error)) {
         target.status = 'queued';
         target.error = `上次尝试因瞬时格式/连接问题失败，正在自动重试（${target.attempts}/${maxAttempts}）：${run.error}`;

@@ -66,7 +66,9 @@ export function toPiModel(config: ModelConfig): Model<Api> {
     input: ['text'],
     cost: ZERO_COST,
     contextWindow: 128_000,
-    maxTokens: 8192,
+    // Tool calls that embed HTML/CSS need headroom; 8k often truncates mid-JSON
+    // ("Unterminated string") and aborts the whole run before write executes.
+    maxTokens: 32_768,
   };
 }
 

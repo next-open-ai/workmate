@@ -260,6 +260,9 @@ function selectConversationFilter(conversationId: string) {
 function clearConversationFilter() {
   archiveScope.value = 'all';
 }
+function openBundleFile(asset: Asset, relative: string) {
+  void previewAssetUrl(asset.id, relative).then((url) => window.open(url, '_blank', 'noopener'));
+}
 
 watch(mode, (value) => { void writeStored(ASSET_MODE_KEY, value); });
 watch(
@@ -437,15 +440,17 @@ async function loadArchivePreview() {
   const asset = selectedAsset.value;
   if (!asset) return;
   previewLoading.value = true;
-  previewTitle.value = asset.name;
-  previewKind.value = previewKindForName(asset.name);
+  previewTitle.value = asset.kind === 'bundle' ? `${asset.name} · ${asset.manifest?.files.length || 0} 个文件` : asset.name;
+  previewKind.value = previewKindForName(asset.entryPath || asset.name);
   previewMeta.value = [
     `本地归档 · ${formatBytes(asset.sizeBytes)}`,
     asset.workspaceRelative && asset.workspaceRelative !== asset.name ? asset.workspaceRelative : asset.name,
     `${formatDate(asset.createdAt)} · ${employeeName(asset.employeeId)}${asset.projectId ? ` · ${projectName(asset.projectId)}` : ` · ${t('assets.unlinkedBadge')}`}`,
   ];
   try {
-    if (previewKind.value === 'html' || previewKind.value === 'pdf') {
+    if (asset.kind === 'bundle') {
+      previewHtmlUrl.value = await previewAssetUrl(asset.id, asset.entryPath || 'index.html');
+    } else if (previewKind.value === 'html' || previewKind.value === 'pdf') {
       previewHtmlUrl.value = await previewAssetUrl(asset.id, asset.name);
     } else {
       const payload = await readArchivedAssetPreview(asset.id);
@@ -506,7 +511,8 @@ async function openInBrowser() {
       return;
     }
     if (selectedAsset.value) {
-      await openAssetBestEffort(selectedAsset.value.id);
+      if (selectedAsset.value.kind === 'bundle') openBundleFile(selectedAsset.value, selectedAsset.value.entryPath || 'index.html');
+      else await openAssetBestEffort(selectedAsset.value.id);
     }
   } catch (error) {
     previewError.value = error instanceof Error ? error.message : String(error);
@@ -535,6 +541,7 @@ function kindStyle(kind: FileKind) {
   return map[kind];
 }
 function typeLabel(asset: Asset) {
+  if (asset.kind === 'bundle') return 'SITE';
   return asset.name.split('.').pop()?.toUpperCase() || 'FILE';
 }
 async function copyText(label: string, value: string) {
@@ -765,7 +772,7 @@ onBeforeUnmount(() => {
               <button class="flex min-w-0 flex-1 items-center gap-3 text-left" type="button" @click="selectedAsset = asset">
                 <span :class="['grid h-10 w-10 shrink-0 place-items-center rounded-xl text-[10px] font-extrabold', kindStyle(fileKind(asset)).badge]">{{ typeLabel(asset) }}</span>
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate text-sm font-semibold">{{ asset.workspaceRelative || asset.name }}</span>
+                  <span class="block truncate text-sm font-semibold">{{ asset.workspaceRelative || asset.name }} <em v-if="asset.kind === 'bundle'" class="not-italic text-[10px] text-[var(--accent)]">bundle</em></span>
                   <span class="mt-0.5 block truncate text-xs text-[var(--muted)]">
                     {{ formatDate(asset.createdAt) }} · {{ formatBytes(asset.sizeBytes) }}
                     · {{ asset.projectId ? projectName(asset.projectId) : t('assets.unlinkedBadge') }}
@@ -825,6 +832,12 @@ onBeforeUnmount(() => {
                 </dd>
               </div>
             </dl>
+            <div v-if="selectedAsset.kind === 'bundle'" class="mt-3 rounded-xl bg-[var(--surface-muted)] p-3">
+              <p class="text-xs font-semibold">网站包文件 · {{ selectedAsset.manifest?.files.length || 0 }}</p>
+              <div class="mt-2 max-h-32 overflow-y-auto font-mono text-[11px]">
+                <button v-for="file in selectedAsset.manifest?.files || []" :key="file.path" class="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-[var(--surface)]" type="button" @click="openBundleFile(selectedAsset, file.path)">{{ file.path }}</button>
+              </div>
+            </div>
             <button class="mt-3 text-xs font-semibold text-[var(--muted)]" type="button" @click="showTechnical = !showTechnical">{{ t('assets.technical') }} {{ showTechnical ? '−' : '+' }}</button>
             <div v-if="showTechnical" class="mt-2 space-y-2 rounded-xl bg-[var(--surface-muted)] p-3 font-mono text-[11px]">
               <p>run: {{ shortId(selectedAsset.runId) }} <button class="ml-2 text-[var(--accent)]" type="button" @click="copyText('run', selectedAsset.runId)">{{ copied === 'run' ? t('assets.copied') : t('assets.copy') }}</button></p>

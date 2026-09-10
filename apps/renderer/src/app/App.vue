@@ -15,6 +15,14 @@ import EnvironmentPage from '../features/environment/EnvironmentPage.vue';
 import { runEnvironmentCheck } from '../services/environment';
 import AppToastHost from '../features/common/AppToastHost.vue';
 import EnvironmentCheckDialog from '../features/common/EnvironmentCheckDialog.vue';
+import DshInstallProgressDialog from '../features/dsh/DshInstallProgressDialog.vue';
+import {
+  demoteDshEmployeesToPi,
+  ensurePresetEmployeesPreferDsh,
+  isDshCheckMissing,
+  restoreDemotedEmployeesToDsh,
+} from '../features/dsh';
+import { environmentState } from '../services/environment';
 import LoginPage from '../features/auth/LoginPage.vue';
 import { useI18n } from './i18n';
 import { useAuth } from './auth';
@@ -29,6 +37,7 @@ import { useSearchConfig } from './search-config';
 import { useMcpConfig } from './mcp-config';
 import { useNotify } from './notify';
 import { isDesktopShell, isViewAvailable } from './platform';
+import type { View } from './workspace';
 
 const { t, loadLocale } = useI18n();
 const {
@@ -59,6 +68,8 @@ const { load: loadSearchConfig } = useSearchConfig();
 const { load: loadMcpConfig, probeStartupMcps } = useMcpConfig();
 const notify = useNotify();
 const showEnvCheckDialog = ref(false);
+const showDshInstallDialog = ref(false);
+const envReturnView = ref<View>('settings');
 const activeChatEmployee = computed(() =>
   (activeConversation.value && employees.value.find((item) => item.id === activeConversation.value?.employeeId))
   || currentEmployee.value,
@@ -153,29 +164,51 @@ async function runCheckInDialog(keepOpenOnClean: boolean) {
   }
   return report;
 }
-/** 启动时静默体检：全程不弹窗；仅当发现 error/warn 时再打开结果弹窗。 */
-async function runStartupEnvironmentCheck() {
-  const report = await runEnvironmentCheck();
-  if (!report) return;
-  if (report.summary.error > 0 || report.summary.warn > 0) {
-    showEnvCheckDialog.value = true;
-  }
-}
+
 async function setupEnvironmentCheck() {
   try {
-    // 安装后首次启动无论如何都执行一次环境检查；之后遵循“每次启动检查”开关。
     const firstRun = !(await readStored('env.first-run-done'));
     if (firstRun) await writeStored('env.first-run-done', '1');
-    // 缺省不在每次启动时检查；仅产品首次启动强制检查一次。
     const stored = await readStored('env.check-on-startup');
     const startupEnabled = stored === '1';
+
+    // Probe once; if dsh is missing, ask the user before downloading ~200MB.
+    const report = await runEnvironmentCheck();
+    if (isDshCheckMissing(report)) {
+      await demoteDshEmployeesToPi().catch(() => undefined);
+      const declinedAt = Number((await readStored('dsh.install-prompt.declined-at')) || '0');
+      const recentlyDeclined = Number.isFinite(declinedAt) && declinedAt > 0
+        && (Date.now() - declinedAt) < 7 * 24 * 60 * 60 * 1000;
+      if (!recentlyDeclined) {
+        showDshInstallDialog.value = true;
+      }
+    } else {
+      await ensurePresetEmployeesPreferDsh().catch(() => undefined);
+      await restoreDemotedEmployeesToDsh().catch(() => undefined);
+    }
+
     if (!firstRun && !startupEnabled) return;
-    void runStartupEnvironmentCheck();
+    const latest = environmentState.report.value || report;
+    if (latest && (latest.summary.error > 0 || latest.summary.warn > 0) && !showDshInstallDialog.value) {
+      showEnvCheckDialog.value = true;
+    }
   } catch { /* 环境检查失败不应阻塞启动 */ }
 }
+function openEnvironmentPage() {
+  if (view.value !== 'env') envReturnView.value = view.value;
+  setView('env');
+}
+
+function closeEnvironmentPage() {
+  const target = envReturnView.value !== 'env' && isViewAvailable(envReturnView.value)
+    ? envReturnView.value
+    : 'settings';
+  setView(isViewAvailable(target) ? target : 'chat');
+}
+
 function openEnvDetails() {
   showEnvCheckDialog.value = false;
-  setView('env');
+  openEnvironmentPage();
 }
 onUnmounted(() => stopScheduler?.());
 function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value; void writeStored('ui.sidebar-collapsed', String(sidebarCollapsed.value)); }
@@ -290,7 +323,7 @@ async function handleLogout() {
       />
       <ProjectsPage v-else-if="view === 'projects'" :employees="employees" :models="availableChatModels" :generate-draft="generateProjectDraft" :run-task="runProjectTask" />
       <RemoteOfficePage v-else-if="view === 'remote'" />
-      <EnvironmentPage v-else-if="view === 'env'" />
+      <EnvironmentPage v-else-if="view === 'env'" @close="closeEnvironmentPage" @back="closeEnvironmentPage" />
       <SettingsPage
         v-else
         :employees="employees"
@@ -300,7 +333,7 @@ async function handleLogout() {
         :is-admin="isAdmin"
         :auth-busy="authBusy"
         @set-default-employee="setDefaultEmployee"
-        @open-environment="setView('env')"
+        @open-environment="openEnvironmentPage"
         @open-check="runCheckInDialog(true)"
         @create-local-user="handleCreateLocalUser"
         @update-local-user="handleUpdateLocalUser"
@@ -309,6 +342,11 @@ async function handleLogout() {
     </main>
     <AppToastHost />
     <EnvironmentCheckDialog v-if="showEnvCheckDialog" @close="showEnvCheckDialog = false" @go="openEnvDetails" />
+    <DshInstallProgressDialog
+      v-if="showDshInstallDialog"
+      @close="showDshInstallDialog = false"
+      @installed="void writeStored('dsh.install-prompt.declined-at', '')"
+    />
     <p class="sr-only" role="status">{{ serviceReady ? t('common.statusReady') : t('common.statusOffline') }}</p>
   </div>
 </template>

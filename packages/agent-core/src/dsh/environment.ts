@@ -2,8 +2,10 @@ import {
   DSH_RUNTIME_NPM_VERSION,
   dshRuntimeRoot,
   ensureDshRuntimeInstalled,
+  ensureDshRuntimeInstalledWithProgress,
   probeDshRuntime,
   resolveDshJsonrpcBin,
+  type DshInstallProgressEvent,
   type DshRuntimeStatus,
 } from './runtime-install.js';
 import {
@@ -28,6 +30,7 @@ export {
   isDshEnvFixAction,
 };
 export type { DshInstallCardCopy, DshRemediationKind, DshRemediationPlan };
+export type { DshInstallProgressEvent };
 
 export type DshEnvCheckItem = {
   id: typeof DSH_ENV_CHECK_ID;
@@ -43,6 +46,7 @@ export type DshEnvFixResult = {
   ok: true;
   message: string;
   detail: string;
+  skipped?: boolean;
 };
 
 /** Build the environment-check row for dsh (optional coding engine). */
@@ -69,6 +73,24 @@ export function runDshEnvironmentFix(options?: { reinstall?: boolean }): DshEnvF
     ok: true,
     message: result.detail,
     detail: `${result.root}\n${result.bin}`,
+    skipped: result.skipped,
+  };
+}
+
+/** Async install with progress events for SSE / UI. */
+export async function runDshEnvironmentFixWithProgress(options?: {
+  reinstall?: boolean;
+  onProgress?: (event: DshInstallProgressEvent) => void;
+}): Promise<DshEnvFixResult> {
+  const result = await ensureDshRuntimeInstalledWithProgress({
+    reinstall: options?.reinstall ?? true,
+    onProgress: options?.onProgress,
+  });
+  return {
+    ok: true,
+    message: result.detail,
+    detail: `${result.root}\n${result.bin}`,
+    skipped: result.skipped,
   };
 }
 

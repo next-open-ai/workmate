@@ -130,7 +130,7 @@ def _system_prompt(params: dict[str, Any]) -> str:
     parts = [
         f"You are {name} inside Workmate (AgentScope engine).",
         instructions,
-        "Prefer host tools for workspace file access. Be concise and actionable.",
+        "Use host read/write/edit/bash tools for workspace work. After a finished user-facing file is verified, call commit_artifact exactly once; only committed files enter the asset library. Be concise and actionable.",
     ]
     if memory:
         parts.append(f"<session-memory>\n{memory}\n</session-memory>")
@@ -187,6 +187,8 @@ async def run_agentscope_react(
     toolkit = build_host_toolkit(
         params.get("skills") if isinstance(params.get("skills"), list) else [],
         params.get("mcpTools") if isinstance(params.get("mcpTools"), list) else [],
+        str(params.get("workspaceRoot") or "."),
+        str(params.get("workspaceAccess") or "write"),
     )
     max_iters = int(params.get("maxSteps") or 16)
     agent = Agent(

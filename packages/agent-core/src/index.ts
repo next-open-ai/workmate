@@ -5,12 +5,20 @@ import { summarizeSessionMemory as summarizeSessionMemoryImpl } from './context-
 export * from './skills.js';
 export * from './mcp-runtime.js';
 export * from './skill-runtime.js';
+export * from './workspace-mode.js';
+export * from './workspace-write.js';
+export * from './json-repair.js';
+export * from './context-sanitize.js';
 export * from './context-compaction.js';
 export * from './search-runtime.js';
 export * from './knowledge-runtime.js';
 export * from './experience/index.js';
 export * from './pi-model.js';
 export * from './pi-tools.js';
+export * from './capability-kernel.js';
+export * from './pi-capability-adapter.js';
+export * from './agentscope-capability-adapter.js';
+export * from './dsh-capability-adapter.js';
 export * from './pi-skills.js';
 export {
   streamAgentReply,

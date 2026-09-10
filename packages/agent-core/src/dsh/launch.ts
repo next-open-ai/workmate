@@ -1,9 +1,9 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { dshRuntimeRoot, probeDshRuntime, resolveDshJsonrpcBin } from './runtime-install.js';
+import { resolveAgentWorkspaceRoot } from '../workspace-mode.js';
 
 export type DshLaunchSpec = {
   command: string;
@@ -219,15 +219,8 @@ export function resolveDshWorkspace(input: {
   runId?: string;
   projectWorkspacePath?: string;
 }): string {
-  const project = String(input.projectWorkspacePath || '').trim();
-  if (project) {
-    fs.mkdirSync(project, { recursive: true });
-    return path.resolve(project);
-  }
-  const runId = String(input.runId || 'dsh-run').replace(/[^a-zA-Z0-9._-]/g, '_');
-  const root = process.env.WORKMATE_WORKSPACES_DIR?.trim()
-    || path.join(process.env.WORKMATE_DATA_DIR?.trim() || path.join(os.homedir(), '.workmate'), 'workspaces');
-  const dir = path.join(root, runId);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return resolveAgentWorkspaceRoot({
+    runId: input.runId || 'dsh-run',
+    projectWorkspacePath: input.projectWorkspacePath,
+  });
 }

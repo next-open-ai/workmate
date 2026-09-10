@@ -4,12 +4,21 @@ import { spawn } from 'node:child_process';
 import type { AgentSkillRuntime } from '@workmate/contracts';
 import { Type, StringEnum, defineAgentTool, type AgentTool } from './pi-tools.js';
 import { PDF_SKILL_ID } from './builtin-skill-packages.js';
+import { resolveAgentWorkspaceRoot } from './workspace-mode.js';
+import {
+  MAX_FILE_BYTES,
+  MAX_STAGED_APPEND_CHARS,
+  MAX_WRITE_CHUNK,
+  MAX_WRITE_CHUNKS,
+  MAX_WRITE_CONTENT,
+  appendStagedWrite,
+  resolveWriteBody,
+  startStagedWrite,
+  takeStagedWrite,
+} from './workspace-write.js';
 
-const MAX_FILE_BYTES = 96_000;
-/** Soft cap per tool-call body so models do not emit fragile multi‑10KB JSON strings. */
-const MAX_WRITE_CHUNK = 6_000;
-const MAX_WRITE_CONTENT = 24_000;
-const MAX_WRITE_CHUNKS = 24;
+/** Agent-facing read cap — full 96KB dumps pollute context and derail subsequent tool JSON. */
+const MAX_READ_RETURN_CHARS = 6_000;
 const MAX_NETWORK_BYTES = 256_000;
 const MAX_SCRIPT_OUTPUT = 32_000;
 const SCRIPT_TIMEOUT_MS = 30_000;
@@ -160,10 +169,13 @@ async function pathInside(root: string, relative: string) {
   return candidate;
 }
 
-async function ensureWorkspaceScaffold(root: string) {
+async function ensureWorkspaceScaffold(root: string, mode: 'conversation' | 'project' = 'conversation') {
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await mkdir(path.join(root, WORKSPACE_OUTPUT_DIR), { recursive: true, mode: 0o700 });
-  await mkdir(path.join(root, 'scripts'), { recursive: true, mode: 0o700 });
+  // Project mode writes the real tree at root — do not force an output/ wrapper.
+  if (mode === 'conversation') {
+    await mkdir(path.join(root, WORKSPACE_OUTPUT_DIR), { recursive: true, mode: 0o700 });
+    await mkdir(path.join(root, 'scripts'), { recursive: true, mode: 0o700 });
+  }
 }
 
 async function listSkillFiles(root: string, folder = root, depth = 0, entries: string[] = []): Promise<string[]> {
@@ -319,9 +331,11 @@ function pythonImportProbeModuleName(dependency: string) {
 
 /**
  * The local execution boundary for Agent Skills. Skill packages are immutable
- * at runtime; generated artifacts belong in a separate, run-scoped workspace.
- * When `projectRoot` is set (project tasks), deliverables may be promoted into
- * the shared project directory via `publish_to_project`.
+ * at runtime.
+ *
+ * Dual workspace modes (aligned with dsh):
+ * - conversation: isolated run dir; finished products under output/
+ * - project: workspace root IS the shared project directory; write the real tree at root
  *
  * Tools are native pi AgentTool + TypeBox (no Vercel AI SDK tool()).
  */
@@ -332,8 +346,13 @@ export function createSkillExecutionTools(input: {
   workspaceAccess?: 'read' | 'write' | 'full';
 }): AgentTool[] {
   const packages = new Map(input.skills.map((skill) => [skill.id, skill]));
-  const workspaceRoot = path.join(process.env.WORKMATE_WORKSPACES_DIR || path.join(process.cwd(), '.workmate-workspaces'), input.runId);
   const projectRoot = input.projectRoot?.trim() ? path.resolve(input.projectRoot.trim()) : '';
+  const projectBound = Boolean(projectRoot);
+  // Project mode: cwd == project root (same as dsh). Conversation: isolated run workspace.
+  const workspaceRoot = resolveAgentWorkspaceRoot({
+    runId: input.runId,
+    projectWorkspacePath: projectRoot || undefined,
+  });
   const workspaceAccess = input.workspaceAccess ?? 'write';
   const canWriteWorkspace = workspaceAccess === 'write' || workspaceAccess === 'full';
   // "write" is the normal task tier. It must retain the controlled local
@@ -359,7 +378,7 @@ export function createSkillExecutionTools(input: {
     if (!loaded.has(skillId)) throw new Error('Load the Skill before accessing its files or execution capabilities.');
   };
   const workspacePath = async (relative: string) => {
-    await ensureWorkspaceScaffold(workspaceRoot);
+    await ensureWorkspaceScaffold(workspaceRoot, projectBound ? 'project' : 'conversation');
     return pathInside(workspaceRoot, relative);
   };
   const projectPath = async (relative: string) => {
@@ -379,12 +398,72 @@ export function createSkillExecutionTools(input: {
     const extension = path.extname(script).toLowerCase();
     const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
     const dependencyRoot = path.join(workspaceRoot, '.python-packages');
-    await ensureWorkspaceScaffold(workspaceRoot);
+    await ensureWorkspaceScaffold(workspaceRoot, projectBound ? 'project' : 'conversation');
     const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
     const startedAtMs = Date.now();
     const result = await runProcess(command, [script, ...args], workspaceRoot, { env: { ...process.env, PYTHONPATH: dependencyRoot } });
     const artifacts = await collectScriptDeliverables(workspaceRoot, before, startedAtMs).catch(() => []);
     return { ok: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, artifacts };
+  };
+
+  const persistWorkspaceText = async (input: {
+    relative: string;
+    body: string;
+    mode: 'replace' | 'append';
+    deliverable?: boolean;
+  }) => {
+    const requested = safeRelative(input.relative);
+    const body = input.body;
+    const writeMode = input.mode;
+    let asDeliverable = false;
+    let targetRel = requested;
+
+    if (projectBound) {
+      if (isUnderWorkspaceOutput(requested)) {
+        targetRel = requested.slice(WORKSPACE_OUTPUT_DIR.length + 1);
+        if (!targetRel || targetRel.split('/').some((part) => !part || part === '.' || part === '..')) {
+          return { ok: false as const, error: 'Invalid project path after stripping output/.' };
+        }
+      }
+      asDeliverable = !PROCESS_ONLY_DIRS.has(pathParts(targetRel)[0] || '');
+    } else {
+      asDeliverable = Boolean(input.deliverable) || isUnderWorkspaceOutput(requested);
+      targetRel = asDeliverable ? toOutputPath(requested) : requested;
+      if (!asDeliverable && writeMode === 'append') {
+        const outputRel = toOutputPath(requested);
+        try {
+          const outputFile = await workspacePath(outputRel);
+          if ((await stat(outputFile)).isFile()) {
+            asDeliverable = true;
+            targetRel = outputRel;
+          }
+        } catch {
+          // No matching staged deliverable yet.
+        }
+      }
+      if (asDeliverable && !isBusinessDeliverablePath(targetRel)) {
+        return { ok: false as const, error: 'Deliverable path is invalid. Use output/<filename> and avoid cache/bytecode names.' };
+      }
+    }
+
+    if (!textFilePattern.test(targetRel)) return { ok: false as const, error: 'Only approved text formats can be written.' };
+    if (Buffer.byteLength(body) > MAX_FILE_BYTES) {
+      return { ok: false as const, error: `Single write exceeds ${MAX_FILE_BYTES} bytes. Use start/append/finish staged writes.` };
+    }
+    const file = await workspacePath(targetRel);
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    if (writeMode === 'append') await writeFile(file, body, { encoding: 'utf8', flag: 'a', mode: 0o600 });
+    else await writeFile(file, body, { encoding: 'utf8', mode: 0o600 });
+    const size = (await stat(file)).size;
+    return {
+      ok: true as const,
+      path: targetRel,
+      bytes: Buffer.byteLength(body),
+      totalBytes: size,
+      mode: writeMode,
+      deliverable: asDeliverable,
+      workspaceMode: projectBound ? 'project' as const : 'conversation' as const,
+    };
   };
 
   const tools: AgentTool[] = [
@@ -421,7 +500,7 @@ export function createSkillExecutionTools(input: {
         if (!root) return { ok: false, error: 'Local Skill filesystem access is unavailable for this package.' };
         try {
           const file = await pathInside(root, relative);
-          return { ok: true, path: safeRelative(relative), content: truncate(await readFile(file, 'utf8'), MAX_FILE_BYTES) };
+          return { ok: true, path: safeRelative(relative), content: truncate(await readFile(file, 'utf8'), MAX_READ_RETURN_CHARS) };
         } catch {
           return { ok: false, error: `Skill file is unavailable: ${safeRelative(relative)}. Load the Skill and use only a path returned in its files list.` };
         }
@@ -429,74 +508,127 @@ export function createSkillExecutionTools(input: {
     }),
     defineAgentTool({
       name: 'read_workspace_file',
-      description: 'Read a text artifact from this run\'s isolated workspace. Use only a relative path.',
+      description: projectBound
+        ? 'Read a text file from the shared project workspace root. Use only a relative path. Returns at most ~6KB — do not use this to re-dump CSS/JS you just wrote.'
+        : 'Read a text artifact from this run\'s isolated conversation workspace. Use only a relative path. Returns at most ~6KB — do not use this to re-dump CSS/JS you just wrote.',
       parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 240 }) }),
       execute: async ({ path: relative }) => {
         if (!textFilePattern.test(relative)) return { ok: false, error: 'Only approved text formats can be read from the workspace.' };
         const file = await workspacePath(relative);
-        return { ok: true, path: safeRelative(relative), content: truncate(await readFile(file, 'utf8'), MAX_FILE_BYTES) };
+        return { ok: true, path: safeRelative(relative), content: truncate(await readFile(file, 'utf8'), MAX_READ_RETURN_CHARS) };
       },
     }),
     defineAgentTool({
       name: 'write_workspace_file',
-      description:
-        'Write a text file to this run\'s isolated workspace. Process files (generators/scripts) stay outside output/. Finished business deliverables must use path under output/ or pass deliverable=true (auto-places under output/). Keep each call small: prefer content ≤12KB, or chunks (≤6KB each, up to 24); use mode "append" for large files.',
+      description: projectBound
+        ? 'Write a UTF-8 text file into the shared project workspace root. Prefer ONE content write only for ≤8KB. Larger / full sites: start_workspace_write → append_workspace_write(seq) → finish_workspace_write. chunks=string[] joins in order in one call (each ≤4KB). encoding defaults to utf8; base64 only as last-resort escape hatch.'
+        : 'Write a UTF-8 text file to this run\'s conversation workspace. Deliverables: output/ path or deliverable=true. Prefer ONE content write only for ≤8KB. Full styled pages: start_workspace_write → append_workspace_write with seq=1..N → finish (in-memory join, then one replace). Never one-shot a large HTML+CSS document. Prefer utf8; base64 only if JSON escaping keeps failing.',
       parameters: Type.Object({
         path: Type.String({ minLength: 1, maxLength: 240 }),
         content: Type.Optional(Type.String({ maxLength: MAX_WRITE_CONTENT })),
         chunks: Type.Optional(Type.Array(Type.String({ maxLength: MAX_WRITE_CHUNK }), { maxItems: MAX_WRITE_CHUNKS })),
+        encoding: Type.Optional(StringEnum(['utf8', 'base64'] as const)),
         mode: Type.Optional(StringEnum(['replace', 'append'] as const)),
-        /** When true, file is written under output/ and archived as a business deliverable. */
         deliverable: Type.Optional(Type.Boolean()),
       }),
-      execute: async ({ path: relative, content, chunks, mode, deliverable }) => {
+      execute: async ({ path: relative, content, chunks, encoding, mode, deliverable }) => {
         if (!canWriteWorkspace) return writeDenied();
-        const writeMode = mode === 'append' ? 'append' : 'replace';
+        const resolved = resolveWriteBody({ content, chunks, encoding });
+        if (!resolved.ok) return { ok: false, error: resolved.error };
+        return persistWorkspaceText({
+          relative,
+          body: resolved.body,
+          mode: mode === 'append' ? 'append' : 'replace',
+          deliverable,
+        });
+      },
+    }),
+    defineAgentTool({
+      name: 'start_workspace_write',
+      description: 'Begin a format-agnostic staged write. Assembly is in-memory; finish does one disk write (default replace). Then append_workspace_write with seq=1,2,3… (≤3.5KB UTF-8 each), then finish_workspace_write. Optional totalParts locks the expected piece count.',
+      parameters: Type.Object({
+        path: Type.String({ minLength: 1, maxLength: 240 }),
+        mode: Type.Optional(StringEnum(['replace', 'append'] as const)),
+        deliverable: Type.Optional(Type.Boolean()),
+        totalParts: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })),
+      }),
+      execute: async ({ path: relative, mode, deliverable, totalParts }) => {
+        if (!canWriteWorkspace) return writeDenied();
         const requested = safeRelative(relative);
-        let asDeliverable = Boolean(deliverable) || isUnderWorkspaceOutput(requested);
-        let targetRel = asDeliverable ? toOutputPath(requested) : requested;
-        // Models commonly mark only the first chunk as deliverable, then append
-        // later chunks using the original bare filename. Continue that existing
-        // output file instead of silently creating a second partial file at the
-        // workspace root.
-        if (!asDeliverable && writeMode === 'append') {
-          const outputRel = toOutputPath(requested);
-          try {
-            const outputFile = await workspacePath(outputRel);
-            if ((await stat(outputFile)).isFile()) {
-              asDeliverable = true;
-              targetRel = outputRel;
-            }
-          } catch {
-            // No matching staged deliverable yet; append to the requested file.
-          }
+        if (!textFilePattern.test(requested) && !textFilePattern.test(toOutputPath(requested))) {
+          return { ok: false, error: 'Only approved text formats can be written.' };
         }
-        if (!textFilePattern.test(targetRel)) return { ok: false, error: 'Only approved text formats can be written.' };
-        if (asDeliverable && !isBusinessDeliverablePath(targetRel)) {
-          return { ok: false, error: 'Deliverable path is invalid. Use output/<filename> and avoid cache/bytecode names.' };
-        }
-        const body = typeof content === 'string' && content.length ? content : (chunks ?? []).join('');
-        if (!body) return { ok: false, error: 'Write body is empty. Pass content or chunks.' };
-        if (Buffer.byteLength(body) > MAX_FILE_BYTES) return { ok: false, error: `Single write exceeds ${MAX_FILE_BYTES} bytes. Split with mode "append".` };
-        const file = await workspacePath(targetRel);
-        await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-        if (writeMode === 'append') await writeFile(file, body, { encoding: 'utf8', flag: 'a', mode: 0o600 });
-        else await writeFile(file, body, { encoding: 'utf8', mode: 0o600 });
-        const size = (await stat(file)).size;
+        const session = startStagedWrite({
+          path: requested,
+          mode: mode === 'append' ? 'append' : 'replace',
+          deliverable,
+          totalParts,
+        });
         return {
           ok: true,
-          path: targetRel,
-          bytes: Buffer.byteLength(body),
-          totalBytes: size,
-          mode: writeMode,
-          deliverable: asDeliverable,
+          writeId: session.id,
+          path: session.path,
+          mode: session.mode,
+          nextSeq: 1,
+          totalParts: session.totalParts,
+          maxAppendChars: MAX_STAGED_APPEND_CHARS,
+          hint: `Next: append_workspace_write({ writeId: "${session.id}", seq: 1, text: "<≤${MAX_STAGED_APPEND_CHARS} UTF-8 chars>" }). Require increasing seq; use reset=true+seq=1 only to discard and restart.`,
         };
       },
     }),
     defineAgentTool({
+      name: 'append_workspace_write',
+      description: `Append one UTF-8 piece to a staged write (≤${MAX_STAGED_APPEND_CHARS} chars). seq is required and must be the next expected index (1-based). Optional total locks piece count. reset=true+seq=1 discards prior pieces and restarts. Out-of-order seq is rejected — no format-specific guessing.`,
+      parameters: Type.Object({
+        writeId: Type.String({ minLength: 8, maxLength: 80 }),
+        text: Type.String({ minLength: 1, maxLength: MAX_STAGED_APPEND_CHARS }),
+        seq: Type.Integer({ minimum: 1, maximum: 64 }),
+        total: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })),
+        reset: Type.Optional(Type.Boolean()),
+      }),
+      execute: async ({ writeId, text, seq, total, reset }) => {
+        if (!canWriteWorkspace) return writeDenied();
+        const result = appendStagedWrite(writeId, text, { seq, total, reset: reset === true });
+        if (!result.ok) return { ok: false, error: result.error };
+        return {
+          ok: true,
+          writeId,
+          seq,
+          nextSeq: result.session.nextSeq,
+          appended: result.appended,
+          totalBytes: result.session.bytes,
+          parts: result.session.parts.length,
+          totalParts: result.session.totalParts,
+          path: result.session.path,
+          ...(result.reset
+            ? { reset: true, hint: 'Assembly restarted from seq=1; prior pieces discarded.' }
+            : {}),
+        };
+      },
+    }),
+    defineAgentTool({
+      name: 'finish_workspace_write',
+      description: 'Commit a staged write: join accepted pieces in seq order and write once to disk. Fails if totalParts was declared and not all pieces arrived. Returns the same shape as write_workspace_file.',
+      parameters: Type.Object({
+        writeId: Type.String({ minLength: 8, maxLength: 80 }),
+      }),
+      execute: async ({ writeId }) => {
+        if (!canWriteWorkspace) return writeDenied();
+        const taken = takeStagedWrite(writeId);
+        if (!taken.ok) return { ok: false, error: taken.error };
+        return persistWorkspaceText({
+          relative: taken.session.path,
+          body: taken.body,
+          mode: taken.session.mode,
+          deliverable: taken.session.deliverable,
+        });
+      },
+    }),
+    defineAgentTool({
       name: 'register_deliverable',
-      description:
-        'Mark an existing run-workspace file as a finished business deliverable. Copies it into output/ (if needed) so it can be archived to the asset library / published to a project. Use this for final products of any type (including .py/.js) — do not register generator scripts you only needed as intermediate tooling.',
+      description: projectBound
+        ? 'Confirm a finished file already written in the project workspace root. Prefer writing final files directly at the project root; this call is an idempotent confirmation.'
+        : 'Mark an existing run-workspace file as a finished business deliverable. Copies it into output/ (if needed) so it can be archived to the asset library. Use this for final products of any type (including .py/.js) — do not register generator scripts you only needed as intermediate tooling.',
       parameters: Type.Object({
         path: Type.String({ minLength: 1, maxLength: 240 }),
         destName: Type.Optional(Type.String({ minLength: 1, maxLength: 180 })),
@@ -513,6 +645,19 @@ export function createSkillExecutionTools(input: {
           if (!(await stat(source)).isFile()) throw new Error('Not a file');
         } catch {
           return { ok: false, error: `Run workspace file is unavailable: ${sourceRel}.` };
+        }
+        if (projectBound) {
+          const bytes = (await stat(source)).size;
+          return {
+            ok: true,
+            path: sourceRel,
+            sourcePath: sourceRel,
+            projectPath: sourceRel,
+            bytes,
+            deliverable: true,
+            alreadyRegistered: true,
+            workspaceMode: 'project',
+          };
         }
         // A file already under output/ is already a business deliverable. Do
         // not turn a harmless "register" confirmation into a second renamed
@@ -599,8 +744,9 @@ export function createSkillExecutionTools(input: {
     }),
     defineAgentTool({
       name: 'publish_to_project',
-      description:
-        'Promote a finished business deliverable from this run workspace into the shared project workspace. Source must be under output/ (or already registered). Process files under scripts/tools/tmp stay in the run workspace. Requires a project-bound run.',
+      description: projectBound
+        ? 'Optional: copy/rename a file within the project workspace root. Prefer writing final files directly at the desired project path; this is mainly for relocating a finished file.'
+        : 'Promote a finished business deliverable from this run workspace into the shared project workspace. Source must be under output/ (or already registered). Requires a project-bound run.',
       parameters: Type.Object({
         path: Type.String({ minLength: 1, maxLength: 240 }),
         destPath: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
@@ -611,6 +757,27 @@ export function createSkillExecutionTools(input: {
           return { ok: false, error: 'Current run is not bound to a project workspace. publish_to_project is only available for project tasks.' };
         }
         const sourceRel = safeRelative(relative);
+        // Project mode: workspace root already is the project. Allow any non-process file.
+        if (projectBound) {
+          const destRel = safeRelative(destPath || (isUnderWorkspaceOutput(sourceRel)
+            ? sourceRel.slice(WORKSPACE_OUTPUT_DIR.length + 1)
+            : sourceRel));
+          if (PROCESS_ONLY_DIRS.has(pathParts(sourceRel)[0] || '') || PROCESS_ONLY_DIRS.has(pathParts(destRel)[0] || '')) {
+            return { ok: false, error: 'Process files under scripts/tools/tmp cannot be published as project deliverables.' };
+          }
+          let source: string;
+          try {
+            source = await workspacePath(sourceRel);
+            if (!(await stat(source)).isFile()) throw new Error('Not a file');
+          } catch {
+            return { ok: false, error: `Project file is unavailable: ${sourceRel}.` };
+          }
+          const dest = await projectPath(destRel);
+          await mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
+          if (path.resolve(source) !== path.resolve(dest)) await copyFile(source, dest);
+          const bytes = (await stat(dest)).size;
+          return { ok: true, path: sourceRel, projectPath: destRel, bytes, projectRoot, deliverable: true, workspaceMode: 'project' };
+        }
         const stagedRel = isBusinessDeliverablePath(sourceRel) ? sourceRel : toOutputPath(sourceRel);
         const destRel = safeRelative(destPath || (isUnderWorkspaceOutput(sourceRel)
           ? sourceRel.slice(WORKSPACE_OUTPUT_DIR.length + 1)

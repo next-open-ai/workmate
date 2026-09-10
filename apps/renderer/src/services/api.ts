@@ -1,5 +1,5 @@
 import { getStoredSessionToken } from './auth';
-import { DSH_ENV_FIX_ACTION_ID } from '../features/dsh';
+import { DSH_ENV_FIX_ACTION_ID } from '../features/dsh/environment-ui';
 
 export interface HealthStatus { status: 'ok'; service: 'workmate-api'; version: string; }
 export interface EnvCheckItem {
@@ -1106,6 +1106,13 @@ export interface AssetPayload {
   sha256: string;
   projectId: string | null;
   workspaceRelative: string | null;
+  kind?: 'file' | 'bundle';
+  entryPath?: string | null;
+  manifest?: {
+    version: number;
+    entryPath: string;
+    files: Array<{ path: string; bytes: number; sha256: string; mimeType: string }>;
+  } | null;
 }
 
 function normalizeAsset(item: Partial<AssetPayload>): AssetPayload {
@@ -1127,6 +1134,9 @@ function normalizeAsset(item: Partial<AssetPayload>): AssetPayload {
     sha256: String(item.sha256 || ''),
     projectId: item.projectId ? String(item.projectId) : null,
     workspaceRelative: item.workspaceRelative ? String(item.workspaceRelative) : null,
+    kind: item.kind === 'bundle' ? 'bundle' : 'file',
+    entryPath: item.entryPath ? String(item.entryPath) : null,
+    manifest: item.manifest && typeof item.manifest === 'object' ? item.manifest : null,
   };
 }
 
@@ -1154,6 +1164,19 @@ export async function archiveWorkspaceArtifact(input: {
   const body = await response.json().catch(() => ({})) as Partial<AssetPayload> & { message?: string };
   if (!response.ok) throw new Error(body.message || `Asset archive failed: ${response.status}`);
   return normalizeAsset(body);
+}
+
+export async function archiveWorkspaceBundle(input: { runId: string; conversationId?: string; employeeId?: string; projectId?: string }) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/assets/archive-bundle`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) });
+  const body = await response.json().catch(() => ({})) as Partial<AssetPayload> & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Bundle archive failed: ${response.status}`);
+  return normalizeAsset(body);
+}
+
+export function archivedBundleContentUrl(assetId: string, relativePath = '') {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  return `${apiBase}/api/assets/bundle/${encodeURIComponent(assetId)}/${relativePath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 export async function linkArchivedAssets(input: { projectId: string; assetIds: string[]; workspacePath?: string }) {
@@ -1294,4 +1317,3 @@ export async function restartRemoteGateway() {
   if (!response.ok) throw new Error(body.message || `Remote gateway restart failed: ${response.status}`);
   return { running: Boolean(body.running), pid: body.pid ?? null };
 }
-
