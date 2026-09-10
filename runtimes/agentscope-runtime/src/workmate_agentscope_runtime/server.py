@@ -346,6 +346,9 @@ async def serve(*, host: str, port: int, token: str, path: str) -> None:
         socks = getattr(server, "sockets", None) or []
         bound_port = socks[0].getsockname()[1] if socks else port
         print(f"WORKMATE_AGENTSCOPE_PORT={bound_port}", flush=True)
+        # Mirror to stderr so supervisors that only tee stderr still observe the port
+        # (and as a fallback when stdout buffering differs across platforms).
+        print(f"WORKMATE_AGENTSCOPE_PORT={bound_port}", file=sys.stderr, flush=True)
         print(
             f"workmate-agentscope-runtime listening ws://{host}:{bound_port}{path}",
             file=sys.stderr,

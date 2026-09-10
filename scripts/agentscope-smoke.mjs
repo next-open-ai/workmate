@@ -16,6 +16,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = path.join(root, 'runtimes/agentscope-runtime');
 const srcPath = path.join(runtimeRoot, 'src');
 const token = randomBytes(12).toString('hex');
+/** Cold import of agentscope+deps on Windows CI can exceed 12s after a fresh venv install. */
+const PORT_WAIT_MS = process.platform === 'win32' ? 90_000 : 45_000;
 
 function bundledPython() {
   return process.platform === 'win32'
@@ -41,15 +43,20 @@ function resolvePython() {
   const venvPy = ensureRuntimePrepared();
   if (fs.existsSync(venvPy)) return venvPy;
   if (process.env.WORKMATE_AGENTSCOPE_PYTHON) return process.env.WORKMATE_AGENTSCOPE_PYTHON;
-  return 'python3';
+  return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 const python = resolvePython();
 
+function matchPortLine(line) {
+  const m = String(line).trim().match(/^WORKMATE_AGENTSCOPE_PORT=(\d+)\s*$/);
+  return m ? Number(m[1]) : null;
+}
+
 function rpc(ws, method, params) {
   const id = `${method}-${Date.now()}`;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timeout ${method}`)), 10_000);
+    const timer = setTimeout(() => reject(new Error(`timeout ${method}`)), 15_000);
     const onMessage = (raw) => {
       let msg;
       try { msg = JSON.parse(String(raw)); } catch { return; }
@@ -65,20 +72,77 @@ function rpc(ws, method, params) {
 }
 
 async function main() {
+  // Fail fast with a clear import error instead of a opaque "no port" timeout.
+  // Also warms the Windows CI disk cache after a fresh pip install.
+  const warm = spawnSync(
+    python,
+    ['-c', 'import workmate_agentscope_runtime; print("agentscope-runtime-import-ok", flush=True)'],
+    {
+      cwd: runtimeRoot,
+      env: {
+        ...process.env,
+        PYTHONPATH: [srcPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+      },
+      encoding: 'utf8',
+      timeout: PORT_WAIT_MS,
+      windowsHide: true,
+    },
+  );
+  if (warm.status !== 0) {
+    throw new Error(
+      `AgentScope runtime import failed (exit ${warm.status})\n${warm.stdout || ''}\n${warm.stderr || ''}`,
+    );
+  }
+  process.stderr.write(`${(warm.stdout || '').trim() || 'agentscope-runtime-import-ok'}\n`);
+
+  const stdoutLines = [];
+  const stderrLines = [];
   const child = spawn(python, ['-m', 'workmate_agentscope_runtime', '--host', '127.0.0.1', '--port', '0', '--token', token], {
     cwd: runtimeRoot,
-    env: { ...process.env, PYTHONPATH: srcPath },
+    env: {
+      ...process.env,
+      PYTHONPATH: [srcPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      PYTHONUNBUFFERED: '1',
+      PYTHONIOENCODING: 'utf-8',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
   const port = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('no port')), 12_000);
-    createInterface({ input: child.stdout }).on('line', (line) => {
-      const m = line.trim().match(/^WORKMATE_AGENTSCOPE_PORT=(\d+)$/);
-      if (m) { clearTimeout(timer); resolve(Number(m[1])); }
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      const tail = [
+        stdoutLines.length ? `stdout:\n${stdoutLines.slice(-20).join('\n')}` : 'stdout: (empty)',
+        stderrLines.length ? `stderr:\n${stderrLines.slice(-40).join('\n')}` : 'stderr: (empty)',
+      ].join('\n');
+      finish(reject, new Error(`no port within ${PORT_WAIT_MS}ms\n${tail}`));
+    }, PORT_WAIT_MS);
+
+    const onLine = (line, sink) => {
+      sink.push(line);
+      const found = matchPortLine(line);
+      if (found != null) finish(resolve, found);
+    };
+
+    createInterface({ input: child.stdout }).on('line', (line) => onLine(line, stdoutLines));
+    createInterface({ input: child.stderr }).on('line', (line) => {
+      onLine(line, stderrLines);
+      process.stderr.write(`${line}\n`);
     });
-    child.stderr.on('data', (buf) => process.stderr.write(buf));
-    child.once('exit', (code) => { clearTimeout(timer); reject(new Error(`exit ${code}`)); });
+    child.once('exit', (code) => {
+      const tail = stderrLines.slice(-20).join('\n');
+      finish(reject, new Error(`exit ${code}${tail ? `\n${tail}` : ''}`));
+    });
+    child.once('error', (error) => finish(reject, error));
   });
 
   const url = `ws://127.0.0.1:${port}/v1/agent?token=${token}`;
@@ -110,7 +174,7 @@ async function main() {
   console.log('start', started);
 
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('run timeout')), 10_000);
+    const timer = setTimeout(() => reject(new Error('run timeout')), 15_000);
     const tick = setInterval(() => {
       if (finished) { clearInterval(tick); clearTimeout(timer); resolve(); }
     }, 50);
@@ -125,7 +189,7 @@ async function main() {
   if (finished?.status !== 'completed') throw new Error('run not completed');
 
   ws.close();
-  child.kill('SIGTERM');
+  child.kill();
   console.log('agentscope smoke OK');
 }
 

@@ -73,13 +73,22 @@ function resolvePython(runtimeRoot: string, override?: string): string {
   if (override) return override;
   if (process.env.WORKMATE_AGENTSCOPE_PYTHON) return process.env.WORKMATE_AGENTSCOPE_PYTHON;
   const candidates = [
+    path.join(runtimeRoot, '.venv', 'Scripts', 'python.exe'),
     path.join(runtimeRoot, '.venv', 'bin', 'python3'),
+    path.join(runtimeRoot, '.venv', 'bin', 'python'),
     '/opt/homebrew/bin/python3.13',
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
-  return 'python3';
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+const PORT_WAIT_MS = process.platform === 'win32' ? 90_000 : 45_000;
+
+function matchPortLine(line: string): number | null {
+  const match = line.trim().match(/^WORKMATE_AGENTSCOPE_PORT=(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
 }
 
 /**
@@ -98,32 +107,43 @@ export async function startAgentscopeRuntime(options: AgentscopeSupervisorOption
       ...process.env,
       ...options.env,
       PYTHONPATH: [srcPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      PYTHONUNBUFFERED: '1',
+      PYTHONIOENCODING: 'utf-8',
       WORKMATE_AGENTSCOPE_TOKEN: token,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
   let port = 0;
+  const stderrTail: string[] = [];
   const portReady = new Promise<number>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('AgentScope runtime did not publish port in time')), 12_000);
-    const onLine = (line: string) => {
-      const match = line.trim().match(/^WORKMATE_AGENTSCOPE_PORT=(\d+)\s*$/);
-      if (!match) return;
+    let settled = false;
+    const finish = (fn: (value: any) => void, value: any) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve(Number(match[1]));
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      const hint = stderrTail.length ? `\nstderr:\n${stderrTail.slice(-40).join('\n')}` : '';
+      finish(reject, new Error(`AgentScope runtime did not publish port within ${PORT_WAIT_MS}ms${hint}`));
+    }, PORT_WAIT_MS);
+    const onLine = (line: string) => {
+      const found = matchPortLine(line);
+      if (found != null) finish(resolve, found);
     };
     createInterface({ input: child.stdout }).on('line', onLine);
     createInterface({ input: child.stderr }).on('line', (line) => {
-      // Keep stderr visible for diagnostics without treating it as the port channel.
+      stderrTail.push(line);
+      onLine(line);
       if (process.env.WORKMATE_AGENTSCOPE_DEBUG === '1') process.stderr.write(`[agentscope] ${line}\n`);
     });
     child.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`AgentScope runtime exited early (code ${code ?? '?'})`));
+      finish(reject, new Error(`AgentScope runtime exited early (code ${code ?? '?'})`));
     });
     child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
+      finish(reject, error);
     });
   });
 
