@@ -1,6 +1,6 @@
 {
   "name": "@next-open-ai/workmate",
-  "version": "0.3.2",
+  "version": "0.3.16",
   "private": false,
   "description": "Cross-platform local AI workspace.",
   "packageManager": "pnpm@10.20.0",
