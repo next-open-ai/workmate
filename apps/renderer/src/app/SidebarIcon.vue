@@ -7,6 +7,7 @@ defineProps<{
     | 'knowledge'
     | 'automations'
     | 'assets'
+    | 'data'
     | 'projects'
     | 'settings'
     | 'remote'
@@ -50,6 +51,10 @@ defineProps<{
     <template v-else-if="name === 'assets'">
       <path d="M4 7.5 12 3.5l8 4v9l-8 4-8-4v-9Z" />
       <path d="M12 12v9M4 7.5 12 12l8-4.5" />
+    </template>
+    <template v-else-if="name === 'data'">
+      <ellipse cx="12" cy="5.5" rx="7.5" ry="3" />
+      <path d="M4.5 5.5v6c0 1.65 3.36 3 7.5 3s7.5-1.35 7.5-3v-6M4.5 11.5v6c0 1.65 3.36 3 7.5 3s7.5-1.35 7.5-3v-6" />
     </template>
     <template v-else-if="name === 'projects'">
       <rect x="4" y="4" width="16" height="16" rx="2.5" />

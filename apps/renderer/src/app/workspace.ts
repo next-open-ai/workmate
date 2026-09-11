@@ -20,7 +20,7 @@ import {
 } from './employees.js';
 
 export type { Employee, EmployeeDraft, EmployeeId } from './employees.js';
-export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
+export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'data' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
 export type CollaborationDelivery = 'synthesize' | 'direct';
 export interface CollaborationRun { employeeId: EmployeeId; task: string; status: 'running' | 'completed' | 'failed'; summary: string; activities: ToolActivity[]; error?: string; }
 export type ScheduleTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -59,6 +59,8 @@ export interface Message {
   schedule?: ChatScheduleState;
   /** Resolved execution engine for this assistant turn. */
   engine?: 'pi' | 'agentscope' | 'dsh';
+  /** Server run id when this assistant turn was executed via orch. */
+  runId?: string;
   startedAt?: number;
   elapsedMs?: number;
 }
@@ -162,7 +164,7 @@ function friendlyAssistantError(raw: string) {
   if (!text) return '请求失败，请稍后重试。';
   if (NETWORK_ERROR_RE.test(text)) return FRIENDLY_NETWORK_ERROR;
   if (/Bad control character|Unterminated string|Bad escaped character|in string literal in JSON|Expected ',' or '}' after property value|Expected ',' or '\]'|JSON at position|Unexpected non-whitespace/i.test(text)) {
-    return '工具参数 JSON 解析失败（常见原因：单次写入过大被截断）。请改用分阶段写入（start → append(seq) → finish，每片 ≤3.5KB）后重试。';
+    return '工具参数 JSON 解析失败（常见原因：单次写入内容过大或转义被截断）。请缩小本次 write 内容，改用一次初始写入加必要的原生 edit 后重试。';
   }
   return text;
 }
@@ -327,16 +329,24 @@ export function useWorkspace() {
   async function alignServerConversation(conversation: Conversation, sessionId: string): Promise<void> {
     const session = await orch.getChatSession(sessionId);
     if (!session) return;
+    // While a run streams, assistant message.content stays empty until settle;
+    // live text is on the run transcript — hydrate so mobile/desktop stay in sync.
+    const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
+    const liveByRunId = new Map(runs.map((run) => [run.id, run] as const));
     const preserved = new Map<string, Message>(conversation.messages.map((message) => [message.id, message]));
     conversation.messages = session.messages
       .filter((message) => !message.superseded)
       .map((message) => {
         const old = preserved.get(message.id);
+        const run = message.runId ? liveByRunId.get(message.runId) : undefined;
+        const liveText = run?.transcript?.trim() || '';
+        const failedText = run?.status === 'failed' ? `⚠ ${run.error || '回复失败'}` : '';
+        const cancelledText = run?.status === 'cancelled' ? `⏹ ${run.error || '已中止'}` : '';
         const base: Message = {
           id: message.id,
           role: message.role,
-          // Prefer live SSE text while the server still has an empty placeholder mid-run.
-          content: message.content || old?.content || '',
+          content: message.content || liveText || failedText || cancelledText || old?.content || '',
+          runId: message.runId || old?.runId,
         };
         if (message.role === 'assistant' && old) {
           if (old.reasoning) base.reasoning = old.reasoning;
@@ -350,9 +360,12 @@ export function useWorkspace() {
           if (old.startedAt) base.startedAt = old.startedAt;
           if (old.elapsedMs != null) base.elapsedMs = old.elapsedMs;
         }
+        if (message.role === 'assistant' && run?.engine && !base.engine) base.engine = run.engine;
         return base;
       });
+    conversation.title = session.title || conversation.title;
     conversation.updatedAt = session.updatedAt;
+    await archiveMissingArtifactsFromRuns(conversation, conversation.messages, runs);
     serverBump();
     await persist();
   }
@@ -361,20 +374,44 @@ export function useWorkspace() {
     const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
     if (!isUserFacingDeliverablePath(normalized)) return;
     try {
-      // A website is one deliverable package.  Its CSS, scripts and images must
-      // stay beside index.html so relative URLs keep working when previewed.
-      if (normalized !== 'output/index.html' && normalized.startsWith('output/')) return;
+      // SITE packages: archive index.html as one bundle. Standalone deliverables
+      // under output/ (xlsx/pdf/md/…) must still become asset-library cards —
+      // the previous "only index.html" gate dropped Excel/PDF from server chat
+      // even when the run had already registered them.
       const asset = normalized === 'output/index.html'
         ? await archiveBundle({ runId, conversationId: conversation.serverSessionId, employeeId: conversation.employeeId })
         : await archiveArtifact({ runId, relativePath: normalized, conversationId: conversation.serverSessionId, employeeId: conversation.employeeId });
-      const current = assistantMessage.assets?.findIndex((item) => item.id === asset.id) ?? -1;
-      if (current >= 0) assistantMessage.assets?.splice(current, 1, asset as Asset);
-      else assistantMessage.assets?.push(asset as Asset);
+      if (!assistantMessage.assets) assistantMessage.assets = [];
+      const current = assistantMessage.assets.findIndex((item) => item.id === asset.id);
+      if (current >= 0) assistantMessage.assets.splice(current, 1, asset as Asset);
+      else if (!assistantMessage.assets.some((item) => item.name === asset.name && item.sizeBytes === asset.sizeBytes)) {
+        assistantMessage.assets.push(asset as Asset);
+      }
       serverBump();
     } catch (error) {
       const message = error instanceof Error ? error.message : '资产归档失败。';
       if (/Only business deliverables|Only user-facing deliverables|no longer available/i.test(message)) return;
-      assistantMessage.activities?.push({ toolName: 'archive_asset', status: 'failed', summary: message });
+      if (!assistantMessage.activities) assistantMessage.activities = [];
+      assistantMessage.activities.push({ toolName: 'archive_asset', status: 'failed', summary: message });
+    }
+  }
+
+  /** Phone-originated turns miss the desktop SSE archive hook — catch up from run.artifacts. */
+  async function archiveMissingArtifactsFromRuns(
+    conversation: Conversation,
+    messages: Message[],
+    runs: orch.ServerRunRecord[],
+  ) {
+    for (const run of runs) {
+      if (!run.artifacts?.length || run.status === 'running') continue;
+      const assistantMessage = messages.find((message) => message.role === 'assistant' && message.runId === run.id);
+      if (!assistantMessage) continue;
+      if (!assistantMessage.assets) assistantMessage.assets = [];
+      for (const artifact of run.artifacts) {
+        const name = artifact.path.split('/').pop() || artifact.path;
+        if (assistantMessage.assets.some((item) => item.name === name)) continue;
+        await archiveServerArtifact(conversation, assistantMessage, run.id, artifact.path);
+      }
     }
   }
 
@@ -398,10 +435,12 @@ export function useWorkspace() {
       // when deltas were missed (SSE gap) or the run outlived the subscription.
       if (serverAssistant.content && assistantMessage.content !== serverAssistant.content) assistantMessage.content = serverAssistant.content;
     }
-    if (!assistantMessage.engine) {
-      const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
-      const run = runs.find((item) => item.id === runId);
-      if (run?.engine) assistantMessage.engine = run.engine;
+    assistantMessage.runId = runId;
+    const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
+    const run = runs.find((item) => item.id === runId);
+    if (!assistantMessage.engine && run?.engine) assistantMessage.engine = run.engine;
+    if (run?.artifacts?.length) {
+      await archiveMissingArtifactsFromRuns(conversation, [assistantMessage], [run]);
     }
     conversation.updatedAt = session.updatedAt;
     serverBump();
@@ -932,6 +971,20 @@ export function useWorkspace() {
     activeConversationId.value = null;
     view.value = 'chat';
   };
+  /** Open a fresh conversation and immediately send a prepared prompt (e.g. data customize). */
+  const startChatWithPrompt = async (
+    prompt: string,
+    model: ProviderConfig,
+    options: { employeeId?: EmployeeId; title?: string } = {},
+  ) => {
+    const text = prompt.trim();
+    if (!text) return undefined;
+    flushLeavingConversation(activeConversationId.value);
+    if (options.employeeId) currentEmployeeId.value = options.employeeId;
+    activeConversationId.value = null;
+    view.value = 'chat';
+    return addMessage(text, model, { newConversation: true, employeeId: options.employeeId });
+  };
   const selectConversation = (id: string) => {
     const conversation = conversations.value.find((item) => item.id === id);
     if (!conversation) return;
@@ -1312,7 +1365,7 @@ export function useWorkspace() {
         model: toModelPayload(synthesizeModel, { enableSearch: false }),
         skills: [],
         searchProviders: [],
-        maxSteps: Math.min(8, synthesizeOpts.maxSteps),
+        maxSteps: synthesizeOpts.maxSteps,
         runTimeoutMs: synthesizeOpts.runTimeoutMs,
         signal: runAbort.signal,
       }, (delta) => {
@@ -1795,7 +1848,7 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
 
     // Phase 2 — fill objectives + contracts for the fixed structure.
     let detailOut = '';
-    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. Set contract.maxSteps only when the task needs a budget different from the employee default. Research / compliance / evidence-brief tasks should use 8-12 steps; multi-page implementation may use a higher budget. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
+    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. The platform baseline is 50 tool steps for every project task. Omit contract.maxSteps when 50 is sufficient; set it only when a task clearly needs MORE than 50. Never set it below 50. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
     await streamChat({
       profile: { id: 'project-coordinator-detail', name: 'Project coordinator', instructions: 'Output valid JSON array only.', toolIds: [] },
       messages: [{ role: 'user', content: detailPrompt }],
@@ -1901,5 +1954,45 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
       await new Promise((resolve) => setTimeout(resolve, 350));
     }
   };
-  return { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, chatBusy, load, setView, startChat, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride };
+  async function ensureActiveServerSession(): Promise<string | null> {
+    const conversation = activeConversation.value;
+    if (!conversation) return null;
+    return ensureServerSession(conversation, conversation.title || '手机对话');
+  }
+
+  async function pullActiveConversationFromServer(): Promise<void> {
+    const conversation = activeConversation.value;
+    if (!conversation?.serverSessionId) return;
+    await alignServerConversation(conversation, conversation.serverSessionId).catch(() => undefined);
+    serverBump();
+  }
+
+  /**
+   * When the phone taps “新对话”, the QR token rebinds to a new orch session.
+   * Adopt that session into the local conversation list and switch to it.
+   */
+  async function followMobileChatSession(sessionId: string, title?: string): Promise<Conversation | null> {
+    const id = String(sessionId || '').trim();
+    if (!id) return null;
+    await hydrateServerConversations().catch(() => undefined);
+    let conversation = conversations.value.find((item) => item.serverSessionId === id) || null;
+    if (!conversation) {
+      conversation = {
+        id: crypto.randomUUID(),
+        title: title || '新对话',
+        employeeId: activeConversation.value?.employeeId || currentEmployeeId.value,
+        messages: [],
+        updatedAt: Date.now(),
+        serverSessionId: id,
+      };
+      conversations.value = [conversation, ...conversations.value];
+      await alignServerConversation(conversation, id).catch(() => undefined);
+      await persist();
+    }
+    activeConversationId.value = conversation.id;
+    serverBump();
+    return conversation;
+  }
+
+  return { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, chatBusy, load, setView, startChat, startChatWithPrompt, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride, ensureActiveServerSession, pullActiveConversationFromServer, followMobileChatSession };
 }

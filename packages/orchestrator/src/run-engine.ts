@@ -375,6 +375,15 @@ export class RunEngine {
     const timeoutId = setTimeout(() => abortController.abort(new Error(`Run timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
 
     try {
+      const conversationId = String(options.request.conversationId || '').trim()
+        || (options.kind === 'chat' ? options.sessionId : '');
+      const request: ChatRequest = {
+        ...options.request,
+        runId,
+        // Used by preview_server_start to map conversation SITE asset bundles.
+        // Does not change run workspace isolation.
+        ...(conversationId ? { conversationId } : {}),
+      };
       await this.dispatcher.dispatch({
         runId,
         orgId: options.orgId,
@@ -383,7 +392,7 @@ export class RunEngine {
         kind: options.kind,
         priority: options.kind === 'chat' ? 'high' : 'normal',
         signal: abortController.signal,
-        execute: () => this.runner.start(options.request, emit, { abortSignal: abortController.signal }),
+        execute: () => this.runner.start(request, emit, { abortSignal: abortController.signal }),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model request failed.';

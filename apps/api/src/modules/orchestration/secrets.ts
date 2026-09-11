@@ -47,6 +47,12 @@ function applySecretsPayload(payload?: OpcaiSecrets) {
   cache = { model: payload?.model, search: payload?.search };
 }
 
+/** Apply a decrypted snapshot from the desktop parent (IPC or internal HTTP). */
+export function applyParentSecrets(payload?: OpcaiSecrets) {
+  applySecretsPayload(payload);
+  ensurePushListener();
+}
+
 function loadSecretsFile(): OpcaiSecrets | null {
   const file = process.env.WORKMATE_SECRETS_FILE;
   if (!file) return null;

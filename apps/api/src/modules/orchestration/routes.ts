@@ -7,6 +7,7 @@ import type { ChatRunContext, ConfirmProjectInput, CreateProjectDraftInput, Proj
 import { requireAuth } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource, requireSystemAdmin } from '../auth/ownership.js';
 import { resolveEmployeeMcpConnections, resolveTaskContext } from './context-assembler.js';
+import { applyParentSecrets } from './secrets.js';
 
 /**
  * Orchestration module (M0): hosts the headless orchestrator inside the API
@@ -193,6 +194,19 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     if (!key) return fail(reply, new Error('key is required.'));
     await orch.store.delete(key);
     return { ok: true, key };
+  });
+
+  /* Desktop keyring push when API is started outside the Electron fork (dev.mjs). */
+  app.put('/secrets', async (request, reply) => {
+    const auth = requireAuth(request);
+    try {
+      requireSystemAdmin(auth);
+    } catch (error) {
+      return reply.code(403).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+    const body = (request.body ?? {}) as { model?: unknown; search?: unknown };
+    applyParentSecrets({ model: body.model, search: body.search });
+    return { ok: true };
   });
 
   /* ------------------------------------------------------------------ *

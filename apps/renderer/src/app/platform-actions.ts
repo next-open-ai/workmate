@@ -5,6 +5,17 @@ function openUrl(url: string) {
   window.open(url, '_blank', 'noopener');
 }
 
+/** Prefer the OS default browser (Electron shell.openExternal); fall back to window.open. */
+export async function openExternalBestEffort(url: string) {
+  const target = String(url || '').trim();
+  if (!target) return;
+  if (isDesktopShell() && window.workmateDesktop?.openExternal) {
+    await window.workmateDesktop.openExternal(target);
+    return;
+  }
+  openUrl(target);
+}
+
 export function copyableWorkspaceFileUrl(root: string, relative: string) {
   return workspaceContentUrl(root, relative);
 }

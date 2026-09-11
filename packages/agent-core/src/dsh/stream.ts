@@ -15,6 +15,7 @@ import {
   snapshotWorkspaceFiles,
   workspaceModeContract,
 } from '../workspace-mode.js';
+import { filterMcpConnectionsForTask, STEP_BUDGET_EXCEEDED_MESSAGE } from '../pi-runtime.js';
 
 type DshMcpCatalog = {
   labels: string[];
@@ -36,6 +37,14 @@ function cancellationEvent(runId: string, signal: AbortSignal): AgentEvent {
   };
 }
 
+function lastUserText(input: ChatRequest): string {
+  const history = input.messages ?? [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.role === 'user') return String(history[i]?.content || '');
+  }
+  return '';
+}
+
 function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
   const lines: string[] = [];
   const profile = input.profile?.instructions?.trim();
@@ -55,6 +64,10 @@ function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
     );
   }
   lines.push(workspaceModeContract(resolveWorkspaceMode(input.projectWorkspacePath)));
+  lines.push(
+    'Execution discipline: write the deliverables, run at most one short verification pass, then stop. '
+    + 'Do not spiral into multi-round render/DOM/CSV re-checks, taxonomy crosswalk rewrites, or unrelated MCP calls.',
+  );
   const mcpNames = mcpCatalog?.labels?.length
     ? mcpCatalog.labels
     : (input.mcpConnections ?? [])
@@ -63,12 +76,10 @@ function buildPrompt(input: ChatRequest, mcpCatalog?: DshMcpCatalog): string {
       .slice(0, 12);
   if (mcpNames.length) {
     lines.push(
-      `[MCP servers — prefer these tools over bash exploration]\n`
+      `[Optional MCP servers]\n`
       + `Tools are already registered as mcp__<server>__<tool>. Connected: ${mcpNames.join(', ')}.\n`
-      + `For market / index / stock / fund / macro data: call the matching mcp__ tool FIRST in one shot `
-      + `(e.g. get_index_history / get_a_share_quotes). Do NOT use bash, curl, python, pip, or env probes `
-      + `to rediscover APIs or scrape when an mcp__ tool can answer. Only fall back to bash if every `
-      + `relevant mcp__ call failed with a concrete error.`,
+      + `MCP is optional, not preferred over engine-native tools. Choose the smallest capable tool: use read/write/edit/bash for local workspace work; use an MCP only when it provides task-specific data or an external capability that local tools cannot provide. Do NOT call market/stock/trading-day tools `
+      + `unless the user explicitly asked for live market data.`,
     );
     if (mcpCatalog?.toolLines?.length) {
       lines.push(`[Discovered MCP tool names]\n${mcpCatalog.toolLines.join('\n')}`);
@@ -132,6 +143,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
   let warm: McpWarmResult | null = null;
   let bridges: Awaited<ReturnType<typeof openDshMcpBridges>> | null = null;
   const runStartedAtMs = Date.now();
+  const maxSteps = Math.min(64, Math.max(50, Math.round(Number(input.maxSteps) || 50)));
   try {
     const cwd = resolveDshWorkspace({
       runId,
@@ -146,7 +158,21 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
     });
     const projectFilesBefore = projectBound ? await snapshotWorkspaceFiles(cwd) : null;
     const route = mapWorkmateModelToDshRoute(input.model);
-    const mcpEnabled = enabledMcpConnections(input.mcpConnections);
+    const userText = lastUserText(input);
+    const mcpEnabled = filterMcpConnectionsForTask(
+      enabledMcpConnections(input.mcpConnections),
+      userText,
+      { projectBound },
+    );
+
+    const publishProjectDiff = async function* (): AsyncGenerator<AgentEvent> {
+      if (!projectFilesBefore) return;
+      const after = await snapshotWorkspaceFiles(cwd);
+      for (const [relative, fingerprint] of after) {
+        if (projectFilesBefore.get(relative) === fingerprint) continue;
+        yield { type: 'project.file.published', runId, path: relative, projectPath: relative };
+      }
+    };
 
     if (mcpEnabled.length) {
       yield {
@@ -222,12 +248,14 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         const base = input.profile?.instructions?.slice(0, 4_000)
           || 'You are a careful coding agent working inside a Workmate workspace.';
         const mcpNames = mcpCatalog.labels;
-        const deliverable = `\n\n${workspaceModeContract(projectBound ? 'project' : 'conversation')}\n\n${capabilityAdapter.systemPromptContract()}`;
+        const deliverable = `\n\n${workspaceModeContract(projectBound ? 'project' : 'conversation')}\n\n${capabilityAdapter.systemPromptContract()}`
+          + '\n\nAfter deliverables exist and one short verification pass succeeds, stop. '
+          + 'Do not run multi-round DOM/CSV re-validation or call unrelated market/stock MCP tools.';
         if (!mcpNames.length) return `${base}${deliverable}`;
         const discovered = mcpCatalog.toolLines.length
           ? `\nAvailable MCP tools:\n${mcpCatalog.toolLines.join('\n')}`
           : '';
-        return `${base}${deliverable}\n\nConnected MCP servers (use mcp__* tools first for market/index/stock data; avoid bash/curl/pip discovery): ${mcpNames.join(', ')}.${discovered}`;
+        return `${base}${deliverable}\n\nConnected MCP servers (use only when they directly help the deliverable): ${mcpNames.join(', ')}.${discovered}`;
       })(),
     };
 
@@ -285,6 +313,8 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
     let wake: (() => void) | null = null;
     let done = false;
     let failed = false;
+    let stepBudgetExceeded = false;
+    let toolTurns = 0;
     let emittedText = false;
     const eventMapCtx = createDshEventMapContext();
     const bump = () => { wake?.(); wake = null; };
@@ -314,6 +344,20 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
           bump();
           continue;
         }
+        if (event.type === 'tool.started'
+          && event.toolName !== 'mcp.warm'
+          && event.toolName !== 'mcp.dsh-boot') {
+          toolTurns += 1;
+          if (toolTurns > maxSteps) {
+            stepBudgetExceeded = true;
+            failed = true;
+            done = true;
+            void client?.shutdown();
+            // Drop further tool noise; budget failure is emitted after harvest.
+            bump();
+            continue;
+          }
+        }
         if (event.type === 'run.failed') failed = true;
         queue.push(event);
         bump();
@@ -338,12 +382,17 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         while (queue.length) {
           const event = queue.shift()!;
           yield event;
-          if (event.type === 'run.failed') return;
+          if (event.type === 'run.failed') {
+            // Still publish files so step-budget soft-complete (and UI) can see them.
+            yield* publishProjectDiff();
+            return;
+          }
         }
+        if (stepBudgetExceeded) break;
         if (done) break;
         await new Promise<void>((resolve) => {
           wake = resolve;
-          if (queue.length || done) resolve();
+          if (queue.length || done || stepBudgetExceeded) resolve();
         });
         wake = null;
       }
@@ -355,13 +404,15 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         return;
       }
 
+      if (stepBudgetExceeded) {
+        yield* publishProjectDiff();
+        yield { type: 'run.failed', runId, message: STEP_BUDGET_EXCEEDED_MESSAGE(maxSteps) };
+        return;
+      }
+
       if (!failed) {
         if (projectFilesBefore) {
-          const after = await snapshotWorkspaceFiles(cwd);
-          for (const [relative, fingerprint] of after) {
-            if (projectFilesBefore.get(relative) === fingerprint) continue;
-            yield { type: 'project.file.published', runId, path: relative, projectPath: relative };
-          }
+          yield* publishProjectDiff();
         } else {
           // DSH owns its filesystem plugin; publish only after the successful
           // run has ended and the shared capability adapter verifies each file.
@@ -371,6 +422,8 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
           }
         }
         yield { type: 'run.completed', runId };
+      } else if (projectFilesBefore) {
+        yield* publishProjectDiff();
       }
     } finally {
       off();

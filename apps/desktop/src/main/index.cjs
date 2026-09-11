@@ -1,5 +1,5 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, screen, protocol, net } = require('electron');
-const { fork, execFile, spawnSync } = require('node:child_process');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, screen, protocol, net, Menu } = require('electron');
+const { fork, execFile, spawn, spawnSync } = require('node:child_process');
 const { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } = require('node:fs');
 const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const { homedir, tmpdir } = require('node:os');
@@ -14,6 +14,129 @@ const {
   setLocalEmbeddingEnabled,
   stopSidecarProcess,
 } = require('./local-embedding/sidecar-manager.cjs');
+
+/**
+ * Force-quit / crash leaves Chromium `exit_type=Crashed`, and the next launch
+ * blocks the main thread on a modal "restore pages?" NSAlert — so startApi
+ * never runs and Vite proxies to a dead :4328. Clear the flag before ready.
+ */
+function clearChromiumCrashRestorePrompt() {
+  const userData = app.getPath('userData');
+  for (const name of ['Preferences', 'Local State']) {
+    const file = path.join(userData, name);
+    if (!existsSync(file)) continue;
+    try {
+      const prefs = JSON.parse(readFileSync(file, 'utf8'));
+      let changed = false;
+      const patch = (obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        if (typeof obj.exit_type === 'string' && obj.exit_type !== 'Normal') {
+          obj.exit_type = 'Normal';
+          changed = true;
+        }
+      };
+      patch(prefs);
+      patch(prefs.profile);
+      if (changed) writeFileSync(file, JSON.stringify(prefs));
+    } catch (_) { /* ignore corrupt prefs */ }
+  }
+  for (const name of ['Last Session', 'Current Session', 'Last Tabs', 'Current Tabs']) {
+    const file = path.join(userData, name);
+    if (!existsSync(file)) continue;
+    try { rmSync(file, { force: true }); } catch (_) { /* ignore */ }
+  }
+}
+clearChromiumCrashRestorePrompt();
+
+// After force-quit, macOS may show a modal “reopen windows?” before ready —
+// that blocks startApi on the main thread. Disable resume for this process.
+app.commandLine.appendSwitch('disable-restore-session-state');
+try {
+  const savedRoots = [
+    path.join(homedir(), 'Library', 'Saved Application State'),
+  ];
+  const names = new Set([
+    `${app.getName()}.savedState`,
+    'com.workmate.desktop.savedState',
+    // unpackaged `electron .` uses Electron's default bundle id
+    'com.github.Electron.savedState',
+  ]);
+  for (const root of savedRoots) {
+    for (const name of names) {
+      const target = path.join(root, name);
+      if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+    }
+  }
+} catch (_) { /* ignore */ }
+
+/** Dev runs under `npm run dev` set WORKMATE_RENDERER_URL; packaged builds do not. */
+const isDevShell = Boolean(process.env.WORKMATE_RENDERER_URL);
+/** Set once quit begins so traffic-light close and menu Quit share one path. */
+let isQuitting = false;
+
+function quitApp(reason = 'quit') {
+  if (isQuitting) return;
+  isQuitting = true;
+  try { app.quit(); } catch (_) { /* ignore */ }
+  // Dev shells often keep the event loop alive (spawn/IPC/timers). A short
+  // hard-exit avoids Force Quit when the red traffic light should end `npm run dev`.
+  if (isDevShell) {
+    setTimeout(() => {
+      console.log(`[quit] forcing exit (${reason})`);
+      app.exit(0);
+    }, 600).unref?.();
+  }
+}
+
+function installApplicationMenu() {
+  const isMac = process.platform === 'darwin';
+  const template = [
+    ...(isMac
+      ? [{
+          label: app.name || 'Workmate',
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit', label: '退出 Workmate' },
+          ],
+        }]
+      : []),
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        ...(isMac ? [{ role: 'pasteAndMatchStyle' }, { role: 'delete' }, { role: 'selectAll' }] : [{ role: 'delete' }, { type: 'separator' }, { role: 'selectAll' }]),
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { role: 'close', label: '关闭窗口' },
+        ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : []),
+      ],
+    },
+    ...(!isMac
+      ? [{
+          label: '文件',
+          submenu: [{ role: 'quit', label: '退出' }],
+        }]
+      : []),
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -43,7 +166,8 @@ const previewRoots = new Map();
 
 // A second packaged launch used to start another API on 4328, fail with
 // EADDRINUSE, and leave a visually live but non-functional window.
-if (!app.requestSingleInstanceLock()) {
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -1014,20 +1138,40 @@ function clearApiSecretPushTimers() {
 }
 
 function pushSecretsToApi() {
+  const payload = { model: readModelConfig(), search: readSearchConfig() };
   // `killed` stays false when the child exits on its own; `connected` is the
   // reliable gate. Prefer send(callback) so a closed channel never becomes an
   // uncaught Exception in packaged Electron builds.
-  if (!apiProcess || apiProcess.killed || apiProcess.connected !== true) return;
+  if (apiProcess && !apiProcess.killed && apiProcess.connected === true) {
+    try {
+      apiProcess.send(
+        { type: 'workmate:secrets', payload },
+        () => { /* ignore mid-exit races */ },
+      );
+    } catch (_) {
+      /* child may not be ready yet */
+    }
+  }
+  // Dev / external API (started by scripts/dev.mjs): push over internal HTTP.
+  void fetch(`http://127.0.0.1:${apiPort}/api/orch/secrets`, {
+    method: 'PUT',
+    headers: {
+      'content-type': 'application/json',
+      'x-workmate-internal': apiInternalToken,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => { /* API may still be booting */ });
+}
+
+async function isApiHealthy() {
   try {
-    apiProcess.send(
-      {
-        type: 'workmate:secrets',
-        payload: { model: readModelConfig(), search: readSearchConfig() },
-      },
-      () => { /* ignore mid-exit races */ },
-    );
+    const response = await fetch(`http://127.0.0.1:${apiPort}/api/health`, {
+      signal: AbortSignal.timeout(800),
+    });
+    return response.ok;
   } catch (_) {
-    /* child may not be ready yet */
+    return false;
   }
 }
 
@@ -1104,13 +1248,61 @@ function enrichDesktopPathEnv(base = process.env) {
   return { ...base, PATH: [...extras, ...String(current).split(sep).filter(Boolean)].join(sep) };
 }
 
+/**
+ * Prefer a real Node binary in unpackaged/dev runs. Electron's
+ * `child_process.fork(api)` (Electron-as-Node) often exits before listen on
+ * macOS, leaving Vite proxying to a dead 4328. Packaged builds still spawn via
+ * `process.execPath` + ELECTRON_RUN_AS_NODE.
+ */
+function resolveApiExec() {
+  if (!app.isPackaged) {
+    const candidates = [
+      process.env.WORKMATE_NODE_BINARY,
+      process.env.npm_node_execpath,
+      process.env.NODE_BINARY,
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      if (existsSync(String(candidate))) {
+        return { execPath: String(candidate), electronAsNode: false };
+      }
+    }
+    const which = spawnSync('which', ['node'], { encoding: 'utf8' });
+    const fromPath = String(which.stdout || '').trim().split('\n')[0];
+    if (fromPath && existsSync(fromPath)) {
+      return { execPath: fromPath, electronAsNode: false };
+    }
+  }
+  return { execPath: process.execPath, electronAsNode: true };
+}
+
 function startApi() {
+  const entry = apiEntry();
+  if (!existsSync(entry)) {
+    console.error(`[api] entry missing: ${entry}`);
+    return;
+  }
+  // Dev supervisor may already own :4328 — do not double-bind.
+  void isApiHealthy().then((healthy) => {
+    if (healthy || process.env.WORKMATE_API_EXTERNAL === '1') {
+      if (healthy) console.log(`[api] already listening on ${apiPort}; skip spawn`);
+      else console.log(`[api] WORKMATE_API_EXTERNAL=1; skip spawn and wait for ${apiPort}`);
+      clearApiSecretPushTimers();
+      apiSecretPushTimers.push(setTimeout(() => pushSecretsToApi(), 300));
+      apiSecretPushTimers.push(setTimeout(() => pushSecretsToApi(), 1500));
+      return;
+    }
+    spawnApiProcess(entry);
+  });
+}
+
+function spawnApiProcess(entry) {
   const agentscopeRoot = process.env.WORKMATE_AGENTSCOPE_ROOT || bundledAgentscopeRoot();
   const dshRoot = siblingDshRoot();
+  const { execPath, electronAsNode } = resolveApiExec();
   const childEnv = enrichDesktopPathEnv({
     ...process.env,
-    ELECTRON_RUN_AS_NODE: '1',
     WORKMATE_API_PORT: String(apiPort),
+    WORKMATE_API_HOST: process.env.WORKMATE_API_HOST || '0.0.0.0',
     WORKMATE_INTERNAL_TOKEN: apiInternalToken,
     WORKMATE_DATA_DIR: storageRoot(),
     WORKMATE_SKILLS_DIR: path.join(storageRoot(), 'skills'),
@@ -1127,14 +1319,21 @@ function startApi() {
     WORKMATE_AGENTSCOPE_ENABLED: process.env.WORKMATE_AGENTSCOPE_ENABLED || '0',
     WORKMATE_AGENTSCOPE_PYTHON: bundledAgentscopePython(agentscopeRoot),
     WORKMATE_AGENTSCOPE_ROOT: agentscopeRoot,
+    // Optional ops override for Agent script interpreter (system 3.9+ still preferred when unset).
+    ...(process.env.WORKMATE_PYTHON ? { WORKMATE_PYTHON: process.env.WORKMATE_PYTHON } : {}),
     // The API is unpacked under Resources together with its minimal
     // production dependency closure, not the desktop workspace node_modules.
     ...(app.isPackaged ? { NODE_PATH: path.join(process.resourcesPath, 'api', 'node_deps') } : {}),
   });
-  apiProcess = fork(apiEntry(), [], {
+  if (electronAsNode) childEnv.ELECTRON_RUN_AS_NODE = '1';
+  else delete childEnv.ELECTRON_RUN_AS_NODE;
+
+  // spawn(+ipc) instead of fork(): more reliable under Electron main on macOS.
+  apiProcess = spawn(execPath, [entry], {
     env: childEnv,
-    stdio: 'inherit',
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
   });
+  console.log(`[api] spawned pid=${apiProcess.pid ?? 'null'} exec=${execPath} entry=${entry}`);
   // M0 keyring: the child requests a decrypted snapshot of model and
   // search provider settings over the fork IPC channel. Never persisted.
   // Parent also pushes on spawn / after settings saves so mid-session
@@ -1198,15 +1397,21 @@ async function startGatewayIfEnabled() {
   });
 }
 
-async function waitForApi() {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+async function waitForApi(timeoutMs = 30_000) {
+  const started = Date.now();
+  let attempt = 0;
+  while (Date.now() - started < timeoutMs) {
+    attempt += 1;
     try {
       const response = await fetch(`http://127.0.0.1:${apiPort}/api/health`);
-      if (response.ok) return;
+      if (response.ok) {
+        if (attempt > 1) console.log(`[api] ready after ${Date.now() - started}ms (${attempt} probes)`);
+        return;
+      }
     } catch (_) { /* retry */ }
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error('Workmate local API did not become ready.');
+  throw new Error(`Workmate local API did not become ready within ${timeoutMs}ms.`);
 }
 
 /** Only nudge if the window is completely off every screen; never clamp mid-drag. */
@@ -1229,8 +1434,24 @@ function ensureWindowOnScreen(win) {
   }, false);
 }
 
+async function waitForRenderer(url, timeoutMs = 30_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(800) });
+      if (response.status > 0) return;
+    } catch (_) { /* retry */ }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Renderer not reachable: ${url}`);
+}
+
 async function createWindow() {
-  await waitForApi();
+  // Soft-wait: a hard throw here used to leave a headless Electron with no
+  // window while Vite kept proxying to a dead API port.
+  await waitForApi().catch((error) => {
+    console.error('[api]', error instanceof Error ? error.message : String(error));
+  });
   // Near work-area size on launch; do not clamp position on every `moved`
   // (that blocks dragging across monitors).
   const workArea = screen.getPrimaryDisplay().workArea;
@@ -1262,30 +1483,52 @@ async function createWindow() {
   };
   mainWindow.on('moved', scheduleEnsureVisible);
   screen.on('display-metrics-changed', scheduleEnsureVisible);
+  // macOS traffic-light close normally leaves the app in the Dock. In
+  // `npm run dev` that feels like "can't quit" and leaves Vite/API running.
+  mainWindow.on('close', () => {
+    if (isDevShell) quitApp('window-close');
+  });
   mainWindow.on('closed', () => {
     if (settleTimer) clearTimeout(settleTimer);
     screen.removeListener('display-metrics-changed', scheduleEnsureVisible);
+    mainWindow = null;
   });
+  let rendererRetry = 0;
   mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedUrl) => {
     console.error(`[renderer] failed to load (${code}): ${description} (${validatedUrl})`);
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (rendererRetry >= 20) return;
+    if (!String(validatedUrl || '').includes('127.0.0.1:5173')) return;
+    rendererRetry += 1;
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      void mainWindow.loadURL(String(validatedUrl)).catch(() => undefined);
+    }, 400);
   });
   mainWindow.webContents.on('console-message', (_event, details) => {
     if (details.level >= 2) console.error(`[renderer] ${details.sourceId}:${details.lineNumber} ${details.message}`);
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => console.error(`[renderer] process gone: ${details.reason}`));
   const rendererUrl = process.env.WORKMATE_RENDERER_URL;
-  if (rendererUrl) await mainWindow.loadURL(rendererUrl);
-  else {
-    const rendererEntry = app.isPackaged
-      ? path.join(app.getAppPath(), 'stage', 'renderer', 'index.html')
-      : path.resolve(__dirname, '../../../renderer/dist/index.html');
-    await mainWindow.loadFile(rendererEntry);
+  try {
+    if (rendererUrl) {
+      await waitForRenderer(rendererUrl).catch((error) => {
+        console.warn('[renderer]', error instanceof Error ? error.message : String(error));
+      });
+      await mainWindow.loadURL(rendererUrl);
+    } else {
+      const rendererEntry = app.isPackaged
+        ? path.join(app.getAppPath(), 'stage', 'renderer', 'index.html')
+        : path.resolve(__dirname, '../../../renderer/dist/index.html');
+      await mainWindow.loadFile(rendererEntry);
+    }
+  } catch (error) {
+    console.error('[renderer] load failed:', error instanceof Error ? error.message : String(error));
   }
-  // In development, a renderer failure can prevent ready-to-show from firing
-  // and leave a hidden process with no visible window. Loading has completed
-  // at this point, so show the shell deterministically.
+  // Always show: a failed loadURL used to skip show() and leave a headless shell.
   if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
   mainWindow.show();
+  mainWindow.focus();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1364,51 +1607,75 @@ async function runEnvironmentChecks(onProgress) {
   await begin('electron', 'Electron（桌面壳）', '随应用内置');
   await finish({ id: 'electron', name: 'Electron（桌面壳）', status: 'ok', required: '随应用内置', found: `v${process.versions.electron}`, help: 'Electron 随安装包内置，无需单独安装。' });
 
-  // Python 3
-  await begin('python', 'Python 3（脚本/依赖安装）', '3.9+（python3/python/py）');
+  // Python 3 — system probe + script decision (system 3.9+ else bundled)
+  await begin('python', '系统 Python 3', '3.9+（优先用于 Agent 自编脚本）');
   const python = detectPython();
   const pythonOk = Boolean(python && python.version.major === 3 && python.version.minor >= 9);
+  const bundledAgentscope = detectBundledAgentscopePython();
+  const scriptPython = pythonOk
+    ? python
+    : (bundledAgentscope && bundledAgentscope.version.major === 3 && bundledAgentscope.version.minor >= 9
+      ? bundledAgentscope
+      : null);
+  const scriptSource = pythonOk ? 'system' : scriptPython ? 'bundled' : 'none';
   await finish({
-    id: 'python', name: 'Python 3（脚本/依赖安装）', status: pythonOk ? 'ok' : 'error', required: '3.9+（命令解析为 python3/python/py）',
+    id: 'python', name: '系统 Python 3', status: pythonOk ? 'ok' : scriptPython ? 'warn' : 'error', required: '3.9+（优先用于 Agent 自编脚本）',
     found: python ? `${python.command} v${python.version.major}.${python.version.minor}.${python.version.patch}` : '未检测到可用的 Python 3',
     command: python ? `${python.command} --version` : undefined,
     help: pythonOk
-      ? `将使用 ${python.command} 执行 Skill/工作区脚本并用 python -m pip install --target 安装隔离依赖。`
-      : isWin
-        ? '未找到 Python 3。安装方式：\n  1) Microsoft Store：安装 “Python 3.12”；\n  2) 或 winget install Python.Python.3.12；\n  3) 或 python.org 下载安装器并勾选 “Add python.exe to PATH”。\n安装后请重启本应用。若系统只有 “py” 启动器，我们已自动使用 py -3 探测。'
-        : process.platform === 'darwin'
-          ? '未找到 Python 3。推荐安装：\n  brew install python@3.12\n安装后请重启本应用（/usr/local/bin 或 /opt/homebrew/bin 需在 PATH）。'
-          : '未找到 Python 3。推荐安装：\n  sudo apt update && sudo apt install -y python3 python3-pip（Debian/Ubuntu）\n  或 dnf install python3 python3-pip（Fedora）\n安装后请重启本应用。',
+      ? `系统 Python 可用。Agent 自编脚本将优先使用：${python.command}。`
+      : scriptPython
+        ? '系统 Python 不可用或不满足 3.9+；将回退预装 agentscope-runtime 解释器执行 Agent 脚本（依赖仍隔离到工作区）。'
+        : isWin
+          ? '未找到 Python 3。安装方式：\n  1) Microsoft Store：安装 “Python 3.12”；\n  2) 或 winget install Python.Python.3.12；\n  3) 或 python.org 下载安装器并勾选 “Add python.exe to PATH”。\n安装后请重启本应用。若系统只有 “py” 启动器，我们已自动使用 py -3 探测。'
+          : process.platform === 'darwin'
+            ? '未找到 Python 3。推荐安装：\n  brew install python@3.12\n安装后请重启本应用（/usr/local/bin 或 /opt/homebrew/bin 需在 PATH）。'
+            : '未找到 Python 3。推荐安装：\n  sudo apt update && sudo apt install -y python3 python3-pip（Debian/Ubuntu）\n  或 dnf install python3 python3-pip（Fedora）\n安装后请重启本应用。',
   });
 
-  // pip
-  await begin('pip', 'pip（Python 包安装，隔离安装到运行工作区）', '可用（python -m pip）');
+  // pip — against the interpreter chosen for scripts
+  await begin('pip', 'pip（隔离安装到工作区）', '可用（选用解释器 -m pip）');
   let pipOk = false;
   let pipFound = '未检测到 pip';
-  if (python) {
-    const args = python.command === 'py' ? ['-3', '-m', 'pip', '--version'] : ['-m', 'pip', '--version'];
-    const pip = execCapture(python.command, args, 8000);
+  if (scriptPython) {
+    const args = scriptPython.command === 'py' ? ['-3', '-m', 'pip', '--version'] : ['-m', 'pip', '--version'];
+    const pip = execCapture(scriptPython.command, args, 8000);
     pipOk = Boolean(pip && pip.code === 0);
-    pipFound = pipOk ? `${python.command} -m pip` : '未检测到 pip（python -m pip 失败）';
+    pipFound = pipOk ? `${scriptPython.command} -m pip` : '当前选用的解释器无法执行 python -m pip';
   }
   await finish({
-    id: 'pip', name: 'pip（Python 包安装，隔离安装到运行工作区）', status: pipOk ? 'ok' : 'error', required: '可用（python -m pip）', found: pipFound,
+    id: 'pip', name: 'pip（隔离安装到工作区）', status: pipOk ? 'ok' : 'error', required: '可用（选用解释器 -m pip）', found: pipFound,
     help: pipOk
-      ? '将以 python -m pip install --target 把依赖安装到每次运行的隔离工作区，不改系统 Python。'
-      : pythonOk
-        ? '检测到 Python 但 pip 不可用。多数发行版需单独安装：macOS: brew install python@3.12（含 pip）；Debian/Ubuntu: sudo apt install -y python3-pip；Windows: 使用 python.org 安装器（勾选 pip）或 python -m ensurepip。'
-        : '需先按上方 Python 指引安装 Python 3（一般自带 pip）。',
+      ? '依赖通过 pip install --target <工作区>/.python-packages 安装，不污染 agentscope-runtime。'
+      : scriptPython
+        ? '当前选用的 Python 无可用 pip。可尝试 ensurepip，或改用带 pip 的解释器。'
+        : '需先有可用的脚本 Python（系统 3.9+ 或预装 runtime）。',
   });
 
-  await begin('agentscope-python', 'AgentScope Python Runtime', '随应用内置或系统 Python 3.10+');
-  const bundledAgentscope = detectBundledAgentscopePython();
+  const sourceLabel = scriptSource === 'system' ? '系统 Python' : scriptSource === 'bundled' ? '预装 agentscope-runtime' : '无可用解释器';
+  await begin('python-script-env', 'Agent 脚本 Python（当前决策）', '系统 3.9+ 优先，否则预装 runtime');
+  await finish({
+    id: 'python-script-env',
+    name: 'Agent 脚本 Python（当前决策）',
+    status: scriptSource === 'none' ? 'error' : scriptSource === 'bundled' ? 'warn' : 'ok',
+    required: '系统 3.9+ 优先，否则预装 runtime',
+    found: scriptPython
+      ? `${sourceLabel} · ${scriptPython.command} v${scriptPython.version.major}.${scriptPython.version.minor}.${scriptPython.version.patch}`
+      : '未选定',
+    command: scriptPython?.command,
+    help: scriptPython
+      ? `${pythonOk ? `系统 Python 满足 3.9+，使用 ${scriptPython.command}` : `系统不满足时回退预装：${scriptPython.command}`}。\nAgent 自编脚本的依赖只安装到运行工作区 .python-packages（pip install --target），不会写入 agentscope-runtime 或系统 site-packages。`
+      : '系统无合格 Python，且未找到预装 agentscope-runtime。',
+  });
+
+  await begin('agentscope-python', 'AgentScope 引擎 Runtime', '>= 3.10（引擎专用；与脚本依赖隔离）');
   const agentscopePython = bundledAgentscope ?? python;
   const agentscopeOk = Boolean(agentscopePython && agentscopePython.version.major === 3 && agentscopePython.version.minor >= 10);
   await finish({
     id: 'agentscope-python',
-    name: 'AgentScope Python Runtime',
+    name: 'AgentScope 引擎 Runtime',
     status: agentscopeOk ? 'ok' : 'error',
-    required: '>= 3.10（优先使用应用内置 Runtime）',
+    required: '>= 3.10（引擎专用；与脚本依赖隔离）',
     found: bundledAgentscope
       ? `内置 ${bundledAgentscope.command} v${bundledAgentscope.version.major}.${bundledAgentscope.version.minor}.${bundledAgentscope.version.patch}`
       : agentscopePython
@@ -1416,7 +1683,7 @@ async function runEnvironmentChecks(onProgress) {
         : '未检测到 AgentScope 可用 Python',
     command: bundledAgentscope?.command || (agentscopePython ? `${agentscopePython.command} --version` : undefined),
     help: bundledAgentscope
-      ? `AgentScope Sidecar 将优先使用应用内置运行时：${bundledAgentscope.runtimeRoot}`
+      ? `AgentScope Sidecar 将优先使用应用内置运行时：${bundledAgentscope.runtimeRoot}。Agent 自编脚本即使回退到该解释器，也不得向此环境 pip install。`
       : agentscopeOk
         ? '未发现应用内置 AgentScope Runtime，将回退到系统 Python 3.10+。如需离线分发，请使用打包命令重新生成安装包。'
         : 'AgentScope 运行时需要 Python 3.10+。开发环境可设置 WORKMATE_AGENTSCOPE_PYTHON，正式安装包建议内置 runtime 后再分发。',
@@ -1478,12 +1745,34 @@ async function runEnvironmentChecks(onProgress) {
     warn: items.filter((item) => item.status === 'warn').length,
     error: items.filter((item) => item.status === 'error').length,
   };
-  const report = { platform: platformLabel(), checks: items, summary, checkedAt: Date.now() };
+  const report = {
+    platform: platformLabel(),
+    checks: items,
+    summary,
+    checkedAt: Date.now(),
+    pythonDecision: {
+      source: scriptSource,
+      command: scriptPython?.command || null,
+      version: scriptPython ? `v${scriptPython.version.major}.${scriptPython.version.minor}.${scriptPython.version.patch}` : null,
+      reason: scriptPython
+        ? (pythonOk
+          ? `系统 Python 满足 3.9+，Agent 自编脚本使用：${scriptPython.command}`
+          : `系统不满足 3.9+，回退预装 runtime：${scriptPython.command}`)
+        : '系统无合格 Python，且未找到预装 agentscope-runtime。',
+      isolationNote: 'Agent 自编脚本的依赖只安装到运行工作区 .python-packages（pip install --target），不会写入 agentscope-runtime 或系统 site-packages。',
+      systemFound: python ? `${python.command} v${python.version.major}.${python.version.minor}.${python.version.patch}` : null,
+      bundledFound: bundledAgentscope
+        ? `${bundledAgentscope.command} v${bundledAgentscope.version.major}.${bundledAgentscope.version.minor}.${bundledAgentscope.version.patch}`
+        : null,
+    },
+  };
   push({ kind: 'done', report });
   return report;
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
+  installApplicationMenu();
   protocol.handle('workmate-preview', async (request) => {
     try {
       const url = new URL(request.url);
@@ -1558,7 +1847,14 @@ app.whenReady().then(async () => {
   ipcMain.handle('workmate:install-skill', async (_, reference) => runSkillsCli(reference));
   ipcMain.handle('workmate:import-git-skill', async (_, url) => importGitSkillRepository(url));
   ipcMain.handle('workmate:find-skills', async (_, query, batchCount) => findSkills(query, batchCount));
-  ipcMain.handle('workmate:open-external', (_, value) => shell.openExternal(String(value)));
+  ipcMain.handle('workmate:open-external', async (_, value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    // Normalize via WHATWG URL so query strings (e.g. publish ?token=) are not dropped.
+    let href = raw;
+    try { href = new URL(raw).href; } catch { /* keep raw for non-standard schemes */ }
+    await shell.openExternal(href);
+  });
   ipcMain.handle('workmate:get-model-config', () => readModelConfig());
   ipcMain.handle('workmate:save-model-config', (_, value) => writeModelConfig(value));
   ipcMain.handle('workmate:get-search-config', () => readSearchConfig());
@@ -1616,8 +1912,25 @@ app.whenReady().then(async () => {
   await maybeAutoRestartLocalEmbedding(storageRoot()).catch((error) => console.warn('[local-embedding] auto restart failed:', error));
   await startGatewayIfEnabled().catch((error) => console.warn('[gateway] start failed:', error));
   await createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+  });
 });
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { stopSidecarProcess(); apiProcess?.kill('SIGTERM'); gatewayProcess?.kill('SIGTERM'); });
+app.on('window-all-closed', () => {
+  // Packaged macOS apps stay in the Dock; `npm run dev` should fully quit so
+  // the supervisor can tear down Vite/API without needing Ctrl+C.
+  if (process.platform !== 'darwin' || isDevShell) quitApp('window-all-closed');
+});
+app.on('before-quit', () => {
+  isQuitting = true;
+  stopSidecarProcess();
+  apiProcess?.kill('SIGTERM');
+  gatewayProcess?.kill('SIGTERM');
+  if (isDevShell) {
+    setTimeout(() => {
+      console.log('[quit] forcing exit (before-quit)');
+      app.exit(0);
+    }, 600).unref?.();
+  }
+});

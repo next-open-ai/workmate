@@ -6,12 +6,22 @@ import type { FastifyPluginAsync } from 'fastify';
 import { HealthResponseSchema } from '@workmate/contracts';
 import {
   DSH_ENV_FIX_TIMEOUT_MS,
+  WORKSPACE_SCRAP_TOP_LEVEL,
   buildDshEnvironmentCheck,
+  cleanManagedWorkspaceScrap,
+  formatByteSize,
+  formatPythonVersion,
   isDshEnvFixAction,
+  resolveScriptPython,
+  scanManagedWorkspaceScrap,
+  scriptPythonHasPip,
   runDshEnvironmentFix,
   runDshEnvironmentFixWithProgress,
+  workspacesRootDir,
   type DshInstallProgressEvent,
+  type ScriptPythonDecision,
 } from '@workmate/agent-core';
+import { getOrchestrator } from '../orchestration/routes.js';
 
 type EnvCheckItem = {
   id: string;
@@ -28,6 +38,26 @@ type EnvCheckReport = {
   checks: EnvCheckItem[];
   summary: { total: number; ok: number; warn: number; error: number };
   checkedAt: number;
+  /** Agent script Python selection after detection. */
+  pythonDecision?: {
+    source: ScriptPythonDecision['source'];
+    command: string | null;
+    version: string | null;
+    reason: string;
+    isolationNote: string;
+    systemFound: string | null;
+    bundledFound: string | null;
+  };
+  /** Agent process scrap under staging / project workspaces. */
+  workspaceScrap?: {
+    totalBytes: number;
+    totalBytesLabel: string;
+    stagingRoot: string;
+    rootCount: number;
+    entryCount: number;
+    scrapNames: string[];
+    manualHelp: string;
+  };
 };
 
 function dataDir() {
@@ -77,11 +107,24 @@ function isSupportedPython(version: { major: number; minor: number; patch: numbe
 }
 
 function resolveBundledAgentscopeRuntime(projectRoot: string) {
-  const runtimeRoot = runtimeSourceRoot(projectRoot);
-  const python = installedRuntimePython(runtimeRoot);
-  const pythonVersion = fs.existsSync(python) ? readPythonVersion(python) : null;
-  if (!fs.existsSync(python) || !isSupportedPython(pythonVersion)) return null;
-  return { runtimeRoot, python, pythonVersion };
+  const roots = [
+    process.env.WORKMATE_AGENTSCOPE_ROOT?.trim(),
+    runtimeSourceRoot(projectRoot),
+  ].filter(Boolean) as string[];
+  const override = process.env.WORKMATE_AGENTSCOPE_PYTHON?.trim();
+  if (override && fs.existsSync(override)) {
+    const pythonVersion = readPythonVersion(override);
+    if (isSupportedPython(pythonVersion)) {
+      return { runtimeRoot: path.dirname(path.dirname(override)), python: override, pythonVersion };
+    }
+  }
+  for (const runtimeRoot of roots) {
+    const python = installedRuntimePython(runtimeRoot);
+    const pythonVersion = fs.existsSync(python) ? readPythonVersion(python) : null;
+    if (!fs.existsSync(python) || !isSupportedPython(pythonVersion)) continue;
+    return { runtimeRoot, python, pythonVersion };
+  }
+  return null;
 }
 
 function platformLabel() {
@@ -96,20 +139,65 @@ function platformLabel() {
   return inDocker ? `${base} / Docker` : `${base} / Web`;
 }
 
-function detectPython() {
-  const candidates = process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'];
-  for (const command of candidates) {
-    const args = command === 'py' ? ['-3', '--version'] : ['--version'];
-    const result = execCapture(command, args, 6_000);
-    if (result && result.code === 0) {
-      const version = semverFirstTwo(`${result.stdout} ${result.stderr}`);
-      if (version) return { command, version };
-    }
+async function listKnownProjectWorkspaceRoots(): Promise<string[]> {
+  try {
+    const projects = await getOrchestrator().projects.listProjects();
+    return [...new Set(projects.map((project) => String(project.workspacePath || '').trim()).filter(Boolean))];
+  } catch {
+    return [];
   }
-  return null;
 }
 
-function buildEnvironmentReport(): EnvCheckReport {
+function pythonInstallPlan() {
+  const recommended = '3.12（同时满足 Agent 脚本 ≥3.9 与 AgentScope ≥3.10）';
+  if (process.platform === 'darwin') {
+    return {
+      label: `Homebrew 安装 Python ${recommended}`,
+      script: 'brew install python@3.12',
+      command: 'brew',
+      args: ['install', 'python@3.12'],
+      timeoutMs: 10 * 60_000,
+    };
+  }
+  if (process.platform === 'win32') {
+    return {
+      label: `winget 安装 Python ${recommended}`,
+      script: 'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements',
+      command: 'winget',
+      args: ['install', '-e', '--id', 'Python.Python.3.12', '--accept-package-agreements', '--accept-source-agreements'],
+      timeoutMs: 10 * 60_000,
+    };
+  }
+  return {
+    label: `apt 安装 Python ${recommended}`,
+    script: 'sudo apt update && sudo apt install -y python3 python3-pip python3-venv',
+    command: 'apt-get',
+    args: ['install', '-y', 'python3', 'python3-pip', 'python3-venv'],
+    timeoutMs: 10 * 60_000,
+  };
+}
+
+function scrapManualHelp(stagingRoot: string) {
+  const names = WORKSPACE_SCRAP_TOP_LEVEL.join(' ');
+  if (process.platform === 'win32') {
+    return [
+      `对话临时工作区：${stagingRoot}`,
+      `可删除各 run 目录下的过程目录：${names}`,
+      'PowerShell 示例：',
+      `Get-ChildItem -Path "${stagingRoot}" -Recurse -Directory -Force | Where-Object { @(${WORKSPACE_SCRAP_TOP_LEVEL.map((n) => `'${n}'`).join(',')}) -contains $_.Name } | Remove-Item -Recurse -Force`,
+      '项目工作区仅清理上述过程目录，勿整夹删除交付物。',
+    ].join('\n');
+  }
+  return [
+    `对话临时工作区：${stagingRoot}`,
+    `可删除各 run / 项目根下过程目录：${names}`,
+    'Shell 示例：',
+    `find "${stagingRoot}" -mindepth 2 -maxdepth 2 \\( ${WORKSPACE_SCRAP_TOP_LEVEL.map((n) => `-name '${n}'`).join(' -o ')} \\) -exec rm -rf {} +`,
+    '项目工作区请只删过程目录，保留交付文件；删除对话时会自动清理对应 staging。',
+  ].join('\n');
+}
+
+async function buildEnvironmentReport(): Promise<EnvCheckReport> {
   const isWin = process.platform === 'win32';
   const items: EnvCheckItem[] = [];
 
@@ -137,64 +225,83 @@ function buildEnvironmentReport(): EnvCheckReport {
       : '当前进程仅提供 API；若需完整 Web 界面，请同时提供前端静态构建目录。',
   });
 
-  const python = detectPython();
-  const pythonOk = Boolean(python && python.version.major === 3 && python.version.minor >= 9);
+  const decision = resolveScriptPython();
+  const system = decision.system;
+  const systemOk = Boolean(system && system.version.major === 3 && system.version.minor >= 9);
   items.push({
     id: 'python',
-    name: 'Python 3（脚本/依赖安装）',
-    status: pythonOk ? 'ok' : 'error',
-    required: '3.9+（python3/python/py）',
-    found: python ? `${python.command} v${python.version.major}.${python.version.minor}.${python.version.patch}` : '未检测到可用的 Python 3',
-    command: python ? `${python.command} --version` : undefined,
-    help: pythonOk
-      ? `服务端可使用 ${python?.command || 'python3'} 执行脚本，并为运行时准备 Python 依赖。`
-      : isWin
-        ? '未找到 Python 3。请安装 Python 3.10+ 并加入 PATH，安装后重启服务。'
-        : process.platform === 'darwin'
-          ? '未找到 Python 3。推荐安装：\n  brew install python@3.12\n安装后重启服务。'
-          : '未找到 Python 3。推荐安装：\n  sudo apt update && sudo apt install -y python3 python3-pip（Debian/Ubuntu）\n  或 dnf install python3 python3-pip（Fedora）\n安装后重启服务。',
+    name: '系统 Python 3',
+    status: systemOk ? 'ok' : decision.source === 'bundled' ? 'warn' : 'error',
+    required: '3.9+（优先用于 Agent 自编脚本）',
+    found: system ? `${system.command} ${formatPythonVersion(system.version)}` : '未检测到可用的 Python 3',
+    command: system ? `${system.command} --version` : undefined,
+    help: systemOk
+      ? `系统 Python 可用。Agent 自编脚本将优先使用：${system?.command}。`
+      : decision.source === 'bundled'
+        ? '系统 Python 不可用或不满足 3.9+；将回退预装 agentscope-runtime 解释器执行 Agent 脚本（依赖仍隔离到工作区）。'
+        : isWin
+          ? '未找到满足 3.9+ 的系统 Python。可安装后重启，或依赖安装包内预装 runtime。'
+          : process.platform === 'darwin'
+            ? '未找到满足 3.9+ 的系统 Python。推荐：brew install python@3.12；或依赖预装 runtime。'
+            : '未找到满足 3.9+ 的系统 Python。推荐：sudo apt install -y python3 python3-pip；或依赖预装 runtime。',
   });
 
+  const scriptCommand = decision.command;
   let pipOk = false;
   let pipFound = '未检测到 pip';
-  if (python) {
-    const args = python.command === 'py' ? ['-3', '-m', 'pip', '--version'] : ['-m', 'pip', '--version'];
-    const pip = execCapture(python.command, args, 8_000);
-    pipOk = Boolean(pip && pip.code === 0);
-    pipFound = pipOk ? `${python.command} -m pip` : '未检测到 pip（python -m pip 失败）';
+  if (scriptCommand) {
+    pipOk = scriptPythonHasPip(scriptCommand);
+    pipFound = pipOk ? `${scriptCommand} -m pip` : '当前选用的解释器无法执行 python -m pip';
   }
   items.push({
     id: 'pip',
-    name: 'pip（Python 包安装）',
+    name: 'pip（隔离安装到工作区）',
     status: pipOk ? 'ok' : 'error',
-    required: '可用（python -m pip）',
+    required: '可用（选用解释器 -m pip）',
     found: pipFound,
     help: pipOk
-      ? '用于安装 AgentScope 或脚本运行所需的 Python 依赖。'
-      : pythonOk
-        ? '检测到 Python 但 pip 不可用。请补装 python3-pip，或执行 python -m ensurepip。'
-        : '需先安装 Python 3（一般会自带 pip）。',
+      ? '依赖通过 pip install --target <工作区>/.python-packages 安装，不污染 agentscope-runtime。'
+      : scriptCommand
+        ? '当前选用的 Python 无可用 pip。可尝试 ensurepip，或改用带 pip 的解释器。'
+        : '需先有可用的脚本 Python（系统 3.9+ 或预装 runtime）。',
+  });
+
+  const sourceLabel =
+    decision.source === 'system' ? '系统 Python'
+      : decision.source === 'bundled' ? '预装 agentscope-runtime'
+        : decision.source === 'override' ? 'WORKMATE_PYTHON 覆盖'
+          : '无可用解释器';
+  items.push({
+    id: 'python-script-env',
+    name: 'Agent 脚本 Python（当前决策）',
+    status: decision.source === 'none' ? 'error' : decision.source === 'bundled' ? 'warn' : 'ok',
+    required: '系统 3.9+ 优先，否则预装 runtime',
+    found: decision.command
+      ? `${sourceLabel} · ${decision.command} ${formatPythonVersion(decision.version)}`
+      : '未选定',
+    command: decision.command || undefined,
+    help: `${decision.reason}\n${decision.isolationNote}`,
   });
 
   const bundled = resolveBundledAgentscopeRuntime(process.cwd());
-  const agentscopeVersion = bundled?.pythonVersion ?? python?.version ?? null;
-  const agentscopePython = bundled ? { command: bundled.python, version: bundled.pythonVersion } : python;
+  const agentscopeVersion = bundled?.pythonVersion ?? system?.version ?? null;
+  const agentscopePython = bundled ? { command: bundled.python, version: bundled.pythonVersion } : system;
   const agentscopeOk = Boolean(agentscopeVersion && agentscopeVersion.major === 3 && agentscopeVersion.minor >= 10);
   items.push({
     id: 'agentscope-python',
-    name: 'AgentScope Python Runtime',
+    name: 'AgentScope 引擎 Runtime',
     status: agentscopeOk ? 'ok' : 'error',
-    required: '>= 3.10（优先使用内置 Runtime）',
+    required: '>= 3.10（引擎专用；与脚本依赖隔离）',
     found: bundled
-      ? `内置 ${bundled.python}${bundled.pythonVersion ? ` v${bundled.pythonVersion.major}.${bundled.pythonVersion.minor}.${bundled.pythonVersion.patch}` : ''}`
+      ? `内置 ${bundled.python}${bundled.pythonVersion ? ` ${formatPythonVersion(bundled.pythonVersion)}` : ''}`
       : agentscopePython && agentscopePython.version
-        ? `${agentscopePython.command} v${agentscopePython.version.major}.${agentscopePython.version.minor}.${agentscopePython.version.patch}`
+        ? `${agentscopePython.command} ${formatPythonVersion(agentscopePython.version)}`
         : `未检测到 AgentScope 可用 Python（查找目录 ${runtimeSourceRoot(process.cwd())}）`,
     command: bundled?.python || (agentscopePython ? `${agentscopePython.command} --version` : undefined),
     help: bundled
-      ? `当前优先使用项目内置 AgentScope runtime：${bundled.runtimeRoot}`
+      ? `AgentScope Sidecar 使用：${bundled.runtimeRoot}。Agent 自编脚本即使回退到该解释器，也不得向此环境 pip install（仅 --target 工作区）。`
       : agentscopeOk
-        ? '未发现内置 runtime，将回退到系统 Python 3.10+。'
+        ? '未发现内置 runtime，引擎将回退到系统 Python 3.10+。'
         : 'AgentScope 运行时需要 Python 3.10+；Docker 镜像建议预装，npm Web 启动可使用系统 Python。',
   });
 
@@ -250,16 +357,67 @@ function buildEnvironmentReport(): EnvCheckReport {
 
   items.push(buildDshEnvironmentCheck());
 
+  const projectRoots = await listKnownProjectWorkspaceRoots();
+  const scrapScan = await scanManagedWorkspaceScrap(projectRoots);
+  const scrapNames = [...WORKSPACE_SCRAP_TOP_LEVEL];
+  const scrapEntryCount = scrapScan.reports.reduce((sum, report) => sum + report.entries.length, 0);
+  const scrapOk = scrapScan.totalBytes === 0;
+  items.push({
+    id: 'workspace-scrap',
+    name: '工作区临时脚本 / 依赖',
+    status: scrapOk ? 'ok' : 'warn',
+    required: '过程物可清理（scripts / .python-packages 等）',
+    found: scrapOk
+      ? '未发现可清理过程物'
+      : `${formatByteSize(scrapScan.totalBytes)} · ${scrapScan.reports.length} 个工作区 · ${scrapEntryCount} 项`,
+    help: scrapOk
+      ? `删除对话会清理对应 staging；删除项目会清理过程目录（保留交付物）。过程目录：${scrapNames.join(', ')}。`
+      : `可一键清理 Agent 临时脚本与隔离依赖。若自动清理失败，请按下方手动方式处理。\n${scrapManualHelp(scrapScan.stagingRoot)}`,
+  });
+
   const summary = {
     total: items.length,
     ok: items.filter((item) => item.status === 'ok').length,
     warn: items.filter((item) => item.status === 'warn').length,
     error: items.filter((item) => item.status === 'error').length,
   };
-  return { platform: platformLabel(), checks: items, summary, checkedAt: Date.now() };
+  return {
+    platform: platformLabel(),
+    checks: items,
+    summary,
+    checkedAt: Date.now(),
+    pythonDecision: {
+      source: decision.source,
+      command: decision.command,
+      version: formatPythonVersion(decision.version) || null,
+      reason: decision.reason,
+      isolationNote: decision.isolationNote,
+      systemFound: decision.system
+        ? `${decision.system.command} ${formatPythonVersion(decision.system.version)}`
+        : null,
+      bundledFound: decision.bundled
+        ? `${decision.bundled.command} ${formatPythonVersion(decision.bundled.version)}`
+        : null,
+    },
+    workspaceScrap: {
+      totalBytes: scrapScan.totalBytes,
+      totalBytesLabel: formatByteSize(scrapScan.totalBytes),
+      stagingRoot: scrapScan.stagingRoot || workspacesRootDir(),
+      rootCount: scrapScan.reports.length,
+      entryCount: scrapEntryCount,
+      scrapNames,
+      manualHelp: scrapManualHelp(scrapScan.stagingRoot || workspacesRootDir()),
+    },
+  };
 }
 
-type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | 'fix-dsh';
+type EnvFixActionId =
+  | 'fix-storage'
+  | 'fix-pip'
+  | 'fix-agentscope'
+  | 'fix-dsh'
+  | 'install-python'
+  | 'clean-workspace-scrap';
 
 function runFixStorage() {
   const root = dataDir();
@@ -275,19 +433,10 @@ function runFixStorage() {
   return { ok: true as const, message: `数据目录已就绪：${root}`, detail: root };
 }
 
-function detectPythonCommand() {
-  const candidates = process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'];
-  for (const command of candidates) {
-    const args = command === 'py' ? ['-3', '--version'] : ['--version'];
-    const result = execCapture(command, args, 6_000);
-    if (result && result.code === 0) return command;
-  }
-  return null;
-}
-
 function runFixPip() {
-  const command = detectPythonCommand();
-  if (!command) throw new Error('未找到 Python，无法执行 ensurepip。请先安装 Python 3.10+。');
+  const decision = resolveScriptPython();
+  const command = decision.command;
+  if (!command) throw new Error('未找到可用的脚本 Python，无法执行 ensurepip。请安装系统 Python 3.9+ 或提供预装 runtime。');
   const args = command === 'py' ? ['-3', '-m', 'ensurepip', '--upgrade'] : ['-m', 'ensurepip', '--upgrade'];
   const result = execCapture(command, args, 60_000);
   if (!result || result.code !== 0) {
@@ -295,7 +444,7 @@ function runFixPip() {
   }
   return {
     ok: true as const,
-    message: `已执行 ${command} -m ensurepip --upgrade`,
+    message: `已对脚本解释器执行 ${command} -m ensurepip --upgrade`,
     detail: result.stdout || result.stderr || '',
   };
 }
@@ -321,12 +470,65 @@ function runFixAgentscope() {
   };
 }
 
-function runEnvironmentFix(actionId: string) {
+function runInstallPython() {
+  const inDocker = fs.existsSync('/.dockerenv') || process.env.container === 'docker';
+  const plan = pythonInstallPlan();
+  if (inDocker) {
+    throw new Error(
+      `Docker 环境请在镜像中预装 Python，勿在运行中自动安装。建议写入 Dockerfile：\nRUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv\n主机也可手动执行：${plan.script}`,
+    );
+  }
+  const result = spawnSync(plan.command, plan.args, {
+    encoding: 'utf8',
+    timeout: plan.timeoutMs,
+    env: process.env,
+    shell: process.platform === 'win32',
+  });
+  if ((result.status ?? 1) !== 0) {
+    const detail = String(result.stderr || result.stdout || result.error?.message || 'unknown error').slice(-1500);
+    throw new Error(
+      `尝试安装系统 Python 失败（${plan.label}）。请在终端手动执行：\n${plan.script}\n\n详情：${detail}`,
+    );
+  }
+  return {
+    ok: true as const,
+    message: `已尝试安装：${plan.label}。请重新打开终端/应用后再跑环境检查。`,
+    detail: String(result.stdout || result.stderr || '').trim().slice(0, 1200) || plan.script,
+  };
+}
+
+async function runCleanWorkspaceScrap() {
+  const projectRoots = await listKnownProjectWorkspaceRoots();
+  const result = await cleanManagedWorkspaceScrap(projectRoots);
+  if (result.failedCount > 0 && result.freedBytes === 0) {
+    throw new Error(
+      `自动清理失败（${result.failedCount} 项）。请按环境报告中的手动清理说明处理。\n${scrapManualHelp(workspacesRootDir())}`,
+    );
+  }
+  const message = result.freedBytes > 0
+    ? `已清理约 ${formatByteSize(result.freedBytes)} 临时脚本/依赖${result.failedCount ? `（另有 ${result.failedCount} 项失败，见手动清理说明）` : ''}`
+    : '未发现可清理的过程物';
+  return {
+    ok: true as const,
+    message,
+    detail: result.results
+      .filter((item) => item.removed.length || item.failed.length)
+      .map((item) => `${item.root}: removed=${item.removed.join(',') || '-'}; failed=${item.failed.map((f) => f.relative).join(',') || '-'}`)
+      .join('\n')
+      .slice(0, 1500),
+  };
+}
+
+async function runEnvironmentFix(actionId: string) {
   if (actionId === 'fix-storage') return runFixStorage();
   if (actionId === 'fix-pip') return runFixPip();
   if (actionId === 'fix-agentscope') return runFixAgentscope();
+  if (actionId === 'install-python') return runInstallPython();
+  if (actionId === 'clean-workspace-scrap') return runCleanWorkspaceScrap();
   if (isDshEnvFixAction(actionId)) return runDshEnvironmentFix({ reinstall: true });
-  throw new Error(`不支持的修复动作：${actionId}（仅允许 fix-storage / fix-pip / fix-agentscope / fix-dsh）`);
+  throw new Error(
+    `不支持的修复动作：${actionId}（仅允许 fix-storage / fix-pip / fix-agentscope / fix-dsh / install-python / clean-workspace-scrap）`,
+  );
 }
 
 export const healthRoutes: FastifyPluginAsync = async (app) => {
@@ -346,8 +548,8 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
         request.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
         reply.raw.setTimeout(DSH_ENV_FIX_TIMEOUT_MS);
       }
-      const result = runEnvironmentFix(actionId);
-      return { ...result, actionId, report: buildEnvironmentReport() };
+      const result = await runEnvironmentFix(actionId);
+      return { ...result, actionId, report: await buildEnvironmentReport() };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(400).send({ message, actionId });
@@ -382,7 +584,7 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
         detail: result.detail,
         skipped: result.skipped,
         actionId: 'fix-dsh',
-        report: buildEnvironmentReport(),
+        report: await buildEnvironmentReport(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

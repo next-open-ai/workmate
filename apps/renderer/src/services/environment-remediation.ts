@@ -6,7 +6,13 @@ import {
 } from '../features/dsh/environment-ui';
 
 /** Whitelisted auto-fix actions executed by the API (desktop/web share this). */
-export type EnvFixActionId = 'fix-storage' | 'fix-pip' | 'fix-agentscope' | typeof DSH_ENV_FIX_ACTION_ID;
+export type EnvFixActionId =
+  | 'fix-storage'
+  | 'fix-pip'
+  | 'fix-agentscope'
+  | 'install-python'
+  | 'clean-workspace-scrap'
+  | typeof DSH_ENV_FIX_ACTION_ID;
 
 export interface EnvRemediationPlan {
   summary: string;
@@ -97,25 +103,64 @@ export function remediationForCheck(check: EnvCheckItem, report: EnvCheckReport 
     case 'python':
       if (kind.os === 'macos') {
         return {
-          summary: '安装 Python 3.10+ 并确保在 PATH 中。',
-          steps: ['安装完成后执行 `python3 --version` 验证。', '重启 Workmate 服务或桌面应用。'],
+          summary: '安装系统 Python 3.9+（推荐 3.12，匹配脚本与 AgentScope）并确保在 PATH 中；也可依赖预装 runtime。',
+          steps: ['可点「尝试安装 Python 3.12」由本机包管理器安装。', '安装完成后执行 `python3 --version` 验证并重启 Workmate。'],
           script: 'brew install python@3.12',
+          actionId: kind.docker ? undefined : 'install-python',
+          canAutoFix: !kind.docker,
         };
       }
       if (kind.os === 'windows') {
         return {
-          summary: '安装 Python 3.10+ 并加入 PATH。',
-          steps: ['优先使用官方安装器或 `winget`。', '安装后重新打开终端，再重启 Workmate。'],
-          script: 'winget install Python.Python.3.12',
+          summary: '安装系统 Python 3.9+（推荐 3.12）并加入 PATH；也可依赖预装 runtime。',
+          steps: ['可点「尝试安装 Python 3.12」使用 winget。', '安装后重新打开终端，再重启 Workmate。'],
+          script: 'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements',
+          actionId: kind.docker ? undefined : 'install-python',
+          canAutoFix: !kind.docker,
         };
       }
       return {
-        summary: kind.docker ? '在镜像中补装 Python 3。' : '安装 Python 3.10+。',
-        steps: ['安装完成后执行 `python3 --version`。', ...dockerHint(kind)],
+        summary: kind.docker ? '在镜像中补装 Python 3.9+（推荐 3.12）。' : '安装系统 Python 3.9+（推荐 3.12）。',
+        steps: kind.docker
+          ? ['把 Python 写入 Dockerfile 后重建镜像。', ...dockerHint(kind)]
+          : ['可点「尝试安装」；若无权限请复制脚本用 sudo 在终端执行。', '安装完成后执行 `python3 --version`。'],
         script: kind.docker
           ? 'apt-get update && apt-get install -y python3 python3-pip python3-venv'
           : 'sudo apt update && sudo apt install -y python3 python3-pip python3-venv',
         dockerSnippet: 'RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv && rm -rf /var/lib/apt/lists/*',
+        actionId: kind.docker ? undefined : 'install-python',
+        canAutoFix: false,
+      };
+
+    case 'python-script-env':
+      return {
+        summary: '无法选定 Agent 脚本 Python（系统 3.9+ 与预装 runtime 均不可用）。',
+        steps: [
+          '优先安装系统 Python 3.12（流行且同时满足脚本与引擎版本门槛）。',
+          '或重新打包/初始化带 agentscope-runtime 的安装包。',
+          '确认依赖只会装到工作区 .python-packages，不会写入 agentscope-runtime。',
+          ...(kind.os === 'linux' ? ['Linux 上一键安装可能需要管理员权限；失败时请复制脚本在终端执行。'] : []),
+        ],
+        script: kind.os === 'macos'
+          ? 'brew install python@3.12'
+          : kind.os === 'windows'
+            ? 'winget install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements'
+            : 'sudo apt update && sudo apt install -y python3 python3-pip',
+        actionId: kind.docker ? undefined : 'install-python',
+        canAutoFix: !kind.docker && kind.os !== 'linux' && kind.os !== 'unknown',
+      };
+
+    case 'workspace-scrap':
+      return {
+        summary: '工作区存在 Agent 临时脚本或隔离依赖，可安全清理。',
+        steps: [
+          '删除对话会自动清理对应 staging；删除项目会清理过程目录并保留交付物。',
+          '可点「一键清理」立即释放空间。',
+          '若自动清理失败，复制下方手动命令处理。',
+        ],
+        script: report.workspaceScrap?.manualHelp || check.help,
+        actionId: 'clean-workspace-scrap',
+        canAutoFix: true,
       };
 
     case 'pip':

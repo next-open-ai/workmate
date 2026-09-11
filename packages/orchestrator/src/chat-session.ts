@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { cleanupConversationSessionWorkspaces } from '@workmate/agent-core';
 import type { ChatRequest, ModelConfig } from '@workmate/contracts';
 import type { EventHub, HubListener } from './hub.js';
 import { deleteKey, listJsonIds, readJson, writeJson } from './repo.js';
@@ -206,10 +207,19 @@ export class ChatSessionService {
   async deleteChatSession(id: string): Promise<void> {
     const session = await this.getChatSession(id);
     if (!session) return;
+    const runIds = [
+      ...new Set(
+        session.messages
+          .map((message) => String(message.runId || '').trim())
+          .filter(Boolean),
+      ),
+    ];
     await deleteKey(this.store, this.sessionKey(id));
     for (const message of session.messages) {
       if (message.runId) await deleteKey(this.store, namespaceKey(RUN_NS, message.runId));
     }
+    // Best-effort: remove conversation staging (Agent temp scripts / .python-packages).
+    await cleanupConversationSessionWorkspaces(runIds).catch(() => undefined);
     this.hub.publish(`session:${id}`, { type: 'session.deleted', sessionId: id });
   }
 
@@ -278,7 +288,7 @@ export class ChatSessionService {
    */
   private requestForTurn(session: ChatSession, context: ChatRunContext, turnId: string): ChatRequest {
     const history = buildSessionModelMessages(session, { turnId });
-    return { ...context, messages: history };
+    return { ...context, conversationId: session.id, messages: history };
   }
 
   private async settleRun(sessionId: string, runId: string, turnId: string, attemptNo: number, request: ChatRequest, assistantMessageId: string, signal: AbortSignal) {

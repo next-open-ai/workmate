@@ -255,6 +255,55 @@ def build_host_toolkit(
             is_read_only=False,
             permission=PermissionBehavior.ASK,
         ),
+        HostExternalTool(
+            name="preview_server_start",
+            description=(
+                "Start a static website server (ports from 8000). "
+                "access=local (default): 127.0.0.1 this-machine preview. "
+                "access=lan: 本地部署 / LAN multi-device — bind 0.0.0.0; returns url/lanUrls/localUrl. "
+                "Prefer this over bash http.server; do not rebuild for preview/deploy."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "root": {"type": "string"},
+                    "access": {"type": "string", "enum": ["local", "lan"]},
+                    "portHint": {"type": "number"},
+                },
+                "additionalProperties": False,
+            },
+            is_read_only=False,
+            permission=PermissionBehavior.ALLOW,
+        ),
+        HostExternalTool(
+            name="preview_server_stop",
+            description=(
+                "Stop local website preview / 本地部署 / LAN deploy. "
+                "Use for 关闭本地部署、关闭预览、关闭本地网站. "
+                "Pass id or port; omit both to stop all current site servers."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "port": {"type": "number"},
+                },
+                "additionalProperties": False,
+            },
+            is_read_only=False,
+            permission=PermissionBehavior.ALLOW,
+        ),
+        HostExternalTool(
+            name="preview_server_status",
+            description="List running preview / LAN deploy / local website servers (url, access, port, root).",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            is_read_only=True,
+            permission=PermissionBehavior.ALLOW,
+        ),
     ]
     _append_mcp_tools(tools, mcp_tools)
     return Toolkit(tools=tools, skills_or_loaders=skill_objs if skill_objs else None)

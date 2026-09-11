@@ -27,6 +27,7 @@ interface Window {
     installSkill(reference: string): Promise<{ output: string; manifest: { path: string; content: string } | null }>;
     importGitSkill(url: string): Promise<{ manifests: Array<{ path: string; content: string }>; skipped: string[] }>;
     findSkills(query: string, batchCount?: number): Promise<{ items: Array<{ reference: string; source: string; slug: string; name: string; description: string; installs: string; url: string }>; hasMore: boolean }>;
+    openExternal(url: string): Promise<void>;
     getModelConfig(): Promise<unknown>;
     saveModelConfig(config: unknown): Promise<unknown>;
     getSearchConfig(): Promise<unknown>;
@@ -147,4 +148,22 @@ interface EnvCheckReport {
   checks: EnvCheckItem[];
   summary: { total: number; ok: number; warn: number; error: number };
   checkedAt: number;
+  pythonDecision?: {
+    source: 'override' | 'system' | 'bundled' | 'none';
+    command: string | null;
+    version: string | null;
+    reason: string;
+    isolationNote: string;
+    systemFound: string | null;
+    bundledFound: string | null;
+  };
+  workspaceScrap?: {
+    totalBytes: number;
+    totalBytesLabel: string;
+    stagingRoot: string;
+    rootCount: number;
+    entryCount: number;
+    scrapNames: string[];
+    manualHelp: string;
+  };
 }

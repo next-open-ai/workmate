@@ -21,8 +21,9 @@ import { downloadAssetBestEffort, previewAssetUrl } from "../../app/platform-act
 import { useI18n } from "../../app/i18n";
 import { useNotify } from "../../app/notify";
 import { employeeDisplayDescription, employeeDisplayName } from "../../app/employees";
-import { getServerRuntimeConfig } from "../../services/api";
+import { getServerRuntimeConfig, createMobileChatSession, getMobileChatSession, importDataFromAsset } from "../../services/api";
 import { chatBusy } from "../../app/workspace";
+import { qrDataUrl } from "../../app/qr-data-url.js";
 
 type EngineId = "pi" | "agentscope" | "dsh";
 function isEngineId(value: unknown): value is EngineId {
@@ -52,6 +53,9 @@ const props = defineProps<{
     approval: ToolApproval,
     scope: "session" | "always",
   ) => Promise<void>;
+  ensureServerSession?: () => Promise<string | null>;
+  pullFromServer?: () => Promise<void>;
+  followMobileSession?: (sessionId: string, title?: string) => Promise<unknown>;
 }>();
 const emit = defineEmits<{
   selectEmployee: [id: EmployeeId];
@@ -59,6 +63,7 @@ const emit = defineEmits<{
   setPermissionTier: [tier: ExecutionLevel];
   clearConversation: [id: string];
   openAssets: [];
+  openData: [];
   openSettings: [];
 }>();
 
@@ -74,6 +79,16 @@ const collaborationDelivery = ref<CollaborationDelivery>("direct");
 const onlineSearch = ref(true);
 const autoSchedule = ref(false);
 const sending = ref(false);
+const mobileShareOpen = ref(false);
+const mobileShareBusy = ref(false);
+const mobileShareUrl = ref("");
+const mobileShareQr = ref("");
+const mobileShareError = ref("");
+const mobileShareExpiresAt = ref(0);
+const mobileShareToken = ref("");
+const importingAssetId = ref("");
+let mobilePullTimer: ReturnType<typeof setInterval> | undefined;
+let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
 const inputBusy = computed(() => sending.value || chatBusy.value);
 const approving = ref("");
@@ -213,6 +228,94 @@ function clearCurrentConversation() {
   )
     emit("clearConversation", props.conversation.id);
 }
+
+function stopMobilePull() {
+  if (mobilePullTimer) {
+    clearInterval(mobilePullTimer);
+    mobilePullTimer = undefined;
+  }
+}
+
+function stopServerSync() {
+  if (serverSyncTimer) {
+    clearInterval(serverSyncTimer);
+    serverSyncTimer = undefined;
+  }
+}
+
+function ensureServerSync() {
+  stopServerSync();
+  if (!props.conversation?.serverSessionId) return;
+  serverSyncTimer = setInterval(() => {
+    // Keep desktop mirror caught up with phone-originated turns even after the QR sheet closes.
+    void props.pullFromServer?.();
+  }, 1800);
+}
+
+function closeMobileShare() {
+  mobileShareOpen.value = false;
+  stopMobilePull();
+  mobileShareToken.value = "";
+}
+
+async function openMobileShare() {
+  if (!props.conversation) {
+    notify.pushRaw('error', '请先开始或选择一段对话');
+    return;
+  }
+  mobileShareOpen.value = true;
+  mobileShareBusy.value = true;
+  mobileShareError.value = "";
+  mobileShareQr.value = "";
+  mobileShareUrl.value = "";
+  mobileShareToken.value = "";
+  try {
+    const sessionId = (await props.ensureServerSession?.()) || props.conversation.serverSessionId;
+    if (!sessionId) throw new Error("无法创建服务端对话，请确认已登录并完成模型配置。");
+    const created = await createMobileChatSession(sessionId);
+    mobileShareToken.value = created.token;
+    mobileShareUrl.value = created.lanUrls[0] || created.url;
+    mobileShareExpiresAt.value = created.expiresAt;
+    mobileShareQr.value = await qrDataUrl(mobileShareUrl.value, 200);
+    ensureServerSync();
+    stopMobilePull();
+    mobilePullTimer = setInterval(() => {
+      void (async () => {
+        await props.pullFromServer?.();
+        if (!mobileShareToken.value) return;
+        try {
+          const status = await getMobileChatSession(mobileShareToken.value);
+          if (status.sessionId && status.sessionId !== props.conversation?.serverSessionId) {
+            await props.followMobileSession?.(status.sessionId, status.title);
+          }
+        } catch {
+          /* ignore transient status errors while the sheet is open */
+        }
+      })();
+    }, 1600);
+  } catch (error) {
+    mobileShareError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    mobileShareBusy.value = false;
+  }
+}
+
+function mobileShareExpiryLabel() {
+  if (!mobileShareExpiresAt.value) return "";
+  const hours = Math.max(1, Math.round((mobileShareExpiresAt.value - Date.now()) / 3_600_000));
+  return `约 ${hours} 小时内有效`;
+}
+
+async function copyMobileShareUrl() {
+  if (!mobileShareUrl.value) return;
+  try {
+    await navigator.clipboard.writeText(mobileShareUrl.value);
+    notify.pushRaw('success', '已复制手机对话链接');
+  } catch {
+    notify.pushRaw('error', '复制失败');
+  }
+}
+
 function approvalKey(item: ToolApproval) {
   return `${item.skillId}:${item.capability}`;
 }
@@ -225,8 +328,26 @@ function assetType(asset: Asset) {
   if (asset.kind === "bundle") return "SITE";
   return asset.name.split(".").pop()?.toUpperCase() || "FILE";
 }
+function isSpreadsheetAsset(asset: Asset) {
+  if (asset.kind === "bundle") return false;
+  const ext = (asset.workspaceRelative || asset.name).split(".").pop()?.toLowerCase() || "";
+  return ext === "xlsx" || ext === "csv";
+}
 async function downloadAsset(asset: Asset) {
   await downloadAssetBestEffort(asset.id);
+}
+async function importAssetToData(asset: Asset) {
+  if (!isSpreadsheetAsset(asset) || importingAssetId.value) return;
+  importingAssetId.value = asset.id;
+  try {
+    const source = await importDataFromAsset(asset.id);
+    notify.pushRaw("success", "已导入数据中心", `${source.name} · ${source.tableCount || 0} 张表`);
+    emit("openData");
+  } catch (error) {
+    notify.pushRaw("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    importingAssetId.value = "";
+  }
 }
 async function openBundleFile(asset: Asset, relative: string) {
   const url = await previewAssetUrl(asset.id, relative);
@@ -352,6 +473,7 @@ async function refreshRuntimeDefaultEngine() {
 }
 onMounted(() => {
   void refreshRuntimeDefaultEngine();
+  ensureServerSync();
 });
 watch(
   () => props.employee.id,
@@ -495,6 +617,15 @@ watch(
   () => {
     stickToBottom.value = true;
     void nextTick(() => scrollMessagesToBottom(true));
+    closeMobileShare();
+    ensureServerSync();
+  },
+);
+
+watch(
+  () => props.conversation?.serverSessionId,
+  () => {
+    ensureServerSync();
   },
 );
 
@@ -519,6 +650,8 @@ watch(messageListRef, (el, _, onCleanup) => {
 onBeforeUnmount(() => {
   listResizeObserver?.disconnect();
   listResizeObserver = null;
+  stopMobilePull();
+  stopServerSync();
 });
 </script>
 
@@ -563,6 +696,15 @@ onBeforeUnmount(() => {
       <div class="flex items-center gap-2 sm:gap-3">
         <button
           v-if="conversation"
+          class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)] transition-colors hover:border-[var(--accent)]/40 hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]"
+          type="button"
+          title="手机扫码继续对话"
+          @click="openMobileShare"
+        >
+          手机对话
+        </button>
+        <button
+          v-if="conversation"
           class="hidden rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)] transition-colors hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-600 sm:inline-flex"
           type="button"
           title="清空当前对话内容"
@@ -588,6 +730,36 @@ onBeforeUnmount(() => {
         >
       </div>
     </header>
+
+    <div
+      v-if="mobileShareOpen"
+      class="fixed inset-0 z-40 flex items-end justify-center bg-black/35 p-4 sm:items-center"
+      @click.self="closeMobileShare"
+    >
+      <div class="w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h3 class="text-base font-bold">手机扫码对话</h3>
+            <p class="mt-1 text-xs leading-5 text-[var(--muted)]">独立轻量界面，与当前对话同步。请确保手机与电脑在同一局域网。</p>
+          </div>
+          <button class="rounded-lg px-2 py-1 text-xs text-[var(--muted)] hover:bg-[var(--surface-muted)]" type="button" @click="closeMobileShare">关闭</button>
+        </div>
+        <div class="mt-4 flex flex-col items-center gap-3">
+          <p v-if="mobileShareBusy" class="py-10 text-sm text-[var(--muted)]">正在生成二维码…</p>
+          <p v-else-if="mobileShareError" class="rounded-xl bg-rose-500/10 px-3 py-3 text-sm text-rose-700">{{ mobileShareError }}</p>
+          <template v-else>
+            <img v-if="mobileShareQr" class="h-[200px] w-[200px] rounded-xl border border-[var(--border)] bg-white p-2" :src="mobileShareQr" alt="手机对话二维码" />
+            <p class="text-center text-[11px] text-[var(--muted)]">{{ mobileShareExpiryLabel() }}</p>
+            <p class="w-full break-all rounded-xl bg-[var(--surface-muted)] px-3 py-2 font-mono text-[10px] text-[var(--muted)]">{{ mobileShareUrl }}</p>
+            <button
+              class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]"
+              type="button"
+              @click="copyMobileShareUrl"
+            >复制链接</button>
+          </template>
+        </div>
+      </div>
+    </div>
 
     <div
       v-if="!conversation && !showStandalonePending"
@@ -896,14 +1068,24 @@ onBeforeUnmount(() => {
                     <button v-for="file in asset.manifest?.files || []" :key="file.path" class="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]" type="button" @click="openBundleFile(asset, file.path)">{{ file.path }}</button>
                   </div>
                 </div>
-                <div class="flex shrink-0 gap-2">
+                <div class="flex shrink-0 flex-wrap justify-end gap-2">
                   <button
                     class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent)]"
                     type="button"
                     @click="downloadAsset(asset)"
                   >
-                    下载</button
-                  ><button
+                    下载
+                  </button>
+                  <button
+                    v-if="isSpreadsheetAsset(asset)"
+                    class="rounded-lg border border-emerald-500/40 bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:border-emerald-600 disabled:opacity-50"
+                    type="button"
+                    :disabled="importingAssetId === asset.id"
+                    @click="importAssetToData(asset)"
+                  >
+                    {{ importingAssetId === asset.id ? "导入中…" : "导入数据中心" }}
+                  </button>
+                  <button
                     class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-semibold text-white"
                     type="button"
                     @click="emit('openAssets')"

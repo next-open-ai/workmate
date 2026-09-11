@@ -236,6 +236,91 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- Agent 脚本 Python 决策 -->
+        <div
+          v-if="report?.pythonDecision"
+          class="rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-5 py-4 shadow-sm sm:px-6"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-[10px] font-bold tracking-[.12em] text-[var(--accent)]">AGENT 脚本环境</p>
+              <h2 class="mt-1 text-sm font-semibold">当前选用的 Python</h2>
+              <p class="mt-1 text-xs text-[var(--muted)]">
+                策略：系统 ≥ 3.9 优先；否则回退预装 agentscope-runtime。脚本依赖与引擎环境隔离。
+              </p>
+            </div>
+            <span
+              :class="[
+                'rounded-full px-2.5 py-1 text-[10px] font-bold',
+                report.pythonDecision.source === 'system' || report.pythonDecision.source === 'override'
+                  ? 'bg-emerald-500/12 text-emerald-700'
+                  : report.pythonDecision.source === 'bundled'
+                    ? 'bg-amber-500/12 text-amber-700'
+                    : 'bg-rose-500/12 text-rose-700',
+              ]"
+            >
+              {{
+                report.pythonDecision.source === 'system' ? '系统 Python'
+                  : report.pythonDecision.source === 'bundled' ? '预装 Runtime'
+                    : report.pythonDecision.source === 'override' ? '环境变量覆盖'
+                      : '不可用'
+              }}
+            </span>
+          </div>
+          <dl class="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+            <div>
+              <dt class="text-[var(--muted)]">选用解释器</dt>
+              <dd class="mt-0.5 break-all font-medium">{{ report.pythonDecision.command || '—' }} {{ report.pythonDecision.version || '' }}</dd>
+            </div>
+            <div>
+              <dt class="text-[var(--muted)]">系统探测</dt>
+              <dd class="mt-0.5 break-all font-medium">{{ report.pythonDecision.systemFound || '未检测到' }}</dd>
+            </div>
+            <div>
+              <dt class="text-[var(--muted)]">预装 Runtime</dt>
+              <dd class="mt-0.5 break-all font-medium">{{ report.pythonDecision.bundledFound || '未检测到' }}</dd>
+            </div>
+            <div>
+              <dt class="text-[var(--muted)]">依赖隔离</dt>
+              <dd class="mt-0.5 font-medium">工作区 .python-packages（不写 agentscope-runtime）</dd>
+            </div>
+          </dl>
+          <p class="mt-3 rounded-xl bg-[var(--surface-muted)] px-3 py-2 text-[11px] leading-relaxed text-[var(--muted)]">
+            {{ report.pythonDecision.reason }}
+          </p>
+          <p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+            {{ report.pythonDecision.isolationNote }}
+          </p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button
+              v-if="!platformKind.docker && report.pythonDecision.source !== 'system'"
+              class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-60"
+              type="button"
+              :disabled="Boolean(fixingId)"
+              @click="applyFix('install-python', 'install-python')"
+            >
+              {{ fixingId === 'install-python' ? '正在安装…' : '尝试安装系统 Python 3.12' }}
+            </button>
+            <button
+              v-if="(report.workspaceScrap?.totalBytes ?? 0) > 0"
+              class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)] disabled:opacity-60"
+              type="button"
+              :disabled="Boolean(fixingId)"
+              @click="applyFix('clean-workspace-scrap', 'clean-workspace-scrap')"
+            >
+              {{ fixingId === 'clean-workspace-scrap' ? '清理中…' : `清理临时脚本/依赖（${report.workspaceScrap?.totalBytesLabel || ''}）` }}
+            </button>
+            <button
+              v-if="report.workspaceScrap?.manualHelp"
+              class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]"
+              type="button"
+              @click="copyScript('scrap-manual', report.workspaceScrap.manualHelp)"
+            >
+              {{ copiedKey === 'scrap-manual' ? '已复制' : '复制手动清理说明' }}
+            </button>
+          </div>
+        </div>
+
         <div v-if="runStatus === 'checking' && !report" class="flex items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)]/80 px-5 py-4 text-sm text-[var(--muted)]">
           <span class="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent" />
           正在检查本地环境…
@@ -265,7 +350,7 @@ onMounted(async () => {
             <div class="min-w-0">
               <h2 class="text-sm font-semibold">修复工具包 · {{ pack.problems }} 项</h2>
               <p class="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
-                可复制主机 / Docker 脚本。白名单可自动修复（数据目录、ensurepip、AgentScope）。dsh 体积约 200MB，请单项安装并查看进度。
+                可复制主机 / Docker 脚本。白名单可自动修复（数据目录、ensurepip、AgentScope、安装 Python、清理临时脚本）。dsh 体积约 200MB，请单项安装并查看进度。
               </p>
             </div>
             <div class="flex flex-wrap gap-2">

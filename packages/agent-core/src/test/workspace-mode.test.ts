@@ -44,6 +44,7 @@ test('resolveAgentWorkspaceRoot isolates conversation runs under workspaces/', (
 
 test('mode contracts mention the correct deliverable location', () => {
   assert.match(conversationModeContract(), /output\//);
+  assert.match(conversationModeContract(), /preview_server_start/);
   assert.match(projectModeContract(), /Do not wrap the product in an output\//);
   assert.doesNotMatch(projectModeContract(), /MUST be written under output\//);
 });

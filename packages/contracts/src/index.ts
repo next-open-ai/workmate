@@ -321,14 +321,20 @@ export const ChatRequestSchema = z.object({
    */
   runId: z.string().min(1).max(120).optional(),
   /**
+   * Chat session id for tooling that needs session-scoped assets (e.g. mapping
+   * preview_server_start to the latest SITE asset bundle). Does not change
+   * workspace isolation — each run still uses its own staging directory.
+   */
+  conversationId: z.string().min(1).max(120).optional(),
+  /**
    * Absolute shared project workspace root. When set, `publish_to_project` may
    * promote deliverables from the isolated run workspace into this directory.
    */
   projectWorkspacePath: z.string().min(1).max(500).optional(),
   /** Platform workspace capability. This is runtime policy, never a Skill permission. */
   workspaceAccess: z.enum(['read', 'write', 'full']).optional(),
-  /** Soft ceiling for tool/LLM steps in one run. */
-  maxSteps: z.number().int().min(4).max(64).optional(),
+  /** Platform baseline is 50 steps; callers may request a higher ceiling. */
+  maxSteps: z.number().int().min(50).max(64).optional(),
   /** Wall-clock budget for the whole agent run (ms). */
   runTimeoutMs: z.number().int().min(15_000).max(1_800_000).optional(),
   /** Per MCP tool call budget (ms). */

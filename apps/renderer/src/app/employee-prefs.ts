@@ -32,9 +32,10 @@ export interface EmployeeRuntimePrefs {
 }
 
 export const DEFAULT_MAX_STEPS = 50;
-/** Research turns should synthesize evidence, not spin in document/tool loops. */
-export const RESEARCH_DEFAULT_MAX_STEPS = 10;
-export const MIN_MAX_STEPS = 4;
+/** Kept for compatibility; every employee starts from the same platform floor. */
+export const RESEARCH_DEFAULT_MAX_STEPS = DEFAULT_MAX_STEPS;
+/** A configured budget may increase the platform default, never lower it. */
+export const MIN_MAX_STEPS = DEFAULT_MAX_STEPS;
 export const MAX_MAX_STEPS = 64;
 
 export const DEFAULT_RUN_TIMEOUT_MS = 600_000;
@@ -48,7 +49,7 @@ export const MAX_MCP_TOOL_TIMEOUT_MS = 300_000;
 export const defaultEmployeeRuntimePrefs = (employeeId?: string): EmployeeRuntimePrefs => ({
   defaultModelId: null,
   searchMode: 'inherit',
-  maxSteps: employeeId === 'research' ? RESEARCH_DEFAULT_MAX_STEPS : DEFAULT_MAX_STEPS,
+  maxSteps: DEFAULT_MAX_STEPS,
   runTimeoutMs: DEFAULT_RUN_TIMEOUT_MS,
   mcpToolTimeoutMs: DEFAULT_MCP_TOOL_TIMEOUT_MS,
   mcpIds: [],

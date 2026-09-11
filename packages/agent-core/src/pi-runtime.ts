@@ -29,6 +29,7 @@ import {
 } from './pi-model.js';
 import { collectAgentTools, extractToolDetails } from './pi-tools.js';
 import { createPiCapabilityTools } from './pi-capability-adapter.js';
+import { createPreviewServerTools } from './preview-server.js';
 import {
   discoverPiSkillsUnder,
   formatAuthorizedSkillsCatalog,
@@ -173,17 +174,22 @@ function skillFirstExecutionContract(projectBound = false) {
       ? '8) This is a project-bound run. Write the real project tree at the workspace root (index.html, src/, assets/, …). Do not wrap the product in output/.'
       : '8) Assume the run workspace already supports output/ deliverables. Put final user-facing files under output/ directly.',
     '9) For Python PDF generation, prefer standard library plus already-available packages first. Do not call install_python_dependency unless a concrete script/import failure shows the missing module.',
-    '10) For PDF / document / brief / website tasks, do NOT use filesystem MCP or finance/market MCP. For code and websites, use the standard read/write/edit/bash tools in the authorized workspace. Write a clean initial file, then use edit for focused follow-up changes. Once a final user-facing file is verified, call commit_artifact exactly once; only committed artifacts enter the asset library.',
+    '10) For PDF / document / brief / website tasks, do NOT use filesystem MCP or finance/market MCP. For code and websites, use the standard read/write/edit/bash tools in the authorized workspace. Write a clean initial file, then use edit for focused follow-up changes. Once a final user-facing file is verified, call commit_artifact exactly once; only committed artifacts enter the asset library. To open a local preview of a static site, call preview_server_start (not bash http.server).',
     '11) If local project context is sparse, stop probing after 1-2 checks, state the assumption once, and proceed to the deliverable instead of repeatedly re-checking the workspace.',
     '12) For research /素材整理 /设计方案 /简报 tasks, do not spend tool steps narrating your plan. Search or inspect only what directly changes the deliverable, then write the result once.',
     '13) Never emit process narration such as "Let me think", "Let me check", "I will first", "我先看一下" as the final answer body. Use tools or write the file directly; keep visible text for conclusions and deliverables only.',
     '14) For project-task runs with explicit output filenames, prefer writing those files immediately after the minimum necessary inspection. If a public site blocks crawling or a fetch tool errors once, do not spiral into retries; proceed with the best grounded draft and clearly note any evidence limits inside the file.',
     '15) Do not rewrite the same deliverable repeatedly to fix tiny typos unless acceptance requires it. Prefer one clean write, then stop.',
-    '16) After write_workspace_file / finish_workspace_write succeeds, do NOT read the whole file back. Trust path/bytes. Path-only history stubs mean success on disk — never re-call write with only path. Prefer CSS gradients / inline SVG over image-generator scripts.',
+    '16) After a successful write or edit, do NOT read the whole file back. Trust the tool result and file path; never re-call write with only a path. Prefer CSS gradients / inline SVG over image-generator scripts.',
     '17) Never paste prior CSS/JS source into your reasoning. Continue with the next unfinished page file.',
     '18) Command/script outputs appear as [command-result] envelopes (head/tail). Treat them as truncated logs; do not ask to re-dump full stdout.',
+    '19) After the deliverable set exists (docs/CSV/HTML written and one basic check passes), STOP. Do not run multi-round render/DOM/CSV re-validation spirals, taxonomy crosswalk rewrites, or unrelated MCP calls (market/stock/trading-day). One short verification pass is enough.',
+    '20) If the user asks to preview/open/view a site, call preview_server_start with access=local. If they ask for 本地部署 / LAN deploy / let other devices open it, call preview_server_start with access=lan and return url/lanUrls (same LAN, multi-device). If they ask to 关闭本地部署 / 关闭预览 / 关闭本地网站 / stop the local site, call preview_server_stop (status first if needed). Do NOT rebuild or use bash http.server/kill. Conversation maps the session SITE asset bundle; project maps the project workspace root.',
   ].join('\n');
 }
+
+export const STEP_BUDGET_EXCEEDED_MESSAGE = (maxSteps: number) =>
+  `工具调用步数超过上限（${maxSteps}），已自动中止。请减少重复探查，或在员工详情提高“轮次 / 步骤上限”后重试。`;
 
 function looksLikeDocumentArtifactTask(userText: string, skills: AgentSkillRuntime[]) {
   const text = `${userText}\n${skills.map((skill) => `${skill.name}\n${skill.description}\n${skill.instructions || ''}`).join('\n')}`.toLowerCase();
@@ -197,6 +203,16 @@ function looksLikeLiveMarketTask(userText: string) {
 
 function looksLikeWorkspaceWritingTask(userText: string) {
   return /(write_workspace_file|交付文件|写入.*\.md|产出.*页面|项目根|workspace root|output\/|html|css|简报|验收清单|readme)/i.test(userText);
+}
+
+/** Finance / market MCP ids & tool names that burn steps on non-market tasks. */
+export function isFinanceLikeMcpName(name: string): boolean {
+  const lower = name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return /(^|_)(akshare|tushare|stock_sdk|stock|finance|crypto|eastmoney|jqdata|joinquant|market_data)(_|$)/.test(lower)
+    || lower.includes('trading_day')
+    || lower.includes('a_share')
+    || lower.includes('get_index_history')
+    || lower.includes('is_trading_day');
 }
 
 function prefersNativeCodingTools(userText: string) {
@@ -227,30 +243,44 @@ export function filterMcpToolsetForTask(
     || Boolean(opts?.projectBound);
   const liveMarket = looksLikeLiveMarketTask(userText);
   const needsFetch = /(竞品|调研|抓取|crawl|scrape|官网内容|网页正文)/i.test(userText);
+  /** Local data-app instant programming — never burn steps on MCP fetch. */
+  const dataAppBuild = /(data-apps\/|本机数据 API|custom-site|bind_data_app_custom_site|即时编程|按想法定制|单文件 HTML|output\/index\.html)/i.test(userText);
 
   const blockedPrefixes = new Set<string>();
-  if (writing || opts?.projectBound) {
+  if (writing || opts?.projectBound || dataAppBuild) {
     blockedPrefixes.add('filesystem');
     blockedPrefixes.add('sequential_thinking');
     blockedPrefixes.add('sequentialthinking');
   }
-  if (writing && !liveMarket) {
+  if ((writing && !liveMarket) || dataAppBuild) {
     blockedPrefixes.add('akshare');
     blockedPrefixes.add('tushare');
-    if (!needsFetch) blockedPrefixes.add('fetch');
+    blockedPrefixes.add('stock');
+    blockedPrefixes.add('stock_sdk');
+    blockedPrefixes.add('finance');
+    if (!needsFetch || dataAppBuild) blockedPrefixes.add('fetch');
   }
   if (!blockedPrefixes.size) return mcp;
 
   const keepTools = mcp.tools.filter((tool) => {
     const lower = tool.name.toLowerCase();
+    if (dataAppBuild && /fetch/i.test(lower)) return false;
+    if (writing && !liveMarket && isFinanceLikeMcpName(tool.name)) return false;
     for (const prefix of blockedPrefixes) {
       if (lower.startsWith(`mcp_${prefix}_`)) return false;
+      // Also drop tools whose sanitized connection label embeds the blocked name mid-string.
+      if (lower.includes(`_${prefix}_`) || lower.endsWith(`_${prefix}`)) return false;
     }
     return true;
   });
   const keepNames = new Set(keepTools.map((tool) => tool.name));
   const keepDescriptors = mcp.toolDescriptors.filter((tool) => keepNames.has(tool.name));
-  const keepLabels = mcp.labels.filter((label) => !blockedPrefixes.has(sanitizeMcpPrefix(label)));
+  const keepLabels = mcp.labels.filter((label) => {
+    const sanitized = sanitizeMcpPrefix(label);
+    if (blockedPrefixes.has(sanitized)) return false;
+    if (writing && !liveMarket && isFinanceLikeMcpName(label)) return false;
+    return true;
+  });
   const filtered = keepTools.length !== mcp.tools.length;
   return {
     ...mcp,
@@ -259,6 +289,27 @@ export function filterMcpToolsetForTask(
     labels: keepLabels,
     instructions: filtered ? '' : mcp.instructions,
   };
+}
+
+/** Filter MCP connector configs before dsh warm/bridge (same policy as tool filtering). */
+export function filterMcpConnectionsForTask<T extends { id?: string; name?: string; enabled?: boolean }>(
+  connections: T[] | undefined,
+  userText: string,
+  opts?: { projectBound?: boolean },
+): T[] {
+  const list = Array.isArray(connections) ? connections : [];
+  const writing = looksLikeDocumentArtifactTask(userText, [])
+    || looksLikeWorkspaceWritingTask(userText)
+    || Boolean(opts?.projectBound);
+  const liveMarket = looksLikeLiveMarketTask(userText);
+  const dataAppBuild = /(data-apps\/|本机数据 API|custom-site|bind_data_app_custom_site|即时编程|按想法定制|单文件 HTML|output\/index\.html)/i.test(userText);
+  if ((!writing && !dataAppBuild) || liveMarket) return list;
+  return list.filter((item) => {
+    const key = `${item.id || ''} ${item.name || ''}`;
+    if (isFinanceLikeMcpName(key)) return false;
+    if (dataAppBuild && /fetch/i.test(key)) return false;
+    return true;
+  });
 }
 
 function toolInputSummary(toolName: string, input: unknown) {
@@ -275,12 +326,20 @@ function toolInputSummary(toolName: string, input: unknown) {
   if (toolName === 'read') return `正在读取工作区文件：${String(value.path || '')}`;
   if (toolName === 'bash') return '正在执行受控工作区命令。';
   if (toolName === 'commit_artifact') return `正在提交业务交付物：${String(value.path || '')}`;
+  if (toolName === 'preview_server_start') {
+    return `正在启动本地网站${value.access === 'lan' ? '局域网部署' : '预览'}${value.root ? `：${String(value.root)}` : '（自动映射 SITE/项目目录）'}`;
+  }
+  if (toolName === 'preview_server_stop') return `正在停止本地网站服务：${String(value.id || value.port || '')}`;
+  if (toolName === 'preview_server_status') return '正在查询本地网站预览/部署状态。';
   if (toolName === 'start_workspace_write') return `正在开始分阶段写入：${String(value.path || '')}`;
   if (toolName === 'append_workspace_write') {
     const seq = typeof value.seq === 'number' ? ` seq=${value.seq}` : '';
     return `正在追加分阶段写入片段：${String(value.writeId || '').slice(0, 8)}…${seq}`;
   }
   if (toolName === 'finish_workspace_write') return `正在提交分阶段写入：${String(value.writeId || '').slice(0, 8)}…`;
+  if (toolName === 'start_artifact_source_write') return `正在开始大型交付物写入：${String(value.path || '')}`;
+  if (toolName === 'append_artifact_source_write') return `正在追加大型交付物片段：${String(value.writeId || '').slice(0, 8)}… seq=${String(value.seq || '')}`;
+  if (toolName === 'finish_artifact_source_write') return `正在原子提交大型交付物：${String(value.writeId || '').slice(0, 8)}…`;
   if (toolName === 'publish_to_project') {
     const dest = value.destPath ? ` → ${String(value.destPath)}` : '';
     return `正在发布到项目空间：${String(value.path || '')}${dest}`;
@@ -291,6 +350,7 @@ function toolInputSummary(toolName: string, input: unknown) {
   if (toolName === 'run_workspace_script') return `正在执行生成脚本：${String(value.path || '')}`;
   if (toolName === 'install_python_dependency') return `正在安装 Python 依赖：${String(value.package || '')}`;
   if (toolName === 'fetch_skill_url') return `正在访问网络资源：${String(value.url || '')}`;
+  if (toolName === 'bind_data_app_custom_site') return `正在绑定数据应用定制站：${String(value.appId || '')}`;
   if (toolName === 'web_search') return `正在联网搜索：${String(value.query || '')}`;
   if (toolName === 'kb_search') return `正在检索知识库：${String(value.query || '')}`;
   if (toolName === 'save_experience') return `正在保存智能体经验：${String(value.title || '')}`;
@@ -339,6 +399,21 @@ function toolResultSummary(toolName: string, output: unknown) {
   if (toolName === 'commit_artifact') {
     return `交付物已提交：${String(value.path || '')}${typeof value.bytes === 'number' ? `（${value.bytes} 字节）` : ''}`;
   }
+  if (toolName === 'preview_server_start') {
+    const access = value.access === 'lan' ? '局域网部署' : '本地预览';
+    return value.reused
+      ? `已复用${access}：${String(value.url || '')}`
+      : `${access}已启动：${String(value.url || '')}`;
+  }
+  if (toolName === 'preview_server_stop') {
+    return `已停止 ${String(value.stopped ?? 0)} 个本地网站服务。`;
+  }
+  if (toolName === 'preview_server_status') {
+    const servers = Array.isArray(value.servers) ? value.servers : [];
+    return servers.length
+      ? `当前服务：${servers.map((item) => (item && typeof item === 'object' ? String((item as { url?: string }).url || '') : '')).filter(Boolean).join('、')}`
+      : '当前没有运行中的本地预览/部署。';
+  }
   if (toolName === 'start_workspace_write') {
     return `已开始分阶段写入：${String(value.path || '')}（writeId ${String(value.writeId || '').slice(0, 8)}…）`;
   }
@@ -350,6 +425,9 @@ function toolResultSummary(toolName: string, output: unknown) {
     const mode = value.mode === 'append' ? '已追加提交' : '已提交写入';
     return `${mode} ${String(value.path || '运行工作区文件')}${typeof value.totalBytes === 'number' ? `（共 ${value.totalBytes} 字节）` : '。'}`;
   }
+  if (toolName === 'start_artifact_source_write') return `已开始大型交付物写入：${String(value.path || '')}`;
+  if (toolName === 'append_artifact_source_write') return `已接收大型交付物片段：${String(value.receivedParts || 0)} 段。`;
+  if (toolName === 'finish_artifact_source_write') return `大型交付物已原子写入：${String(value.path || '')}${typeof value.bytes === 'number' ? `（${value.bytes} 字节）` : ''}`;
   if (toolName === 'publish_to_project') {
     return `已发布到项目空间：${String(value.projectPath || value.path || '')}${typeof value.bytes === 'number' ? `（${value.bytes} 字节）` : ''}`;
   }
@@ -357,6 +435,11 @@ function toolResultSummary(toolName: string, output: unknown) {
     return `已登记业务交付物：${String(value.path || '')}${typeof value.bytes === 'number' ? `（${value.bytes} 字节）` : ''}`;
   }
   if (toolName === 'fetch_skill_url') return `已获取网络资源（${String(value.contentType || 'text')}）。`;
+  if (toolName === 'bind_data_app_custom_site') {
+    return value.ok === false
+      ? `定制站绑定失败：${failText()}`
+      : `已绑定数据应用定制站：${String(value.url || value.appId || '')}`;
+  }
   if (toolName === 'web_search') {
     const count = Array.isArray(value.results) ? value.results.length : 0;
     const fallback = value.fallbackFrom ? `，已从 ${String(value.fallbackFrom)} 自动降级` : '';
@@ -510,6 +593,7 @@ export async function* streamAgentReply(input: {
   mcpConnections?: import('@workmate/contracts').McpConnectionRuntime[];
   knowledgeBases?: import('@workmate/contracts').KnowledgeBaseRuntime[];
   runId?: string;
+  conversationId?: string;
   projectWorkspacePath?: string;
   workspaceAccess?: 'read' | 'write' | 'full';
   maxSteps?: number;
@@ -518,6 +602,7 @@ export async function* streamAgentReply(input: {
   abortSignal?: AbortSignal;
 }): AsyncGenerator<AgentEvent> {
   const runId = input.runId?.trim() || crypto.randomUUID();
+  const conversationId = input.conversationId?.trim() || '';
   const projectRoot = input.projectWorkspacePath?.trim() || '';
   const workspaceMode = resolveWorkspaceMode(projectRoot);
   const projectBound = workspaceMode === 'project';
@@ -526,8 +611,9 @@ export async function* streamAgentReply(input: {
   const knowledgeTools = createKnowledgeTools({ knowledgeBases: input.knowledgeBases, model: input.model });
   const experienceTools = createExperienceTools({ agentId: input.profile.id, model: input.model });
   const lastUserText = [...input.messages].reverse().find((item) => item.role === 'user')?.content || '';
+  const eligibleMcpConnections = filterMcpConnectionsForTask(input.mcpConnections, lastUserText, { projectBound });
   // Overlap MCP connect with experience recall — both were serial TTFT taxes.
-  const mcpPromise = loadMcpToolset(input.mcpConnections, { toolTimeoutMs: input.mcpToolTimeoutMs });
+  const mcpPromise = loadMcpToolset(eligibleMcpConnections, { toolTimeoutMs: input.mcpToolTimeoutMs });
   const experiencePromise = lastUserText.trim().length >= 4 && experienceTools.length
     ? recallExperienceBlock({
       agentId: input.profile.id,
@@ -602,7 +688,7 @@ export async function* streamAgentReply(input: {
     // Keep the configured task budget. Do not impose a document-specific global
     // cap: aborting an Agent after it has already queued work produces the false
     // "file succeeded, run failed" state.
-    const requestedMaxSteps = Math.min(64, Math.max(4, Math.round(Number(input.maxSteps) || 50)));
+    const requestedMaxSteps = Math.min(64, Math.max(50, Math.round(Number(input.maxSteps) || 50)));
     const maxSteps = requestedMaxSteps;
     const piModel = toPiModel(input.model);
     const onPayload = createChatCompletionsPayloadPatch(input.model);
@@ -626,6 +712,13 @@ export async function* streamAgentReply(input: {
         workspaceAccess: input.workspaceAccess ?? 'write',
         workspaceMode,
       }),
+      createPreviewServerTools({
+        workspaceRoot,
+        workspaceAccess: input.workspaceAccess ?? 'write',
+        projectId: projectBound ? projectRoot : undefined,
+        conversationId: conversationId || undefined,
+        workspaceMode,
+      }),
       skillTools,
       searchTools,
       knowledgeTools,
@@ -637,12 +730,22 @@ export async function* streamAgentReply(input: {
     let lastToolSucceeded: boolean | undefined;
     let toolTurns = 0;
     let runFailed = false;
+    let stepBudgetExceeded = false;
     let usageSteps = 0;
     const modelRef = modelRefFromConfig(input.model);
     const emittedArtifactPaths = new Set<string>();
     const projectFilesBefore = projectBound
       ? await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>())
       : null;
+
+    const publishProjectDiff = async () => {
+      if (!projectBound || !projectFilesBefore) return;
+      const after = await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>());
+      for (const [relative, fingerprint] of after) {
+        if (projectFilesBefore.get(relative) === fingerprint) continue;
+        enqueue({ type: 'project.file.published', runId, path: relative, projectPath: relative });
+      }
+    };
 
     const agent = new Agent({
       initialState: {
@@ -721,13 +824,9 @@ export async function* streamAgentReply(input: {
       if (event.type === 'tool_execution_start') {
         toolTurns += 1;
         if (toolTurns > maxSteps) {
-          agent.abort();
-          enqueue({
-            type: 'run.failed',
-            runId,
-            message: `工具调用步数超过上限（${maxSteps}），已自动中止。请减少重复探查，或在员工详情提高“轮次 / 步骤上限”后重试。`,
-          });
+          stepBudgetExceeded = true;
           runFailed = true;
+          agent.abort();
           return;
         }
         enqueue({
@@ -810,7 +909,15 @@ export async function* streamAgentReply(input: {
           });
           return;
         }
-        if (runFailed) return;
+        if (runFailed) {
+          // Step-budget aborts often happen after files are already on disk —
+          // publish them so the orchestrator can soft-complete the DAG node.
+          if (stepBudgetExceeded) {
+            await publishProjectDiff();
+            enqueue({ type: 'run.failed', runId, message: STEP_BUDGET_EXCEEDED_MESSAGE(maxSteps) });
+          }
+          return;
+        }
         if (!emittedText && lastToolSucceeded !== undefined) {
           enqueue({
             type: 'message.delta',
@@ -822,15 +929,14 @@ export async function* streamAgentReply(input: {
         }
         if (projectBound && projectFilesBefore) {
           // Project mode: cwd is project root — publish changed files (aligned with dsh).
-          const after = await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>());
-          for (const [relative, fingerprint] of after) {
-            if (projectFilesBefore.get(relative) === fingerprint) continue;
-            enqueue({ type: 'project.file.published', runId, path: relative, projectPath: relative });
-          }
+          await publishProjectDiff();
         }
         enqueue({ type: 'run.completed', runId });
       } catch (error) {
-        if (isAbortLike(error, abortSignal)) {
+        if (stepBudgetExceeded) {
+          await publishProjectDiff();
+          enqueue({ type: 'run.failed', runId, message: STEP_BUDGET_EXCEEDED_MESSAGE(maxSteps) });
+        } else if (isAbortLike(error, abortSignal)) {
           const timedOut = timeoutController.signal.aborted && !input.abortSignal?.aborted;
           enqueue({
             type: 'run.cancelled',

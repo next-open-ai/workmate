@@ -200,7 +200,28 @@ export const BASELINE_CATALOG_SKILLS: BaselineCatalogSkill[] = [
     write: true,
     script: true,
     instructions:
-      '实现前端时优先可运行交付：分文件写入、控制单次写入体积，核心页放 output/。缺品牌规范时用清晰默认企业规范并写进 README。',
+      '实现前端时优先可运行交付：分文件写入、控制单次写入体积，核心页放项目根或 output/。缺品牌规范时用清晰默认企业规范并写进 README。'
+      + '网站写完后如需本地预览，优先调用 preview_server_start（项目模式会映射项目根目录），把返回的 url 告诉用户；不要用 bash 起 http.server，也不要反复 restart 做验证。',
+  }),
+  skill({
+    id: 'skill-baseline-local-site-preview',
+    name: '本地网站预览与部署',
+    description: '映射站点目录到本机静态服务：本地预览、本地/局域网部署，以及关闭/停止本地网站服务。对话映射 SITE bundle；项目映射工作区根目录。',
+    category: '工程',
+    tags: ['preview', 'static', 'website', 'lan', 'deploy', 'popular'],
+    write: true,
+    instructions:
+      '当用户要「预览 / 打开 / 看一下」或「本地部署 / 局域网部署 / 局域网访问 / 给别人打开」网站时：\n'
+      + '1) 禁止重建、重写、拼接 HTML/CSS/JS；现有站点文件直接用。\n'
+      + '2) 调用 preview_server_start，按意图选 access：\n'
+      + '   - 「预览 / 打开 / 看一下」→ access=local（默认），仅本机 127.0.0.1。\n'
+      + '   - 「本地部署 / 局域网部署 / 局域网访问 / 给别人看」→ access=lan（绑定 0.0.0.0，同网段多设备可访问）；把 url / lanUrls 告诉用户，并可附带 localUrl。\n'
+      + '3) 普通对话映射本会话资产库 SITE bundle；项目模式映射项目工作区根目录。不要传 root 去猜子目录。\n'
+      + '4) 把返回的地址告诉用户后停止。失败时只报告错误，不要改用 bash http.server，也不要开始重做网站。\n'
+      + '5) 关闭/停止：用户说「关闭本地部署」「关闭预览」「关闭本地网站」「停止预览」「停止部署」「关掉网站服务」等，一律调用 preview_server_stop（可先 preview_server_status 取 id/port；若用户未指定，停掉当前相关服务即可）。不要用 bash kill。\n'
+      + '6) 查询用 preview_server_status。\n'
+      + '7) 若工具返回无 SITE bundle / 无 index.html，只告知用户，禁止自行 write/bash 重建。\n'
+      + '仅当用户明确要求改版/重做时才写文件。',
   }),
   skill({
     id: 'skill-baseline-architecture',

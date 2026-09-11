@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { promoteWorkspaceDeliverablesToProject } from '@workmate/agent-core';
+import { cleanWorkspaceScrap, promoteWorkspaceDeliverablesToProject } from '@workmate/agent-core';
 import type { EventHub, HubListener } from './hub.js';
 import { deleteKey, listJsonIds, readJson, writeJson } from './repo.js';
 import type { OrcEvent } from './events.js';
@@ -620,9 +620,12 @@ export class ProjectService {
     const project = await this.getProject(id);
     if (!project) return;
     await this.cancelActiveRun(id, 'deleted');
+    const workspacePath = String(project.workspacePath || '').trim();
     await deleteKey(this.store, this.projectKey(id));
     const runs = await this.listProjectRuns(id);
     for (const run of runs) await deleteKey(this.store, this.projectRunKey(run.id));
+    // Keep deliverables; only scrub Agent process scrap (scripts / .python-packages / …).
+    if (workspacePath) await cleanWorkspaceScrap(workspacePath).catch(() => undefined);
   }
 
   async listProjectRuns(projectId: string): Promise<ProjectRun[]> {

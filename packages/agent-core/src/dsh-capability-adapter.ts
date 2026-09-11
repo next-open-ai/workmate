@@ -19,6 +19,7 @@ export class DshCapabilityAdapter {
       'Workmate capability policy: operate only inside the current workspace.',
       'Use the engine filesystem and bash tools only for the task. Do not access parent paths or network resources.',
       'For a conversation deliverable, write the finished file under output/. It will be verified and atomically committed only after this run completes successfully.',
+      'Do not start long-lived http.server / npx serve processes from bash; leave static site files on disk and report their paths for local preview (Pi/AgentScope expose preview_server_start).',
     ].join(' ');
   }
 

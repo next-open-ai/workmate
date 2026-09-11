@@ -71,6 +71,13 @@ function readProjectFile(root: string, relative: string) {
   return { relative, content: fs.readFileSync(file, 'utf8') };
 }
 
+/** Binary-safe read for spreadsheet import into the data workbench. */
+export function readProjectFileBytes(root: string, relative: string) {
+  const file = projectPath(root, relative);
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error('Project file is unavailable.');
+  return { relative, name: path.basename(file), content: fs.readFileSync(file) };
+}
+
 function writeProjectFile(root: string, relative: string, content: string) {
   const file = projectPath(root, relative);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });

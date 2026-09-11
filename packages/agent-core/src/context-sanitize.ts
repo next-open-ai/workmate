@@ -7,6 +7,7 @@ import type { AgentMessage } from '@mariozechner/pi-agent-core';
 
 const WRITE_TOOLS = new Set(['write_workspace_file']);
 const STAGED_APPEND_TOOLS = new Set(['append_workspace_write']);
+const ARTIFACT_APPEND_TOOLS = new Set(['append_artifact_source_write']);
 const READ_TOOLS = new Set(['read_workspace_file', 'read_skill_file', 'fetch_skill_url']);
 const SCRIPT_TOOLS = new Set([
   'run_workspace_script',
@@ -124,6 +125,20 @@ function stubWritePayloads(messages: AgentMessage[]): AgentMessage[] {
             chars: args.text.length,
             contextPolicy: 'path-only',
             hint: 'Staged append text omitted from context; piece already accepted in-memory. Keep seq order; do not re-send body.',
+          },
+        };
+      }
+
+      if (ARTIFACT_APPEND_TOOLS.has(item.name) && typeof args.content === 'string' && args.content.length > 0) {
+        changed = true;
+        return {
+          ...item,
+          arguments: {
+            writeId: args.writeId,
+            seq: args.seq,
+            chars: args.content.length,
+            contextPolicy: 'path-only',
+            hint: 'Large artifact fragment omitted from context; the host accepted it. Keep seq order and do not re-send this fragment.',
           },
         };
       }

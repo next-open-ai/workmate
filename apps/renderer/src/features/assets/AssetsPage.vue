@@ -13,17 +13,20 @@ import {
 } from '../../app/project-files';
 import type { Conversation } from '../../app/workspace';
 import AssetPreviewPane from './AssetPreviewPane.vue';
-import { listWorkspaceFiles, readArchivedAssetPreview, readWorkspacePreview } from '../../services/api.js';
+import { listWorkspaceFiles, readArchivedAssetPreview, readWorkspacePreview, startAssetSiteDeploy, stopAssetSiteDeploy, assetSiteDeployStatus, importDataFromAsset, importDataFromWorkspace } from '../../services/api.js';
 import { isDesktopShell } from '../../app/platform.js';
-import { copyableAssetUrl, copyableWorkspaceFileUrl, downloadAssetBestEffort, downloadWorkspaceFileBestEffort, openAssetBestEffort, openWorkspaceFileBestEffort, previewAssetUrl, previewWorkspaceFileUrl, revealAssetBestEffort, revealWorkspaceFileBestEffort } from '../../app/platform-actions.js';
+import { copyableAssetUrl, copyableWorkspaceFileUrl, downloadAssetBestEffort, downloadWorkspaceFileBestEffort, openAssetBestEffort, openExternalBestEffort, openWorkspaceFileBestEffort, previewAssetUrl, previewWorkspaceFileUrl, revealAssetBestEffort, revealWorkspaceFileBestEffort } from '../../app/platform-actions.js';
+import { useNotify } from '../../app/notify';
 
 const props = defineProps<{ conversations: Conversation[] }>();
 const emit = defineEmits<{
   openConversation: [id: string];
   openProject: [id: string];
+  openData: [];
 }>();
 
 const { t } = useI18n();
+const notify = useNotify();
 const { assets, loading, loadAssets, linkAssetsToProject, unlinkAssetsFromProject, deleteAssets } = useAssets();
 const { projects, load: loadProjects } = useProjects();
 
@@ -61,6 +64,97 @@ const previewHtmlUrl = ref('');
 const previewText = ref('');
 const previewImageUrl = ref('');
 const previewMeta = ref<string[]>([]);
+const deployBusy = ref(false);
+const stopDeployBusy = ref(false);
+const deployUrl = ref('');
+const deployActive = ref(false);
+const deployError = ref('');
+const importBusy = ref(false);
+
+const projectIsWebsite = computed(() =>
+  treeEntries.value.some((entry) => entry.type === 'file' && entry.relative === 'index.html'),
+);
+
+async function refreshSiteDeployStatus(opts?: { assetId?: string | null; projectId?: string | null }) {
+  const assetId = String(opts?.assetId ?? (mode.value === 'archive' ? selectedAsset.value?.id : '') ?? '').trim();
+  const projectId = String(opts?.projectId ?? (mode.value === 'projects' ? selectedProjectId.value : '') ?? '').trim();
+  const canAsset = Boolean(assetId && selectedAsset.value?.kind === 'bundle');
+  const canProject = Boolean(projectId && projectIsWebsite.value);
+  if (!canAsset && !canProject) {
+    deployUrl.value = '';
+    deployActive.value = false;
+    return;
+  }
+  try {
+    const servers = await assetSiteDeployStatus(canAsset ? { assetId } : { projectId });
+    const active = servers.find((item) => item.access === 'lan') || servers[0];
+    deployActive.value = Boolean(active);
+    deployUrl.value = active?.url || '';
+    deployError.value = '';
+  } catch {
+    deployActive.value = false;
+    deployUrl.value = '';
+  }
+}
+
+async function deploySelectedSite() {
+  if (deployBusy.value) return;
+  const isProject = mode.value === 'projects';
+  const asset = selectedAsset.value;
+  if (isProject) {
+    if (!selectedProjectId.value || !projectIsWebsite.value) return;
+  } else if (!asset || asset.kind !== 'bundle') {
+    return;
+  }
+  deployBusy.value = true;
+  deployError.value = '';
+  try {
+    const started = await startAssetSiteDeploy(
+      isProject
+        ? { projectId: selectedProjectId.value!, access: 'lan' }
+        : { assetId: asset!.id, access: 'lan' },
+    );
+    deployActive.value = true;
+    deployUrl.value = started.url || started.localUrl || '';
+    if (deployUrl.value) await openExternalBestEffort(deployUrl.value);
+  } catch (error) {
+    deployError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    deployBusy.value = false;
+    await refreshSiteDeployStatus(
+      isProject ? { projectId: selectedProjectId.value } : { assetId: asset?.id },
+    );
+  }
+}
+
+async function stopSelectedSiteDeploy() {
+  if (stopDeployBusy.value) return;
+  const isProject = mode.value === 'projects';
+  const asset = selectedAsset.value;
+  if (isProject) {
+    if (!selectedProjectId.value || !projectIsWebsite.value) return;
+  } else if (!asset || asset.kind !== 'bundle') {
+    return;
+  }
+  stopDeployBusy.value = true;
+  deployError.value = '';
+  try {
+    await stopAssetSiteDeploy(isProject ? { projectId: selectedProjectId.value! } : { assetId: asset!.id });
+    deployActive.value = false;
+    deployUrl.value = '';
+  } catch (error) {
+    deployError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    stopDeployBusy.value = false;
+    await refreshSiteDeployStatus(
+      isProject ? { projectId: selectedProjectId.value } : { assetId: asset?.id },
+    );
+  }
+}
+
+function openDeployUrl() {
+  if (deployUrl.value) void openExternalBestEffort(deployUrl.value);
+}
 
 const filteredProjects = computed(() => {
   const q = projectQuery.value.trim().toLowerCase();
@@ -292,17 +386,36 @@ watch(
 );
 watch(selectedProjectId, () => {
   selectedRelative.value = '';
+  deployError.value = '';
+  deployActive.value = false;
+  deployUrl.value = '';
   void loadProjectTree();
 });
 watch(selectedRelative, () => {
   if (mode.value === 'projects') void loadProjectPreview();
 });
+watch(treeEntries, () => {
+  if (mode.value === 'projects') void refreshSiteDeployStatus({ projectId: selectedProjectId.value });
+});
 watch(selectedAsset, () => {
-  if (mode.value === 'archive') void loadArchivePreview();
+  deployError.value = '';
+  if (mode.value === 'archive') {
+    void loadArchivePreview();
+    void refreshSiteDeployStatus({ assetId: selectedAsset.value?.id });
+  } else {
+    deployActive.value = false;
+    deployUrl.value = '';
+  }
 });
 watch(mode, (value) => {
-  if (value === 'projects') void loadProjectPreview();
-  else void loadArchivePreview();
+  deployError.value = '';
+  if (value === 'projects') {
+    void loadProjectPreview();
+    void refreshSiteDeployStatus({ projectId: selectedProjectId.value });
+  } else {
+    void loadArchivePreview();
+    void refreshSiteDeployStatus({ assetId: selectedAsset.value?.id });
+  }
 });
 
 function statusText(status: Project['status']) {
@@ -544,6 +657,59 @@ function typeLabel(asset: Asset) {
   if (asset.kind === 'bundle') return 'SITE';
   return asset.name.split('.').pop()?.toUpperCase() || 'FILE';
 }
+
+function isSpreadsheetAsset(asset: Asset | null | undefined) {
+  if (!asset || asset.kind === 'bundle') return false;
+  const ext = (asset.workspaceRelative || asset.name).split('.').pop()?.toLowerCase() || '';
+  return ext === 'xlsx' || ext === 'csv';
+}
+
+function isSpreadsheetPath(relative: string) {
+  const ext = relative.split('.').pop()?.toLowerCase() || '';
+  return ext === 'xlsx' || ext === 'csv';
+}
+
+const canImportToData = computed(() => {
+  if (mode.value === 'archive') return isSpreadsheetAsset(selectedAsset.value);
+  return Boolean(selectedProjectId.value && selectedRelative.value && isSpreadsheetPath(selectedRelative.value));
+});
+
+async function importCurrentToDataWorkbench() {
+  if (importBusy.value || !canImportToData.value) return;
+  importBusy.value = true;
+  try {
+    let source;
+    if (mode.value === 'archive' && selectedAsset.value) {
+      source = await importDataFromAsset(selectedAsset.value.id);
+    } else if (selectedProjectId.value && selectedRelative.value) {
+      source = await importDataFromWorkspace({ projectId: selectedProjectId.value, relative: selectedRelative.value });
+    } else {
+      throw new Error('未选择可导入的表格文件');
+    }
+    notify.pushRaw('success', '已导入数据工作台', `${source.name} · ${source.tableCount || 0} 张表`);
+    emit('openData');
+  } catch (error) {
+    notify.pushRaw('error', error instanceof Error ? error.message : String(error));
+  } finally {
+    importBusy.value = false;
+  }
+}
+
+async function importListedAssetToDataWorkbench(asset: Asset) {
+  if (importBusy.value || !isSpreadsheetAsset(asset)) return;
+  selectedAsset.value = asset;
+  importBusy.value = true;
+  try {
+    const source = await importDataFromAsset(asset.id);
+    notify.pushRaw('success', '已导入数据工作台', `${source.name} · ${source.tableCount || 0} 张表`);
+    emit('openData');
+  } catch (error) {
+    notify.pushRaw('error', error instanceof Error ? error.message : String(error));
+  } finally {
+    importBusy.value = false;
+  }
+}
+
 async function copyText(label: string, value: string) {
   try {
     await navigator.clipboard.writeText(value);
@@ -612,16 +778,21 @@ onBeforeUnmount(() => {
             <button
               v-for="project in filteredProjects"
               :key="project.id"
-              :class="['mb-1.5 w-full rounded-xl border px-3 py-3 text-left transition', selectedProjectId === project.id ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-transparent hover:bg-[var(--surface-muted)]']"
+              :class="['mb-2 w-full rounded-2xl border px-3.5 py-3.5 text-left transition', selectedProjectId === project.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] shadow-sm' : 'border-[var(--border)]/70 bg-[var(--background)]/40 hover:border-[var(--accent)]/35 hover:bg-[var(--surface-muted)]']"
               type="button"
               @click="selectedProjectId = project.id"
             >
-              <div class="flex items-center justify-between gap-2">
-                <strong class="truncate text-sm">{{ project.name }}</strong>
-                <span class="shrink-0 rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--muted)]">{{ t('assets.storageLocal') }}</span>
+              <div class="flex items-center gap-3">
+                <span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-sky-500/20 to-emerald-500/20 text-[11px] font-extrabold text-sky-700">{{ project.name.slice(0, 2).toUpperCase() }}</span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <strong class="truncate text-sm">{{ project.name }}</strong>
+                    <span class="shrink-0 rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--muted)]">{{ t('assets.storageLocal') }}</span>
+                  </div>
+                  <p class="mt-1 line-clamp-2 text-[11px] leading-4 text-[var(--muted)]">{{ project.goal }}</p>
+                  <p class="mt-2 text-[10px] text-[var(--muted)]">{{ statusText(project.status) }} · {{ formatDate(project.updatedAt) }}</p>
+                </div>
               </div>
-              <p class="mt-1 line-clamp-2 text-[11px] leading-4 text-[var(--muted)]">{{ project.goal }}</p>
-              <p class="mt-2 text-[10px] text-[var(--muted)]">{{ statusText(project.status) }} · {{ formatDate(project.updatedAt) }}</p>
             </button>
           </div>
         </div>
@@ -639,15 +810,29 @@ onBeforeUnmount(() => {
               v-for="entry in visibleTree"
               :key="entry.relative"
               type="button"
-              :style="{ paddingLeft: `${8 + fileDepth(entry) * 12}px` }"
+              :style="{ paddingLeft: `${10 + fileDepth(entry) * 14}px` }"
               :class="[
-                'flex w-full items-center gap-2 rounded-lg py-1.5 text-left text-[13px]',
-                entry.type === 'directory' ? 'text-[var(--muted)] hover:bg-[var(--surface-muted)]' : selectedRelative === entry.relative ? 'bg-[var(--accent-soft)] font-semibold text-[var(--accent)]' : 'hover:bg-[var(--surface-muted)]',
+                'mb-0.5 flex w-full items-center gap-2 rounded-xl py-2 pr-2 text-left text-[13px] transition',
+                entry.type === 'directory'
+                  ? 'text-[var(--muted)] hover:bg-[var(--surface-muted)]'
+                  : selectedRelative === entry.relative
+                    ? 'bg-[var(--accent-soft)] font-semibold text-[var(--accent)] ring-1 ring-[var(--accent)]/20'
+                    : 'hover:bg-[var(--surface-muted)]',
               ]"
               @click="selectTreeEntry(entry)"
             >
-              <span>{{ entry.type === 'directory' ? (collapsedDirectories.has(entry.relative) ? '›' : '⌄') : '▧' }}</span>
-              <span class="truncate">{{ fileName(entry) }}</span>
+              <span
+                :class="[
+                  'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[10px] font-bold',
+                  entry.type === 'directory'
+                    ? 'bg-[var(--surface-muted)] text-[var(--muted)]'
+                    : isSpreadsheetPath(entry.relative)
+                      ? 'bg-emerald-500/15 text-emerald-700'
+                      : 'bg-sky-500/10 text-sky-700',
+                ]"
+              >{{ entry.type === 'directory' ? (collapsedDirectories.has(entry.relative) ? '›' : '⌄') : (fileExt(entry.relative) || '·').slice(0, 3).toUpperCase() }}</span>
+              <span class="min-w-0 flex-1 truncate">{{ fileName(entry) }}</span>
+              <span v-if="entry.type === 'file' && isSpreadsheetPath(entry.relative)" class="shrink-0 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">表</span>
             </button>
           </div>
           <div v-if="selectedProject" class="border-t border-[var(--border)] p-3">
@@ -659,17 +844,28 @@ onBeforeUnmount(() => {
           :desktop-shell="isDesktopShell()"
           :title="previewTitle"
           :storage-label="t('assets.storageLocal')"
-          :meta-lines="previewMeta"
+          :meta-lines="deployError ? [...previewMeta, deployError] : previewMeta"
           :loading="previewLoading"
           :error="previewError"
           :kind="previewKind"
           :html-url="previewHtmlUrl"
           :text="previewText"
           :image-url="previewImageUrl"
+          :can-deploy="projectIsWebsite"
+          :deploying="deployBusy"
+          :stopping-deploy="stopDeployBusy"
+          :deployed="deployActive"
+          :deploy-url="deployUrl"
+          :can-import-data="canImportToData"
+          :importing-data="importBusy"
           @refresh="loadProjectPreview"
           @reveal="revealCurrent"
           @download="downloadCurrent"
           @open-browser="openInBrowser"
+          @deploy="deploySelectedSite"
+          @stop-deploy="stopSelectedSiteDeploy"
+          @open-deploy-url="openDeployUrl"
+          @import-data="importCurrentToDataWorkbench"
         />
       </div>
 
@@ -766,20 +962,32 @@ onBeforeUnmount(() => {
             <div
               v-for="asset in filteredAssets"
               :key="asset.id"
-              :class="['group mb-1 flex w-full items-center gap-2 rounded-xl px-2 py-2.5', selectedAsset?.id === asset.id ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/25' : 'hover:bg-[var(--surface-muted)]']"
+              :class="['group mb-2 flex w-full items-center gap-2 rounded-2xl border px-2.5 py-3 transition', selectedAsset?.id === asset.id ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] shadow-sm' : 'border-transparent hover:border-[var(--border)] hover:bg-[var(--surface-muted)]']"
             >
               <input class="mx-1" type="checkbox" :checked="checkedAssetIds.includes(asset.id)" @click="toggleCheck(asset.id, $event)" />
               <button class="flex min-w-0 flex-1 items-center gap-3 text-left" type="button" @click="selectedAsset = asset">
-                <span :class="['grid h-10 w-10 shrink-0 place-items-center rounded-xl text-[10px] font-extrabold', kindStyle(fileKind(asset)).badge]">{{ typeLabel(asset) }}</span>
+                <span :class="['grid h-11 w-11 shrink-0 place-items-center rounded-2xl text-[10px] font-extrabold shadow-sm ring-1 ring-black/5', kindStyle(fileKind(asset)).badge]">{{ typeLabel(asset) }}</span>
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate text-sm font-semibold">{{ asset.workspaceRelative || asset.name }} <em v-if="asset.kind === 'bundle'" class="not-italic text-[10px] text-[var(--accent)]">bundle</em></span>
-                  <span class="mt-0.5 block truncate text-xs text-[var(--muted)]">
+                  <span class="flex items-center gap-2">
+                    <span class="block truncate text-sm font-semibold">{{ asset.workspaceRelative || asset.name }}</span>
+                    <em v-if="asset.kind === 'bundle'" class="not-italic shrink-0 rounded-full bg-[var(--accent-soft)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--accent)]">SITE</em>
+                    <em v-else-if="isSpreadsheetAsset(asset)" class="not-italic shrink-0 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">表格</em>
+                  </span>
+                  <span class="mt-1 block truncate text-xs text-[var(--muted)]">
                     {{ formatDate(asset.createdAt) }} · {{ formatBytes(asset.sizeBytes) }}
                     · {{ asset.projectId ? projectName(asset.projectId) : t('assets.unlinkedBadge') }}
                   </span>
                 </span>
                 <span class="rounded-full bg-[var(--surface-muted)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--muted)]">{{ t('assets.storageLocalArchive') }}</span>
               </button>
+              <button
+                v-if="isSpreadsheetAsset(asset)"
+                class="shrink-0 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-700 opacity-0 hover:bg-emerald-500/15 group-hover:opacity-100 focus:opacity-100 disabled:opacity-40"
+                type="button"
+                :disabled="importBusy"
+                title="导入数据工作台"
+                @click.stop="importListedAssetToDataWorkbench(asset)"
+              >导入</button>
               <button
                 class="shrink-0 rounded-lg px-2 py-1 text-[10px] font-semibold text-rose-600 opacity-0 hover:bg-rose-500/10 group-hover:opacity-100 focus:opacity-100 disabled:opacity-40"
                 type="button"
@@ -797,7 +1005,7 @@ onBeforeUnmount(() => {
             :desktop-shell="isDesktopShell()"
             :title="previewTitle"
             :storage-label="t('assets.storageLocalArchive')"
-            :meta-lines="previewMeta"
+            :meta-lines="deployError ? [...previewMeta, deployError] : previewMeta"
             :loading="previewLoading"
             :error="previewError"
             :kind="previewKind"
@@ -806,11 +1014,22 @@ onBeforeUnmount(() => {
             :image-url="previewImageUrl"
             :can-delete="Boolean(selectedAsset)"
             :deleting="deleteBusy"
+            :can-deploy="selectedAsset?.kind === 'bundle'"
+            :deploying="deployBusy"
+            :stopping-deploy="stopDeployBusy"
+            :deployed="deployActive"
+            :deploy-url="deployUrl"
+            :can-import-data="canImportToData"
+            :importing-data="importBusy"
             @refresh="loadArchivePreview"
             @reveal="revealCurrent"
             @download="downloadCurrent"
             @open-browser="openInBrowser"
             @delete="deleteCurrentAsset"
+            @deploy="deploySelectedSite"
+            @stop-deploy="stopSelectedSiteDeploy"
+            @open-deploy-url="openDeployUrl"
+            @import-data="importCurrentToDataWorkbench"
           />
           <div v-if="selectedAsset" class="shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 text-sm shadow-sm">
             <p class="text-[10px] font-bold uppercase tracking-[.12em] text-[var(--muted)]">{{ t('assets.sectionInfo') }}</p>

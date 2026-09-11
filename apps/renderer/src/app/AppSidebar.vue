@@ -13,7 +13,7 @@ const emit = defineEmits<{ toggle: []; navigate: [view: View]; newChat: []; sele
 const { t } = useI18n();
 const { preference, cycleTheme } = useTheme();
 
-type NavItem = { id: View; labelKey: string; icon: 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'automations' | 'assets' | 'projects' | 'remote' };
+type NavItem = { id: View; labelKey: string; icon: 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'automations' | 'assets' | 'data' | 'projects' | 'remote' };
 
 const navItems: NavItem[] = [
   { id: 'chat', labelKey: 'nav.workspace', icon: 'chat' },
@@ -23,6 +23,7 @@ const navItems: NavItem[] = [
   { id: 'knowledge', labelKey: 'nav.knowledge', icon: 'knowledge' },
   { id: 'automations', labelKey: 'nav.automations', icon: 'automations' },
   { id: 'assets', labelKey: 'nav.assets', icon: 'assets' },
+  { id: 'data', labelKey: '数据工作台', icon: 'data' },
   { id: 'remote', labelKey: 'nav.remote', icon: 'remote' },
 ];
 const visibleNavItems = computed(() => navItems.filter((item) => isViewAvailable(item.id)));

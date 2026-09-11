@@ -112,6 +112,44 @@ function applyCheckFix(check: (typeof problems.value)[number]) {
       </header>
 
       <div class="min-h-0 flex-1 overflow-auto px-6 py-4">
+        <div
+          v-if="!checking && report?.pythonDecision"
+          class="mb-3 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/50 px-3 py-2.5 text-xs"
+        >
+          <p class="font-semibold">
+            Agent 脚本 Python：
+            <span class="text-[var(--accent)]">
+              {{
+                report.pythonDecision.source === 'system' ? '系统'
+                  : report.pythonDecision.source === 'bundled' ? '预装 Runtime'
+                    : report.pythonDecision.source === 'override' ? '覆盖'
+                      : '不可用'
+              }}
+            </span>
+            · {{ report.pythonDecision.command || '—' }} {{ report.pythonDecision.version || '' }}
+          </p>
+          <p class="mt-1 text-[var(--muted)]">{{ report.pythonDecision.reason }}</p>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              v-if="report.pythonDecision.source !== 'system'"
+              class="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-60"
+              type="button"
+              :disabled="Boolean(fixingId) || checking"
+              @click="applyFix('install-python', 'install-python')"
+            >
+              {{ fixingId === 'install-python' ? '安装中…' : '尝试安装 Python 3.12' }}
+            </button>
+            <button
+              v-if="(report.workspaceScrap?.totalBytes ?? 0) > 0"
+              class="rounded-md border border-[var(--border)] px-2.5 py-1 text-[11px] font-semibold disabled:opacity-60"
+              type="button"
+              :disabled="Boolean(fixingId) || checking"
+              @click="applyFix('clean-workspace-scrap', 'clean-workspace-scrap')"
+            >
+              {{ fixingId === 'clean-workspace-scrap' ? '清理中…' : `清理临时物（${report.workspaceScrap?.totalBytesLabel}）` }}
+            </button>
+          </div>
+        </div>
         <ul class="grid gap-2">
           <li v-for="row in rows" :key="row.id" class="flex items-start gap-3 rounded-xl border border-[var(--border)] p-3">
             <template v-if="row.state === 'checking'">

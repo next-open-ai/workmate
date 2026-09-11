@@ -2,6 +2,7 @@ import type { ChatRequest } from '@workmate/contracts';
 import { loadMcpToolset, type HostedMcpToolDescriptor } from '../mcp-runtime.js';
 import { extractToolDetails, type AgentTool } from '../pi-tools.js';
 import { executeAgentscopeCapabilityCalls } from '../agentscope-capability-adapter.js';
+import { createPreviewServerTools } from '../preview-server.js';
 import { resolveAgentWorkspaceRoot, resolveWorkspaceMode } from '../workspace-mode.js';
 
 export type HostToolCall = {
@@ -28,6 +29,16 @@ export type AgentscopeHostToolSession = {
   close: () => Promise<void>;
 };
 
+const PREVIEW_TOOL_NAMES = new Set([
+  'preview_server_start',
+  'preview_server_stop',
+  'preview_server_status',
+]);
+
+const CAPABILITY_TOOL_NAMES = new Set([
+  'read', 'write', 'edit', 'bash', 'commit_artifact', 'read_workspace_file', 'write_workspace_file',
+]);
+
 /**
  * Execute AgentScope external tools on the TypeScript host.
  */
@@ -36,8 +47,21 @@ export async function executeHostToolCalls(
   toolCalls: HostToolCall[],
   workspaceAccess: 'read' | 'write' | 'full' = 'write',
   projectWorkspacePath?: string,
+  conversationId?: string,
 ): Promise<HostToolResult[]> {
   const results: HostToolResult[] = [];
+  const workspaceRoot = resolveAgentWorkspaceRoot({ runId, projectWorkspacePath });
+  const projectBound = Boolean(String(projectWorkspacePath || '').trim());
+  const previewTools = new Map(
+    createPreviewServerTools({
+      workspaceRoot,
+      workspaceAccess,
+      projectId: projectBound ? projectWorkspacePath : undefined,
+      conversationId,
+      workspaceMode: projectBound ? 'project' : 'conversation',
+    }).map((tool) => [tool.name, tool]),
+  );
+
   for (const call of toolCalls) {
     const input = call.input && typeof call.input === 'object' ? call.input : {};
     try {
@@ -51,11 +75,26 @@ export async function executeHostToolCalls(
         });
         continue;
       }
-      if (['read', 'write', 'edit', 'bash', 'commit_artifact', 'read_workspace_file', 'write_workspace_file'].includes(call.name)) {
+      if (PREVIEW_TOOL_NAMES.has(call.name)) {
+        const tool = previewTools.get(call.name);
+        if (!tool) {
+          results.push({
+            id: call.id,
+            name: call.name,
+            state: 'error',
+            output: JSON.stringify({ ok: false, error: `Unknown preview tool: ${call.name}` }),
+            summary: 'unknown tool',
+          });
+          continue;
+        }
+        results.push(await executeTool(call, tool));
+        continue;
+      }
+      if (CAPABILITY_TOOL_NAMES.has(call.name)) {
         const workspaceMode = resolveWorkspaceMode(projectWorkspacePath);
         const capability = await executeAgentscopeCapabilityCalls({
           runId,
-          workspaceRoot: resolveAgentWorkspaceRoot({ runId, projectWorkspacePath }),
+          workspaceRoot,
           workspaceAccess,
           workspaceMode,
         }, [{ ...call, input }]);
@@ -106,7 +145,7 @@ async function executeTool(call: HostToolCall, tool: AgentTool): Promise<HostToo
 }
 
 export async function prepareAgentscopeHostTools(
-  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath'>,
+  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath' | 'conversationId'>,
 ): Promise<AgentscopeHostToolSession> {
   const mcp = await loadMcpToolset(request.mcpConnections, { toolTimeoutMs: request.mcpToolTimeoutMs });
   const mcpByName = new Map<string, AgentTool>(mcp.tools.map((tool) => [tool.name, tool]));
@@ -136,7 +175,15 @@ export async function prepareAgentscopeHostTools(
           });
         }
       }
-      if (baseCalls.length) results.push(...await executeHostToolCalls(runId, baseCalls, request.workspaceAccess, request.projectWorkspacePath));
+      if (baseCalls.length) {
+        results.push(...await executeHostToolCalls(
+          runId,
+          baseCalls,
+          request.workspaceAccess,
+          request.projectWorkspacePath,
+          request.conversationId,
+        ));
+      }
       return results;
     },
     close: mcp.close,

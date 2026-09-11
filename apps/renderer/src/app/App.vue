@@ -8,6 +8,7 @@ import SettingsPage from '../features/settings/SettingsPage.vue';
 import CapabilitiesPage from '../features/capabilities/CapabilitiesPage.vue';
 import KnowledgePage from '../features/knowledge/KnowledgePage.vue';
 import AssetsPage from '../features/assets/AssetsPage.vue';
+import DataWorkbenchPage from '../features/data/DataWorkbenchPage.vue';
 import AutomationsPage from '../features/automations/AutomationsPage.vue';
 import ProjectsPage from '../features/projects/ProjectsPage.vue';
 import RemoteOfficePage from '../features/remote/RemoteOfficePage.vue';
@@ -55,7 +56,7 @@ const {
   updateUser,
   deleteUser,
 } = useAuth();
-const { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load: loadWorkspace, setView, startChat, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride } = useWorkspace();
+const { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load: loadWorkspace, setView, startChat, startChatWithPrompt, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride, ensureActiveServerSession, pullActiveConversationFromServer, followMobileChatSession } = useWorkspace();
 const serviceReady = ref(false);
 const sidebarCollapsed = ref(false);
 const authBusy = ref(false);
@@ -297,8 +298,8 @@ async function handleLogout() {
   <div v-else-if="!authReady" class="grid h-screen place-items-center bg-[var(--background)] text-sm text-[var(--muted)]">正在恢复登录状态…</div>
   <div v-else class="flex h-screen min-h-[600px] overflow-hidden bg-[var(--background)] text-[var(--text)]">
     <AppSidebar :collapsed="sidebarCollapsed" :view="view" :conversations="conversations" :active-conversation-id="activeConversation?.id ?? null" :service-ready="serviceReady" :current-user="user" @toggle="toggleSidebar" @navigate="setView" @new-chat="startChat()" @select-conversation="selectConversation" @delete-conversation="deleteConversation" @logout="handleLogout" />
-    <main :class="['relative min-w-0 flex-1 bg-[var(--background)]', view === 'chat' || view === 'capabilities' || view === 'knowledge' || view === 'assets' || view === 'automations' || view === 'projects' ? 'overflow-hidden' : 'overflow-auto']">
-      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-settings="setView('settings')" />
+    <main :class="['relative min-w-0 flex-1 bg-[var(--background)]', view === 'chat' || view === 'capabilities' || view === 'knowledge' || view === 'assets' || view === 'data' || view === 'automations' || view === 'projects' ? 'overflow-hidden' : 'overflow-auto']">
+      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" :ensure-server-session="ensureActiveServerSession" :pull-from-server="pullActiveConversationFromServer" :follow-mobile-session="followMobileChatSession" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-data="setView('data')" @open-settings="setView('settings')" />
       <EmployeesPage
         v-else-if="view === 'employees'"
         :employees="employees"
@@ -312,7 +313,12 @@ async function handleLogout() {
       />
       <CapabilitiesPage v-else-if="view === 'capabilities'" />
       <KnowledgePage v-else-if="view === 'knowledge'" @open-settings="setView('settings')" />
-      <AssetsPage v-else-if="view === 'assets'" :conversations="conversations" @open-conversation="(id) => { selectConversation(id); setView('chat'); }" @open-project="openProjectFromAssets" />
+      <AssetsPage v-else-if="view === 'assets'" :conversations="conversations" @open-conversation="(id) => { selectConversation(id); setView('chat'); }" @open-project="openProjectFromAssets" @open-data="setView('data')" />
+      <DataWorkbenchPage
+        v-else-if="view === 'data'"
+        @start-chat="startChat"
+        @start-customize="(prompt) => { void startChatWithPrompt(prompt, modelConfig); }"
+      />
       <AutomationsPage
         v-else-if="view === 'automations'"
         :employees="employees"

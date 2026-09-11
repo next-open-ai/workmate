@@ -1,10 +1,17 @@
 import type { AgentTool } from '@mariozechner/pi-agent-core';
+import path from 'node:path';
 import {
   createCodingTools,
   createReadOnlyTools,
 } from '@mariozechner/pi-coding-agent';
 import { Type, defineAgentTool } from './pi-tools.js';
 import { WorkspaceCapabilityKernel, type CapabilityContext } from './capability-kernel.js';
+import {
+  ARTIFACT_SOURCE_MAX_CHUNK_CHARS,
+  appendArtifactSourceWrite,
+  finishArtifactSourceWrite,
+  startArtifactSourceWrite,
+} from './artifact-source-writer.js';
 
 /**
  * Pi adapter. Pi performs ordinary filesystem operations with its unmodified
@@ -27,5 +34,40 @@ export function createPiCapabilityTools(context: CapabilityContext): AgentTool<a
     execute: ({ path }) => kernel.commitArtifact(path),
   });
 
-  return [...nativeTools, ...(context.workspaceAccess === 'read' ? [] : [commitArtifact])];
+  const largeArtifactTools = context.workspaceAccess === 'read' ? [] : [
+    defineAgentTool({
+      name: 'start_artifact_source_write',
+      description: 'Start a host-managed large single-file artifact write. Use only when complete source is too large for native write. The destination must be under output/. Append ordered fragments, then finish for one atomic replacement.',
+      parameters: Type.Object({
+        path: Type.String({ minLength: 8, maxLength: 240 }),
+        totalParts: Type.Integer({ minimum: 1, maximum: 512 }),
+      }),
+      execute: ({ path: relative, totalParts }) => {
+        const safePath = kernel.assertWritePath(path.resolve(kernel.root, relative));
+        const session = startArtifactSourceWrite({ workspaceRoot: kernel.root, path: safePath, totalParts });
+        return { ok: true, writeId: session.id, path: session.relativePath, totalParts: session.totalParts, maxChunkChars: ARTIFACT_SOURCE_MAX_CHUNK_CHARS };
+      },
+    }),
+    defineAgentTool({
+      name: 'append_artifact_source_write',
+      description: `Append the next ordered fragment to a host-managed large artifact write. Each fragment must be at most ${ARTIFACT_SOURCE_MAX_CHUNK_CHARS} characters.`,
+      parameters: Type.Object({
+        writeId: Type.String({ minLength: 8, maxLength: 80 }),
+        seq: Type.Integer({ minimum: 1, maximum: 512 }),
+        content: Type.String({ minLength: 1, maxLength: ARTIFACT_SOURCE_MAX_CHUNK_CHARS }),
+      }),
+      execute: ({ writeId, seq, content }) => {
+        const session = appendArtifactSourceWrite({ writeId, seq, content });
+        return { ok: true, writeId, path: session.relativePath, receivedParts: session.parts.length, nextSeq: session.nextSeq, bytes: session.bytes };
+      },
+    }),
+    defineAgentTool({
+      name: 'finish_artifact_source_write',
+      description: 'Validate all large-artifact fragments and atomically replace the destination file. Call commit_artifact afterwards to archive the deliverable.',
+      parameters: Type.Object({ writeId: Type.String({ minLength: 8, maxLength: 80 }) }),
+      execute: async ({ writeId }) => ({ ok: true, ...(await finishArtifactSourceWrite(writeId)), readyForCommit: true }),
+    }),
+  ];
+
+  return [...nativeTools, ...largeArtifactTools, ...(context.workspaceAccess === 'read' ? [] : [commitArtifact])];
 }

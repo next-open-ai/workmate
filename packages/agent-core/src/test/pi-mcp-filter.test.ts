@@ -3,7 +3,11 @@ import { test } from 'node:test';
 import type { AgentSkillRuntime } from '@workmate/contracts';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { Type } from '../pi-tools.js';
-import { filterMcpToolsetForTask } from '../pi-runtime.js';
+import {
+  filterMcpConnectionsForTask,
+  filterMcpToolsetForTask,
+  isFinanceLikeMcpName,
+} from '../pi-runtime.js';
 
 function tool(name: string): AgentTool {
   return {
@@ -99,4 +103,65 @@ test('live market tasks keep akshare tools', () => {
 
   assert.ok(filtered.tools.some((item) => item.name.includes('akshare')));
   assert.ok(!filtered.tools.some((item) => item.name.includes('filesystem')));
+});
+
+test('stock_sdk trading-day tools are finance-like and filtered on compliance doc tasks', () => {
+  assert.equal(isFinanceLikeMcpName('mcp_stock_sdk_is_trading_day'), true);
+  assert.equal(isFinanceLikeMcpName('stock_sdk'), true);
+  assert.equal(isFinanceLikeMcpName('amap-maps'), false);
+
+  const filtered = filterMcpToolsetForTask({
+    tools: [
+      tool('mcp_stock_sdk_is_trading_day'),
+      tool('mcp_amap_maps_geocode'),
+    ],
+    toolDescriptors: [
+      { name: 'mcp_stock_sdk_is_trading_day', description: 'trading day', inputSchema: { type: 'object' } },
+      { name: 'mcp_amap_maps_geocode', description: 'map', inputSchema: { type: 'object' } },
+    ],
+    labels: ['stock_sdk', 'Amap Maps'],
+    instructions: 'Available MCP tools for this run: ...',
+    close: async () => undefined,
+  }, '梳理计生用品主流品类，建立分类体系与合规文案规范文档', [skill()], { projectBound: true });
+
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_amap_maps_geocode']);
+  assert.deepEqual(filtered.labels, ['Amap Maps']);
+});
+
+test('filterMcpConnectionsForTask drops stock_sdk on project-bound doc tasks', () => {
+  const kept = filterMcpConnectionsForTask(
+    [
+      { id: 'stock_sdk', name: 'Stock SDK', enabled: true },
+      { id: 'amap', name: 'Amap Maps', enabled: true },
+    ],
+    '输出分类清单与合规文案规范',
+    { projectBound: true },
+  );
+  assert.deepEqual(kept.map((item) => item.id), ['amap']);
+});
+
+test('data-app instant programming blocks MCP fetch even when name is localized', () => {
+  const filtered = filterMcpToolsetForTask({
+    tools: [
+      tool('mcp_fetch_fetch'),
+      tool('mcp_amap_maps_geocode'),
+    ],
+    toolDescriptors: [
+      { name: 'mcp_fetch_fetch', description: 'fetch url', inputSchema: { type: 'object' } },
+      { name: 'mcp_amap_maps_geocode', description: 'map', inputSchema: { type: 'object' } },
+    ],
+    labels: ['Fetch 网页抓取', 'Amap Maps'],
+    instructions: 'Available MCP tools for this run: ...',
+    close: async () => undefined,
+  }, '【数据工作台 · 即时编程】output/index.html 绑定 custom-site / data-apps/xxx', []);
+
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_amap_maps_geocode']);
+  const kept = filterMcpConnectionsForTask(
+    [
+      { id: 'mcp-baseline-fetch', name: 'Fetch 网页抓取', enabled: true },
+      { id: 'amap', name: 'Amap Maps', enabled: true },
+    ],
+    'instant program data-apps/ custom-site bind_data_app_custom_site',
+  );
+  assert.deepEqual(kept.map((item) => item.id), ['amap']);
 });

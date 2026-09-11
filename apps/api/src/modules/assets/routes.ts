@@ -4,7 +4,9 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { FastifyPluginAsync } from 'fastify';
+import { listPreviewServers, startPreviewServer, stopPreviewServer } from '@workmate/agent-core';
 import { requireAuth } from '../auth/service.js';
+import type { AuthPrincipal } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource } from '../auth/ownership.js';
 import { getOrchestrator } from '../orchestration/routes.js';
 
@@ -174,6 +176,47 @@ async function assetFile(assetId: string) {
     throw new Error('Asset file is unavailable.');
   }
   return { row, target, db };
+}
+
+/** Read an owned asset's bytes for data-workbench import and similar flows. */
+export async function readOwnedAssetBytes(assetId: string, auth: Pick<AuthPrincipal, 'userId' | 'orgId'>) {
+  const { row, target } = await assetFile(assetId);
+  if (!canReadOwnedResource(row, { ...auth, role: 'member' }, { allowLegacyUnowned: true })) throw new Error('Asset not found.');
+  return { row, content: fs.readFileSync(target) };
+}
+
+/**
+ * Store a user-selected data file directly in the asset library.  Unlike agent
+ * deliverables this has no run/output dependency: the file is the user's
+ * source of truth and is later referenced by the data workbench.
+ */
+export async function storeUploadedDataAsset(input: {
+  name: string;
+  content: Buffer;
+  mimeType?: string;
+  auth: Pick<AuthPrincipal, 'userId' | 'orgId'>;
+}) {
+  const name = path.basename(input.name || '数据文件').replace(/[\0/\\]/g, '_').slice(0, 180) || '数据文件';
+  const content = input.content;
+  if (!content.length) throw new Error('上传的文件为空。');
+  if (content.length > 8 * 1024 * 1024) throw new Error('首期仅支持 8 MB 以内的数据文件。');
+  const db = await database();
+  const id = randomUUID();
+  const runId = randomUUID();
+  const folder = path.join(dataDir(), 'assets', id);
+  fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const target = path.join(folder, name);
+  fs.writeFileSync(target, content, { mode: 0o600 });
+  const createdAt = Date.now();
+  const mimeType = input.mimeType || assetMimeType(name);
+  const sha256 = createHash('sha256').update(content).digest('hex');
+  const relativePath = path.relative(dataDir(), target).split(path.sep).join('/');
+  db.run(
+    'INSERT INTO assets (id, name, relative_path, mime_type, size_bytes, created_at, conversation_id, employee_id, run_id, sha256, project_id, workspace_relative, org_id, owner_user_id, user_id, access_scope, access_grants) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, name, relativePath, mimeType, content.length, createdAt, null, null, runId, sha256, null, name, input.auth.orgId, input.auth.userId, input.auth.userId, 'private', '[]'],
+  );
+  flushDatabase(db);
+  return { id, name, mimeType, sizeBytes: content.length, createdAt, sha256 };
 }
 
 async function archiveArtifact(value: { runId?: string; relativePath?: string; conversationId?: string; employeeId?: string; projectId?: string; orgId?: string; ownerUserId?: string; userId?: string; accessScope?: 'private' | 'org-shared' | 'delegated'; accessGrants?: AssetAccessGrant[] }) {
@@ -403,6 +446,54 @@ async function assetContent(assetId: string) {
   return { row, target };
 }
 
+/**
+ * Resolve the latest archived SITE bundle directory for a chat session.
+ * Preview maps this path directly — no workspace hydrate/copy.
+ */
+export async function resolveConversationSiteBundleRoot(conversationId: string): Promise<{
+  assetId: string;
+  root: string;
+  entryPath: string;
+} | null> {
+  const id = String(conversationId || '').trim();
+  if (!id) return null;
+  const db = await database();
+  const rows = assetRows(db.exec(
+    `${ASSET_SELECT} WHERE conversation_id = ? AND kind = 'bundle' ORDER BY created_at DESC LIMIT 12`,
+    [id],
+  ));
+  for (const row of rows) {
+    const filesRoot = path.resolve(dataDir(), 'assets', row.id, 'files');
+    if (!fs.existsSync(filesRoot) || !fs.statSync(filesRoot).isDirectory()) continue;
+    const entry = String(row.entryPath || 'index.html').replace(/\\/g, '/').replace(/^\/+/, '') || 'index.html';
+    const indexAt = path.resolve(filesRoot, entry);
+    if (!indexAt.startsWith(`${filesRoot}${path.sep}`) && indexAt !== filesRoot) continue;
+    if (!fs.existsSync(path.join(filesRoot, 'index.html')) && !fs.existsSync(indexAt)) continue;
+    return { assetId: row.id, root: filesRoot, entryPath: entry };
+  }
+  return null;
+}
+
+/** Resolve a specific SITE asset bundle on-disk files root. */
+export async function resolveAssetSiteBundleRoot(assetId: string): Promise<{
+  assetId: string;
+  root: string;
+  entryPath: string;
+  row: ReturnType<typeof mapAssetRow>;
+}> {
+  const { row } = await assetFile(assetId);
+  if (row.kind !== 'bundle') throw new Error('Asset is not a SITE website bundle.');
+  const filesRoot = path.resolve(dataDir(), 'assets', row.id, 'files');
+  if (!fs.existsSync(filesRoot) || !fs.statSync(filesRoot).isDirectory()) {
+    throw new Error('SITE bundle files are unavailable.');
+  }
+  const entry = String(row.entryPath || 'index.html').replace(/\\/g, '/').replace(/^\/+/, '') || 'index.html';
+  if (!fs.existsSync(path.join(filesRoot, 'index.html')) && !fs.existsSync(path.join(filesRoot, entry))) {
+    throw new Error('SITE bundle has no index.html to deploy.');
+  }
+  return { assetId: row.id, root: filesRoot, entryPath: entry, row };
+}
+
 export const assetRoutes: FastifyPluginAsync = async (app) => {
   app.get('/assets', async (request) => listAssets(requireAuth(request)));
 
@@ -552,5 +643,102 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
       if (!target.startsWith(`${root}${path.sep}`) || !fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error('Bundle file is unavailable.');
       reply.header('content-type', assetMimeType(relative)); return reply.send(fs.createReadStream(target));
     } catch (error) { return reply.code(404).send({ message: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  /** Start local / LAN deploy for a SITE asset bundle or project website root. */
+  app.post('/assets/site-deploy/start', async (request, reply) => {
+    const auth = requireAuth(request);
+    const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
+    try {
+      const assetId = String(body.assetId || '').trim();
+      const projectId = String(body.projectId || '').trim();
+      const access = body.access === 'local' ? 'local' : 'lan';
+      const portHint = typeof body.portHint === 'number' ? body.portHint : undefined;
+      if (assetId) {
+        const resolved = await resolveAssetSiteBundleRoot(assetId);
+        if (!canReadOwnedResource(resolved.row, auth)) throw new Error('Asset not found.');
+        return await startPreviewServer({
+          workspaceRoot: resolved.root,
+          root: '.',
+          access,
+          assetId: resolved.assetId,
+          source: 'asset-bundle',
+          portHint,
+        });
+      }
+      if (projectId) {
+        const orch = getOrchestrator();
+        const project = await orch.projects.getProject(projectId);
+        if (!canReadOwnedResource(project, auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
+        const workspacePath = String(project?.workspacePath || '').trim();
+        if (!workspacePath) throw new Error('Project has no workspace path.');
+        const root = path.resolve(workspacePath);
+        const indexAt = path.join(root, 'index.html');
+        if (!fs.existsSync(indexAt) || !fs.statSync(indexAt).isFile()) {
+          throw new Error('Project workspace has no index.html at root — not a deployable website.');
+        }
+        return await startPreviewServer({
+          workspaceRoot: root,
+          root: '.',
+          access,
+          projectId,
+          source: 'project',
+          portHint,
+        });
+      }
+      throw new Error('assetId or projectId is required.');
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  /** Stop deploy/preview servers for a SITE bundle / project (or by id/port). */
+  app.post('/assets/site-deploy/stop', async (request, reply) => {
+    const auth = requireAuth(request);
+    const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
+    try {
+      const assetId = typeof body.assetId === 'string' ? body.assetId.trim() : '';
+      const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : '';
+      if (assetId) {
+        const { row } = await assetFile(assetId);
+        if (!canReadOwnedResource(row, auth)) throw new Error('Asset not found.');
+        return await stopPreviewServer({ assetId });
+      }
+      if (projectId) {
+        const orch = getOrchestrator();
+        const project = await orch.projects.getProject(projectId);
+        if (!canReadOwnedResource(project, auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
+        return await stopPreviewServer({ projectId });
+      }
+      const id = typeof body.id === 'string' ? body.id.trim() : undefined;
+      const port = typeof body.port === 'number' ? body.port : undefined;
+      if (!id && port == null) throw new Error('assetId, projectId, id, or port is required.');
+      return await stopPreviewServer({ id, port });
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/assets/site-deploy/status', async (request, reply) => {
+    const auth = requireAuth(request);
+    const query = request.query && typeof request.query === 'object' ? (request.query as Record<string, unknown>) : {};
+    try {
+      const assetId = String(query.assetId || '').trim();
+      const projectId = String(query.projectId || '').trim();
+      if (assetId) {
+        const { row } = await assetFile(assetId);
+        if (!canReadOwnedResource(row, auth)) throw new Error('Asset not found.');
+        return { ok: true as const, servers: listPreviewServers({ assetId }) };
+      }
+      if (projectId) {
+        const orch = getOrchestrator();
+        const project = await orch.projects.getProject(projectId);
+        if (!canReadOwnedResource(project, auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
+        return { ok: true as const, servers: listPreviewServers({ projectId }) };
+      }
+      return { ok: true as const, servers: listPreviewServers() };
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
   });
 };

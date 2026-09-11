@@ -36,7 +36,7 @@ function normalizeTask(task: ProjectTaskInput): ProjectTaskInput {
           acceptance: typeof task.contract.acceptance === "string" ? task.contract.acceptance.trim() : undefined,
           maxSteps:
             typeof task.contract.maxSteps === "number" && task.contract.maxSteps > 0
-              ? Math.min(64, Math.max(4, Math.floor(task.contract.maxSteps)))
+              ? Math.min(64, Math.max(50, Math.floor(task.contract.maxSteps)))
               : undefined,
           timeoutMs:
             typeof task.contract.timeoutMs === "number" && task.contract.timeoutMs > 0

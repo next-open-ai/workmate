@@ -120,25 +120,16 @@ function rows(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
 }
 
-function taskNeedsExtendedBudget(task: ProjectTask) {
-  const text = `${task.title || ''}\n${task.objective || ''}\n${(task.contract?.outputs || []).join('\n')}`.toLowerCase();
-  return Boolean(task.contract?.outputs?.length)
-    || /素材|配图|资源|索引|整理|收集|research|调研|方案|线框|wireframe|html|markdown|readme|csv|报告|文档|设计|页面|原型|交付|简报|brief|验收|网站|落地页/.test(text);
-}
-
 /**
- * Resolve per-task tool-step budget.
- * Planned project tasks always get at least 50 steps — planner-set low caps
- * (e.g. maxSteps=6) have aborted runs after successful writes.
+ * Resolve per-task tool-step budget.  Fifty is the platform baseline for all
+ * project work; planners and users may request more, but never less.
  */
 function taskMaxSteps(task: ProjectTask, prefs: PrefsRow) {
-  const base = prefs.maxSteps && prefs.maxSteps >= 4 ? prefs.maxSteps : 50;
-  const extended = taskNeedsExtendedBudget(task);
-  const floor = 50;
+  const base = prefs.maxSteps && prefs.maxSteps >= 50 ? prefs.maxSteps : 50;
   if (task.contract?.maxSteps && task.contract.maxSteps > 0) {
-    return Math.min(64, Math.max(floor, Math.floor(task.contract.maxSteps)));
+    return Math.min(64, Math.max(50, Math.floor(task.contract.maxSteps)));
   }
-  return extended ? Math.max(base, 50) : Math.max(base, floor);
+  return Math.min(64, base);
 }
 
 /** Build the agent profile for an employee (KV catalog + preset fallback). */

@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import type { AgentSkillRuntime } from '@workmate/contracts';
 import { Type, StringEnum, defineAgentTool, type AgentTool } from './pi-tools.js';
 import { PDF_SKILL_ID } from './builtin-skill-packages.js';
+import { pythonArgv, resolveWorkmatePython } from './python-runtime.js';
 import { resolveAgentWorkspaceRoot } from './workspace-mode.js';
 import {
   MAX_FILE_BYTES,
@@ -322,6 +323,19 @@ function runProcess(command: string, args: string[], cwd: string, options: { env
   });
 }
 
+/** Run with the resolved script Python; deps must stay under workspace `.python-packages`. */
+function runPython(rest: string[], cwd: string, options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) {
+  const python = resolveWorkmatePython();
+  const { command, args } = pythonArgv(python, rest);
+  return runProcess(command, args, cwd, options);
+}
+
+function pythonCommandForExtension(extension: string): string {
+  if (extension === '.py') return resolveWorkmatePython();
+  if (extension === '.sh') return 'bash';
+  return process.execPath;
+}
+
 function pythonImportProbeModuleName(dependency: string) {
   return dependency
     .replace(/==.*$/, '')
@@ -396,12 +410,13 @@ export function createSkillExecutionTools(input: {
       if (!(await stat(script)).isFile()) throw new Error('Not a file');
     } catch (_) { return { ok: false, error: `Workspace script is unavailable: ${normalized}. Write it first with write_workspace_file.` }; }
     const extension = path.extname(script).toLowerCase();
-    const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
     const dependencyRoot = path.join(workspaceRoot, '.python-packages');
     await ensureWorkspaceScaffold(workspaceRoot, projectBound ? 'project' : 'conversation');
     const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
     const startedAtMs = Date.now();
-    const result = await runProcess(command, [script, ...args], workspaceRoot, { env: { ...process.env, PYTHONPATH: dependencyRoot } });
+    const result = extension === '.py'
+      ? await runPython([script, ...args], workspaceRoot, { env: { ...process.env, PYTHONPATH: dependencyRoot } })
+      : await runProcess(pythonCommandForExtension(extension), [script, ...args], workspaceRoot, { env: { ...process.env, PYTHONPATH: dependencyRoot } });
     const artifacts = await collectScriptDeliverables(workspaceRoot, before, startedAtMs).catch(() => []);
     return { ok: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, artifacts };
   };
@@ -709,7 +724,6 @@ export function createSkillExecutionTools(input: {
         }
         await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
         const extension = path.extname(script).toLowerCase();
-        const command = extension === '.py' ? 'python3' : extension === '.sh' ? 'bash' : process.execPath;
         const before = new Set(await listOutputDeliverables(workspaceRoot).catch(() => []));
         const startedAtMs = Date.now();
         // Dependencies installed by install_python_dependency are deliberately
@@ -718,9 +732,13 @@ export function createSkillExecutionTools(input: {
         // is invisible to the bundled renderer and agents fall back to copying
         // the renderer into the workspace.
         const dependencyRoot = path.join(workspaceRoot, '.python-packages');
-        const result = await runProcess(command, [script, ...(args ?? [])], workspaceRoot, {
-          env: { ...process.env, PYTHONPATH: dependencyRoot },
-        });
+        const result = extension === '.py'
+          ? await runPython([script, ...(args ?? [])], workspaceRoot, {
+            env: { ...process.env, PYTHONPATH: dependencyRoot },
+          })
+          : await runProcess(pythonCommandForExtension(extension), [script, ...(args ?? [])], workspaceRoot, {
+            env: { ...process.env, PYTHONPATH: dependencyRoot },
+          });
         const declared = result.stdout
           .split(/\r?\n/)
           .map((line) => line.trim())
@@ -824,7 +842,7 @@ export function createSkillExecutionTools(input: {
         await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
         const dependencyRoot = path.join(workspaceRoot, '.python-packages');
         const moduleName = pythonImportProbeModuleName(dependency);
-        const probe = await runProcess('python3', ['-c', `import importlib.util, sys; sys.exit(0 if importlib.util.find_spec(${JSON.stringify(moduleName)}) else 1)`], workspaceRoot, { timeoutMs: 10_000 }).catch(() => null);
+        const probe = await runPython(['-c', `import importlib.util, sys; sys.exit(0 if importlib.util.find_spec(${JSON.stringify(moduleName)}) else 1)`], workspaceRoot, { timeoutMs: 10_000 }).catch(() => null);
         if (probe?.exitCode === 0) {
           return {
             ok: true,
@@ -835,7 +853,7 @@ export function createSkillExecutionTools(input: {
             stderr: '',
           };
         }
-        const result = await runProcess('python3', ['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, dependency], workspaceRoot, { timeoutMs: 120_000 });
+        const result = await runPython(['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, dependency], workspaceRoot, { timeoutMs: 120_000 });
         return { ok: result.exitCode === 0, package: dependency, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
       },
     }),
@@ -872,6 +890,99 @@ export function createSkillExecutionTools(input: {
         }
         const content = truncate(await response.text(), MAX_NETWORK_BYTES);
         return { ok: true, url: target.toString(), contentType, content };
+      },
+    }),
+    defineAgentTool({
+      name: 'export_data_app_custom_site',
+      description: 'Export the currently published HTML of an existing Workmate data app into this run workspace before conversational optimization.',
+      parameters: Type.Object({
+        appId: Type.String({ minLength: 8, maxLength: 80 }),
+        token: Type.String({ minLength: 8, maxLength: 200 }),
+        path: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
+      }),
+      execute: async ({ appId, token, path: relative }) => {
+        if (!canWriteWorkspace) return writeDenied();
+        const targetRel = safeRelative(relative || 'output/index.html');
+        if (!/\.html?$/i.test(targetRel)) return { ok: false as const, error: 'Export target must be an HTML file.' };
+        const origin = (process.env.WORKMATE_API_ORIGIN?.trim() || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '4328'}`).replace(/\/$/, '');
+        try {
+          const response = await fetch(`${origin}/api/data-apps/${encodeURIComponent(appId)}/site?token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(30_000) });
+          if (!response.ok) return { ok: false as const, status: response.status, error: `Current site export failed with HTTP ${response.status}.` };
+          const html = await response.text();
+          if (Buffer.byteLength(html, 'utf8') > 2_500_000) return { ok: false as const, error: 'Current site exceeds the 2.5MB workspace limit.' };
+          const target = await workspacePath(targetRel);
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, html, 'utf8');
+          return { ok: true as const, appId, path: targetRel, bytes: Buffer.byteLength(html, 'utf8') };
+        } catch (error) {
+          return { ok: false as const, error: error instanceof Error ? error.message : 'Current site export failed.' };
+        }
+      },
+    }),
+    defineAgentTool({
+      name: 'bind_data_app_custom_site',
+      description:
+        'Bind a finished HTML file from this run workspace as the published custom site for a Workmate local data app. '
+        + 'Use after writing output/index.html. Reads the file on disk and uploads it — do NOT paste HTML into MCP fetch / PUT tool args.',
+      parameters: Type.Object({
+        appId: Type.String({ minLength: 8, maxLength: 80 }),
+        token: Type.String({ minLength: 8, maxLength: 200 }),
+        path: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
+        note: Type.Optional(Type.String({ maxLength: 200 })),
+      }),
+      execute: async ({ appId, token, path: relative, note }) => {
+        if (!canWriteWorkspace) return writeDenied();
+        const sourceRel = safeRelative(relative || 'output/index.html');
+        if (!/\.html?$/i.test(sourceRel)) {
+          return { ok: false as const, error: 'Only .html files can be bound as a data-app custom site.' };
+        }
+        let file: string;
+        try {
+          file = await workspacePath(sourceRel);
+          if (!(await stat(file)).isFile()) throw new Error('Not a file');
+        } catch {
+          return { ok: false as const, error: `Workspace HTML unavailable: ${sourceRel}. Write it first.` };
+        }
+        const html = await readFile(file, 'utf8');
+        if (html.trim().length < 32) {
+          return { ok: false as const, error: 'HTML file is empty or too short.' };
+        }
+        if (Buffer.byteLength(html, 'utf8') > 2_500_000) {
+          return { ok: false as const, error: 'HTML exceeds 2.5MB bind limit. Simplify the page.' };
+        }
+        const origin = (
+          process.env.WORKMATE_API_ORIGIN?.trim()
+          || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '4328'}`
+        ).replace(/\/$/, '');
+        const target = `${origin}/api/data-apps/${encodeURIComponent(appId)}/custom-site?token=${encodeURIComponent(token)}`;
+        try {
+          const response = await fetch(target, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ html, note: String(note || 'agent').slice(0, 200) }),
+            signal: AbortSignal.timeout(60_000),
+          });
+          const body = await response.json().catch(() => ({})) as { ok?: boolean; url?: string; message?: string };
+          if (!response.ok) {
+            return {
+              ok: false as const,
+              error: body.message || `Bind failed with HTTP ${response.status}`,
+              status: response.status,
+            };
+          }
+          return {
+            ok: true as const,
+            appId,
+            path: sourceRel,
+            bytes: Buffer.byteLength(html, 'utf8'),
+            url: body.url || `${origin}/api/data-apps/${encodeURIComponent(appId)}/site?token=${encodeURIComponent(token)}`,
+          };
+        } catch (error) {
+          return {
+            ok: false as const,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       },
     }),
   ];
@@ -921,14 +1032,14 @@ export function createSkillExecutionTools(input: {
         await writeFile(inputFile, JSON.stringify({ title: title.trim(), content: content.trim() }), { encoding: 'utf8', mode: 0o600 });
 
         const dependencyRoot = path.join(workspaceRoot, '.python-packages');
-        const runRenderer = () => runProcess('python3', [script, inputRel, outputRel], workspaceRoot, {
+        const runRenderer = () => runPython([script, inputRel, outputRel], workspaceRoot, {
           env: { ...process.env, PYTHONPATH: dependencyRoot },
         });
         let result = await runRenderer();
         let installedDependency = false;
         const diagnostics = () => `${result.stdout}\n${result.stderr}`;
         if (result.exitCode !== 0 && /no module named ['\"]reportlab['\"]/i.test(diagnostics())) {
-          const install = await runProcess('python3', ['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, 'reportlab'], workspaceRoot, { timeoutMs: 120_000 });
+          const install = await runPython(['-m', 'pip', 'install', '--disable-pip-version-check', '--target', dependencyRoot, 'reportlab'], workspaceRoot, { timeoutMs: 120_000 });
           if (install.exitCode !== 0) {
             return { ok: false, exitCode: install.exitCode, error: truncate(`${install.stderr}\n${install.stdout}`, 2_000), artifacts: [] };
           }

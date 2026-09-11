@@ -158,7 +158,7 @@ export function normalizeContract(
     typeof input.acceptance === 'string' ? input.acceptance.trim().slice(0, 2000) : undefined;
   const maxSteps =
     typeof input.maxSteps === 'number' && input.maxSteps > 0
-      ? Math.min(64, Math.max(4, Math.floor(input.maxSteps)))
+      ? Math.min(64, Math.max(50, Math.floor(input.maxSteps)))
       : undefined;
   const timeoutMs =
     typeof input.timeoutMs === 'number' && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : undefined;

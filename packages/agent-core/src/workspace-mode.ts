@@ -58,6 +58,7 @@ export function conversationModeContract() {
     '(create the directory if needed). Prefer output/<clear-name> over workspace-root files.',
     'Process files (generators/scripts/tmp) stay outside output/.',
     'Deliverables are archived to the session asset library via output/.',
+    'To preview or LAN-deploy an already-delivered website, call preview_server_start (access=local or access=lan). Do not rebuild for preview-only requests.',
   ].join('\n');
 }
 
@@ -69,6 +70,7 @@ export function projectModeContract() {
     'Do not wrap the product in an output/ directory.',
     'Keep temporary process files out of the final project tree when possible (prefer scripts/ or hidden dirs).',
     'Deliverables appear in the project file tree, not as conversation-only assets.',
+    'To preview or LAN-deploy the site, call preview_server_start with access=local or access=lan (maps this project workspace root as the web root).',
   ].join('\n');
 }
 
