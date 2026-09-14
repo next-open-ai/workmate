@@ -17,3 +17,12 @@ test('DSH adapter commits completed output only after a successful run boundary'
   assert.equal(await readFile(path.join(root, 'output', 'site.html'), 'utf8'), '<main>dsh</main>');
   assert.match(adapter.systemPromptContract(), /atomically committed/i);
 });
+
+test('DSH project mode requires the real project root and never conversation output', () => {
+  const adapter = new DshCapabilityAdapter({
+    runId: 'dsh-project', workspaceRoot: '/tmp/workmate-dsh-project', workspaceAccess: 'write', workspaceMode: 'project',
+  });
+  assert.match(adapter.systemPromptContract(), /PROJECT MODE/);
+  assert.match(adapter.systemPromptContract(), /Never create or use output\//);
+  assert.doesNotMatch(adapter.systemPromptContract(), /conversation deliverable/);
+});

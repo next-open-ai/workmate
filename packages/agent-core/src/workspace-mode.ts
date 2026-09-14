@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readdir, stat } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 
 /**
  * Dual workspace modes for every execution backend (pi / dsh / …):
@@ -76,6 +76,64 @@ export function projectModeContract() {
 
 export function workspaceModeContract(mode: WorkspaceMode) {
   return mode === 'project' ? projectModeContract() : conversationModeContract();
+}
+
+export type ProjectOutputReconciliation = {
+  moved: Array<{ from: string; to: string }>;
+  conflicts: Array<{ from: string; to: string }>;
+};
+
+/**
+ * Safety net for engines whose native filesystem tools ignored project mode and
+ * created an `output/` wrapper. Files are moved (not copied) into the project
+ * tree. Existing destinations are never overwritten; conflicting sources stay
+ * under output/ for explicit user resolution.
+ */
+export async function reconcileProjectOutputDirectory(projectRoot: string): Promise<ProjectOutputReconciliation> {
+  const root = path.resolve(projectRoot);
+  const outputRoot = path.join(root, 'output');
+  const result: ProjectOutputReconciliation = { moved: [], conflicts: [] };
+
+  const moveFile = async (source: string, relativeFromOutput: string) => {
+    const normalized = relativeFromOutput.split(path.sep).join('/');
+    if (!normalized || normalized.split('/').some((part) => !part || part === '.' || part === '..')) return;
+    const destination = path.resolve(root, normalized);
+    if (destination === root || !destination.startsWith(`${root}${path.sep}`)) return;
+    try {
+      const existing = await stat(destination).catch(() => null);
+      if (existing) {
+        result.conflicts.push({ from: `output/${normalized}`, to: normalized });
+        return;
+      }
+      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      try {
+        await rename(source, destination);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+        await copyFile(source, destination);
+        await unlink(source);
+      }
+      result.moved.push({ from: `output/${normalized}`, to: normalized });
+    } catch {
+      result.conflicts.push({ from: `output/${normalized}`, to: normalized });
+    }
+  };
+
+  const walk = async (directory: string, relative = '', depth = 0): Promise<void> => {
+    if (depth > 12 || result.moved.length + result.conflicts.length >= 2_000) return;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || INTERNAL_SNAPSHOT_SKIP.has(entry.name)) continue;
+      const childRelative = relative ? path.join(relative, entry.name) : entry.name;
+      const source = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(source, childRelative, depth + 1);
+      else if (entry.isFile()) await moveFile(source, childRelative);
+    }
+  };
+
+  await walk(outputRoot);
+  if (!result.conflicts.length) await rm(outputRoot, { recursive: true, force: true }).catch(() => undefined);
+  return result;
 }
 
 /** Fingerprint project/conversation tree for end-of-run publish detection. */

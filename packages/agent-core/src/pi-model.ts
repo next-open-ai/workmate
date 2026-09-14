@@ -20,6 +20,8 @@ function defaultBaseUrl(provider: ModelConfig['provider']) {
       return 'https://api.openai.com/v1';
     case 'deepseek':
       return 'https://api.deepseek.com';
+    case 'glm':
+      return 'https://open.bigmodel.cn/api/paas/v4';
     case 'qwen':
       return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
     case 'ollama':

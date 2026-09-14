@@ -40,6 +40,18 @@ test('commitArtifact refuses process files and paths outside the workspace', asy
   assert.equal(outside.ok, false);
 });
 
+test('Pi shared capability kernel commits project files without an output wrapper', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'workmate-capability-project-'));
+  await writeFile(path.join(root, 'index.html'), '<main>pi project</main>');
+  const kernel = new WorkspaceCapabilityKernel({
+    runId: 'pi-project', workspaceRoot: root, workspaceAccess: 'write', workspaceMode: 'project',
+  });
+  const committed = await kernel.commitArtifact('index.html');
+  assert.equal(committed.ok, true);
+  assert.equal(committed.path, 'index.html');
+  assert.equal(await readFile(path.join(root, 'index.html'), 'utf8'), '<main>pi project</main>');
+});
+
 test('kernel blocks destructive and network shell commands before Pi executes them', () => {
   const context = {
     runId: 'test-run', workspaceRoot: process.cwd(), workspaceAccess: 'write' as const, workspaceMode: 'conversation' as const,

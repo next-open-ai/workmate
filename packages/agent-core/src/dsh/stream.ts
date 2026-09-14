@@ -12,6 +12,7 @@ import { openDshMcpBridges } from '../mcp-dsh-bridge.js';
 import { DshCapabilityAdapter } from '../dsh-capability-adapter.js';
 import {
   resolveWorkspaceMode,
+  reconcileProjectOutputDirectory,
   snapshotWorkspaceFiles,
   workspaceModeContract,
 } from '../workspace-mode.js';
@@ -167,6 +168,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
 
     const publishProjectDiff = async function* (): AsyncGenerator<AgentEvent> {
       if (!projectFilesBefore) return;
+      await reconcileProjectOutputDirectory(cwd);
       const after = await snapshotWorkspaceFiles(cwd);
       for (const [relative, fingerprint] of after) {
         if (projectFilesBefore.get(relative) === fingerprint) continue;

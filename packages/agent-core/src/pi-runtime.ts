@@ -15,6 +15,7 @@ import {
   resolveAgentWorkspaceRoot,
   resolveWorkspaceMode,
   snapshotWorkspaceFiles,
+  reconcileProjectOutputDirectory,
   workspaceModeContract,
 } from './workspace-mode.js';
 import { createWebSearchTools } from './search-runtime.js';
@@ -740,6 +741,7 @@ export async function* streamAgentReply(input: {
 
     const publishProjectDiff = async () => {
       if (!projectBound || !projectFilesBefore) return;
+      await reconcileProjectOutputDirectory(projectRoot);
       const after = await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>());
       for (const [relative, fingerprint] of after) {
         if (projectFilesBefore.get(relative) === fingerprint) continue;

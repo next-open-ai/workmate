@@ -37,14 +37,21 @@ export function createPiCapabilityTools(context: CapabilityContext): AgentTool<a
   const largeArtifactTools = context.workspaceAccess === 'read' ? [] : [
     defineAgentTool({
       name: 'start_artifact_source_write',
-      description: 'Start a host-managed large single-file artifact write. Use only when complete source is too large for native write. The destination must be under output/. Append ordered fragments, then finish for one atomic replacement.',
+      description: context.workspaceMode === 'project'
+        ? 'Start a host-managed large single-file write in the project root. Use only when complete source is too large for native write. Use index.html or another real project path; never prefix it with output/. Append ordered fragments, then finish for one atomic replacement.'
+        : 'Start a host-managed large single-file artifact write. Use only when complete source is too large for native write. The destination must be under output/. Append ordered fragments, then finish for one atomic replacement.',
       parameters: Type.Object({
         path: Type.String({ minLength: 8, maxLength: 240 }),
         totalParts: Type.Integer({ minimum: 1, maximum: 512 }),
       }),
       execute: ({ path: relative, totalParts }) => {
         const safePath = kernel.assertWritePath(path.resolve(kernel.root, relative));
-        const session = startArtifactSourceWrite({ workspaceRoot: kernel.root, path: safePath, totalParts });
+        const session = startArtifactSourceWrite({
+          workspaceRoot: kernel.root,
+          path: safePath,
+          totalParts,
+          requireOutput: context.workspaceMode !== 'project',
+        });
         return { ok: true, writeId: session.id, path: session.relativePath, totalParts: session.totalParts, maxChunkChars: ARTIFACT_SOURCE_MAX_CHUNK_CHARS };
       },
     }),

@@ -160,15 +160,20 @@ function urlsForAccess(access: PreviewAccess, port: number, lanIps: string[]): {
 export async function findFreePort(hint = DEFAULT_PORT_HINT, max = MAX_PORT, bindHost = LOOPBACK_HOST): Promise<number> {
   const start = Math.min(max, Math.max(1, Math.round(Number(hint) || DEFAULT_PORT_HINT)));
   const livePorts = new Set([...live.values()].filter((row) => row.server.listening).map((row) => row.port));
+  const probe = (port: number, host: string) => new Promise<boolean>((resolve) => {
+    const server = createNetServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, host, () => {
+      server.close(() => resolve(true));
+    });
+  });
   for (let port = start; port <= max; port += 1) {
     if (livePorts.has(port)) continue;
-    const free = await new Promise<boolean>((resolve) => {
-      const server = createNetServer();
-      server.once('error', () => resolve(false));
-      server.listen(port, bindHost, () => {
-        server.close(() => resolve(true));
-      });
-    });
+    // On macOS a loopback-only listener can be missed by an all-interface
+    // probe. A LAN preview must own both the advertised local URL and the LAN
+    // socket, otherwise 127.0.0.1 may display an unrelated existing site.
+    const loopbackFree = bindHost === LAN_BIND_HOST ? await probe(port, LOOPBACK_HOST) : true;
+    const free = loopbackFree && await probe(port, bindHost);
     if (free) return port;
   }
   throw new Error(`No free preview port between ${start} and ${max}.`);

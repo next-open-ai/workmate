@@ -2,6 +2,7 @@
 
 > 与实现同源维护。**当前权威架构**见 [architecture.md](architecture.md)；
 > 通道网关各里程碑记录实现、验收与真机步骤。
+> 工程协作红线（人与 AI）：[../engineering/](../engineering/) · 仓库根 [AGENTS.md](../../AGENTS.md)。
 
 运行形态与当前退化说明见 [../runtime-modes.md](../runtime-modes.md)。
 

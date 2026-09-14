@@ -1015,6 +1015,25 @@ export async function writeWorkspaceFile(root: string, relative: string, content
   return { relative: String(body.relative || relative), content: String(body.content || '') };
 }
 
+export async function readWorkspaceInfo(root: string) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/workspace/info?${new URLSearchParams({ root })}`);
+  const body = await response.json().catch(() => ({})) as {
+    version?: number;
+    kind?: 'static-site' | 'files';
+    entrypoint?: string | null;
+    updatedAt?: number;
+    message?: string;
+  };
+  if (!response.ok) throw new Error(body.message || `Workspace info failed: ${response.status}`);
+  return {
+    version: Number(body.version || 1),
+    kind: body.kind === 'static-site' ? 'static-site' as const : 'files' as const,
+    entrypoint: body.entrypoint ? String(body.entrypoint) : null,
+    updatedAt: Number(body.updatedAt || 0),
+  };
+}
+
 export async function syncWorkspaceRun(root: string, runId: string) {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
   const response = await fetch(`${apiBase}/api/workspace/sync-run`, {
@@ -1028,6 +1047,34 @@ export async function syncWorkspaceRun(root: string, runId: string) {
     relative: String(item.relative || ''),
     type: item.type === 'directory' ? 'directory' : 'file',
   }));
+}
+
+export async function normalizeWorkspaceLayout(root: string) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/workspace/normalize-layout`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ root }),
+  });
+  const body = await response.json().catch(() => ({})) as {
+    ok?: boolean;
+    moved?: Array<{ from?: string; to?: string }>;
+    conflicts?: Array<{ from?: string; to?: string }>;
+    entrypoint?: string | null;
+    files?: Array<{ relative?: string; type?: 'directory' | 'file' }>;
+    message?: string;
+  };
+  if (!response.ok) throw new Error(body.message || `Workspace normalization failed: ${response.status}`);
+  return {
+    ok: Boolean(body.ok),
+    moved: (body.moved ?? []).map((item) => ({ from: String(item.from || ''), to: String(item.to || '') })),
+    conflicts: (body.conflicts ?? []).map((item) => ({ from: String(item.from || ''), to: String(item.to || '') })),
+    entrypoint: body.entrypoint ? String(body.entrypoint) : null,
+    files: (body.files ?? []).map((item) => ({
+      relative: String(item.relative || ''),
+      type: item.type === 'directory' ? 'directory' as const : 'file' as const,
+    })),
+  };
 }
 
 export async function materializeWorkspaceAssets(root: string, items: Array<{ assetId?: string; relativePath?: string; name?: string }>) {

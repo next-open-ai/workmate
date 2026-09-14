@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   conversationModeContract,
   projectModeContract,
+  reconcileProjectOutputDirectory,
   resolveAgentWorkspaceRoot,
   resolveWorkspaceMode,
   snapshotWorkspaceFiles,
@@ -61,6 +62,37 @@ test('snapshotWorkspaceFiles skips internal dirs', async () => {
     assert.equal(snap.has('index.html'), true);
     assert.equal(snap.has('node_modules/x.js'), false);
     assert.equal(snap.has('.python-packages/y.py'), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project output reconciliation moves files to root and removes the wrapper', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workmate-project-output-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'output', 'assets', 'css'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'output', 'index.html'), '<html></html>');
+    fs.writeFileSync(path.join(dir, 'output', 'assets', 'css', 'site.css'), 'body{}');
+    const result = await reconcileProjectOutputDirectory(dir);
+    assert.deepEqual(result.conflicts, []);
+    assert.equal(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), '<html></html>');
+    assert.equal(fs.readFileSync(path.join(dir, 'assets', 'css', 'site.css'), 'utf8'), 'body{}');
+    assert.equal(fs.existsSync(path.join(dir, 'output')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project output reconciliation never overwrites root conflicts', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workmate-project-conflict-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.html'), 'root');
+    fs.writeFileSync(path.join(dir, 'output', 'index.html'), 'output');
+    const result = await reconcileProjectOutputDirectory(dir);
+    assert.deepEqual(result.conflicts, [{ from: 'output/index.html', to: 'index.html' }]);
+    assert.equal(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), 'root');
+    assert.equal(fs.readFileSync(path.join(dir, 'output', 'index.html'), 'utf8'), 'output');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

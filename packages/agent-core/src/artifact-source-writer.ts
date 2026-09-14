@@ -20,11 +20,14 @@ type Session = {
 
 const sessions = new Map<string, Session>();
 
-function safeOutputPath(value: string) {
+function safeArtifactPath(value: string, requireOutput: boolean) {
   const relative = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
   const parts = relative.split('/');
-  if (!relative.startsWith('output/') || parts.some((part) => !part || part === '.' || part === '..')) {
-    throw new Error('Large artifact writes are restricted to a safe file under output/.');
+  if (!relative || parts.some((part) => !part || part === '.' || part === '..')) {
+    throw new Error('Large artifact writes require a safe path inside the workspace.');
+  }
+  if (requireOutput && !relative.startsWith('output/')) {
+    throw new Error('Conversation artifact writes are restricted to a safe file under output/.');
   }
   return relative;
 }
@@ -35,13 +38,13 @@ function purgeExpired(now = Date.now()) {
   }
 }
 
-export function startArtifactSourceWrite(input: { workspaceRoot: string; path: string; totalParts: number }) {
+export function startArtifactSourceWrite(input: { workspaceRoot: string; path: string; totalParts: number; requireOutput?: boolean }) {
   purgeExpired();
   if (!Number.isInteger(input.totalParts) || input.totalParts < 1 || input.totalParts > 512) {
     throw new Error('totalParts must be an integer between 1 and 512.');
   }
   const session: Session = {
-    id: randomUUID(), root: path.resolve(input.workspaceRoot), relativePath: safeOutputPath(input.path),
+    id: randomUUID(), root: path.resolve(input.workspaceRoot), relativePath: safeArtifactPath(input.path, input.requireOutput !== false),
     totalParts: input.totalParts, nextSeq: 1, bytes: 0, parts: [], createdAt: Date.now(),
   };
   sessions.set(session.id, session);

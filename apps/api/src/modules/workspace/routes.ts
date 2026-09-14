@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
 import { unzipSync, zipSync } from 'fflate';
+import { reconcileProjectOutputDirectory } from '@workmate/agent-core';
 
 function dataDir(): string {
   return process.env.WORKMATE_DATA_DIR || path.join(os.homedir(), '.workmate');
@@ -12,6 +13,33 @@ function projectRoot(folder: string) {
   const root = path.resolve(String(folder || ''));
   if (!root || root === path.parse(root).root) throw new Error('Invalid project workspace.');
   return root;
+}
+
+type WorkspaceMetadata = { version: 1; kind: 'static-site' | 'files'; entrypoint: string | null; updatedAt: number };
+
+function workspaceMetadataPath(root: string) {
+  return path.join(projectRoot(root), '.workmate', 'project.json');
+}
+
+function refreshWorkspaceMetadata(root: string): WorkspaceMetadata {
+  const base = projectRoot(root);
+  const candidates = ['index.html', 'dist/index.html', 'public/index.html', 'output/index.html'];
+  const entrypoint = candidates.find((relative) => {
+    const candidate = path.join(base, ...relative.split('/'));
+    return fs.existsSync(candidate) && fs.statSync(candidate).isFile();
+  }) || null;
+  const metadata: WorkspaceMetadata = {
+    version: 1,
+    kind: entrypoint ? 'static-site' : 'files',
+    entrypoint,
+    updatedAt: Date.now(),
+  };
+  const target = workspaceMetadataPath(base);
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temporary = `${target}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(metadata, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temporary, target);
+  return metadata;
 }
 
 function managedProjectsRoot() {
@@ -50,6 +78,7 @@ function listProjectFiles(root: string, directory = projectRoot(root), relative 
       || entry.name === '.agents'
       || entry.name === '.dsh-sessions'
       || entry.name === '.workmate-dsh.cordis.yml'
+      || entry.name === '.workmate'
       || entry.name === 'node_modules'
       || entry.name === '.python-packages'
     ) continue;
@@ -82,6 +111,7 @@ function writeProjectFile(root: string, relative: string, content: string) {
   const file = projectPath(root, relative);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, String(content), { mode: 0o600 });
+  refreshWorkspaceMetadata(root);
   return { relative, content: String(content) };
 }
 
@@ -129,18 +159,38 @@ function syncRunWorkspaceToProject(root: string, runId: string) {
   for (const id of resolveWorkspaceRunIds(runId)) {
     const source = path.join(dataDir(), 'workspaces', String(id));
     if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) continue;
-    fs.cpSync(source, target, {
-      recursive: true,
-      filter: (from) => isDeliverablePath(from),
-    });
+    const copyTree = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const from = path.join(directory, entry.name);
+        if (!isDeliverablePath(from)) continue;
+        if (entry.isDirectory()) {
+          copyTree(from);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const sourceRelative = path.relative(source, from).split(path.sep).join('/');
+        // output/ is the conversation/run delivery boundary, never a project
+        // directory. Preserve all nested structure below that boundary.
+        const projectRelative = sourceRelative.startsWith('output/')
+          ? sourceRelative.slice('output/'.length)
+          : sourceRelative;
+        if (!projectRelative) continue;
+        const destination = projectPath(target, projectRelative);
+        fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+        fs.copyFileSync(from, destination);
+      }
+    };
+    copyTree(source);
   }
+  refreshWorkspaceMetadata(target);
   return listProjectFiles(target);
 }
 
 function materializeProjectAssets(root: string, items: Array<{ assetId?: string; relativePath?: string; name?: string }>) {
   const targetRoot = projectRoot(root);
   for (const item of Array.isArray(items) ? items : []) {
-    const relative = String(item?.relativePath || item?.name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const rawRelative = String(item?.relativePath || item?.name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    const relative = rawRelative.startsWith('output/') ? rawRelative.slice('output/'.length) : rawRelative;
     if (!relative || relative.split('/').some((part) => !part || part === '.' || part === '..')) continue;
     const assetId = String(item?.assetId || '').trim();
     const assetFolder = assetId ? path.join(dataDir(), 'assets', assetId) : '';
@@ -154,6 +204,7 @@ function materializeProjectAssets(root: string, items: Array<{ assetId?: string;
     fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
     fs.copyFileSync(source, dest, 0);
   }
+  refreshWorkspaceMetadata(targetRoot);
   return listProjectFiles(root);
 }
 
@@ -221,6 +272,7 @@ function importWorkspaceZip(root: string, filename: string, base64: string) {
     fs.writeFileSync(dest, Buffer.from(bytes), { mode: 0o600 });
     importedFiles += 1;
   }
+  refreshWorkspaceMetadata(targetRoot);
   return { ok: true as const, source: filename, importedFiles, files: listProjectFiles(targetRoot) };
 }
 
@@ -259,6 +311,15 @@ export const workspaceRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.get('/workspace/info', async (request, reply) => {
+    const query = request.query && typeof request.query === 'object' ? (request.query as Record<string, unknown>) : {};
+    try {
+      return refreshWorkspaceMetadata(String(query.root || ''));
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get('/workspace/file', async (request, reply) => {
     const query = request.query && typeof request.query === 'object' ? (request.query as Record<string, unknown>) : {};
     try {
@@ -281,6 +342,25 @@ export const workspaceRoutes: FastifyPluginAsync = async (app) => {
     const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
     try {
       return syncRunWorkspaceToProject(String(body.root || ''), String(body.runId || ''));
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/workspace/normalize-layout', async (request, reply) => {
+    const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
+    try {
+      const root = projectRoot(String(body.root || ''));
+      const result = await reconcileProjectOutputDirectory(root);
+      const files = listProjectFiles(root);
+      const fileNames = new Set(files.filter((item) => item.type === 'file').map((item) => item.relative));
+      const entrypoint = fileNames.has('index.html')
+        ? 'index.html'
+        : fileNames.has('output/index.html')
+          ? 'output/index.html'
+          : null;
+      const metadata = refreshWorkspaceMetadata(root);
+      return { ok: result.conflicts.length === 0, ...result, entrypoint: metadata.entrypoint || entrypoint, metadata, files };
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
     }

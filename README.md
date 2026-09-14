@@ -10,6 +10,8 @@
 
 Workmate 是一套桌面级 Agent 工作台：其中的“数字员工”可以对话、运行**项目编排**、使用 **Skills**、检索**知识库 / MCP 连接 / 联网搜索**、管理**资产与自动化**，并且能通过**本地通道网关**被外部 IM（Telegram / 飞书）乃至**远程中继终端**调度。与常见“聊天壳 + 状态都在前端”的 Agent 应用不同，Workmate 把重编排放进**服务端状态机**：桌面 UI、网关进程与未来的远程终端共享同一份会话、审批、运行、资产与项目状态。
 
+协作约定（人与 AI）：根目录 [AGENTS.md](./AGENTS.md) · [docs/engineering/](./docs/engineering/)
+
 仓库刻意保持 Electron 壳“薄”：
 
 ```text

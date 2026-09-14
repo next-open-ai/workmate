@@ -31,3 +31,16 @@ test('large artifact writer rejects out-of-order pieces without writing a partia
     /expected seq=1/,
   );
 });
+
+test('large artifact writer supports project-root paths when explicitly enabled', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'workmate-artifact-project-'));
+  try {
+    const session = startArtifactSourceWrite({ workspaceRoot: root, path: 'index.html', totalParts: 1, requireOutput: false });
+    appendArtifactSourceWrite({ writeId: session.id, seq: 1, content: '<main>project</main>' });
+    const completed = await finishArtifactSourceWrite(session.id);
+    assert.equal(completed.path, 'index.html');
+    assert.equal(await readFile(path.join(root, 'index.html'), 'utf8'), '<main>project</main>');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

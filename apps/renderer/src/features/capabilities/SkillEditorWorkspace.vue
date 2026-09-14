@@ -6,12 +6,14 @@ import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
 import type { SkillRecord } from '../../app/capabilities';
 import { listSkillFiles, readSkillFile, streamChat, writeSkillDraft, writeSkillFile } from '../../services/api';
 import { useModelConfig, toModelPayload } from '../../app/model-config';
+import { useNotify } from '../../app/notify';
 import { useTheme } from '../../app/theme.js';
 
 type FileEntry = { path: string; relative: string; type: 'directory' | 'file' };
 const props = defineProps<{ skill: SkillRecord; initialContent?: string; initialRequest?: string }>();
 const emit = defineEmits<{ close: []; saved: [skill: SkillRecord] }>();
 const { activeConfig, configured, load: loadModels } = useModelConfig();
+const notify = useNotify();
 const { resolvedTheme } = useTheme();
 function monacoTheme() {
   return resolvedTheme.value === 'light' ? 'vs' : 'vs-dark';
@@ -66,22 +68,25 @@ watch(resolvedTheme, () => {
 });
 async function generateInitial() {
   if (!props.initialRequest) return;
-  await loadModels(); if (!configured.value) { error.value = '请先在设置中配置可用的对话模型。'; return; }
+  await loadModels();
+  // 模型未配置时，仅写 error 会把提示挂在右侧面板底部 —— 刚进工作区看不到，
+  // 表现为「什么都没发生」。这里同时弹出 toast，说明为何没有生成初稿。
+  if (!configured.value) { error.value = '请先在设置中配置可用的对话模型。'; notify.warning('notify.error.modelMissing', error.value); return; }
   busy.value = true; let output = ''; messages.value.push({ role: 'user', content: props.initialRequest }); messages.value.push({ role: 'assistant', content: '' });
   try {
     const task = `Create a complete SKILL.md. Return only the raw SKILL.md content, starting with YAML frontmatter. Keep frontmatter limited to name and description. Use concise, progressive disclosure instructions. Skill name: ${props.skill.name}. Description: ${props.skill.description}. User request: ${props.initialRequest}`;
     await streamChat({ profile: { id: 'administrator', name: 'System Administrator', toolIds: ['skill-authoring'], instructions: 'Create safe and concise Agent Skills.' }, messages: [{ role: 'user', content: task }], model: toModelPayload(activeConfig.value) }, (delta) => { output += delta; messages.value[messages.value.length - 1].content = output; setEditorContent(output, 'SKILL.md'); });
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); notify.error(cause); }
   finally { busy.value = false; }
 }
 async function askAdministrator() {
-  const request = prompt.value.trim(); if (!request || busy.value) return; await loadModels(); if (!configured.value) { error.value = '请先在设置中配置可用的对话模型。'; return; }
+  const request = prompt.value.trim(); if (!request || busy.value) return; await loadModels(); if (!configured.value) { error.value = '请先在设置中配置可用的对话模型。'; notify.warning('notify.error.modelMissing', error.value); return; }
   messages.value.push({ role: 'user', content: request }); prompt.value = ''; busy.value = true; error.value = ''; let reply = ''; messages.value.push({ role: 'assistant', content: '' });
   try {
     const context = `Skill: ${props.skill.name}\nCurrent file: ${selectedFile.value}\nDirectory: ${treeEntries.value.map((item) => item.relative).join(', ')}\nContent:\n${current.value}\n\nRequest: ${request}`;
     await streamChat({ profile: { id: 'administrator', name: 'System Administrator', toolIds: ['skill-authoring'], instructions: 'Return each proposed file as <file path="relative/path">full content</file>. Include the current file. You may propose new files under scripts, references, assets, or tests. Never claim changes are saved.' }, messages: [{ role: 'user', content: context }], model: toModelPayload(activeConfig.value) }, (delta) => { reply += delta; messages.value[messages.value.length - 1].content = reply; });
     const changes = fileBlocks(reply); const currentChange = changes.find((item) => item.relative === selectedFile.value) || changes[0]; if (currentChange) { if (currentChange.relative !== selectedFile.value) { const existing = treeEntries.value.find((entry) => entry.relative === currentChange.relative); if (existing?.path) await selectFile(existing); else setEditorContent('', currentChange.relative); } proposed.value = currentChange.content; pendingFiles.value = changes.filter((item) => item !== currentChange); showDiff.value = true; await openDiff(); }
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); notify.error(cause); }
   finally { busy.value = false; }
 }
 async function persist(value = current.value) {
@@ -91,8 +96,14 @@ async function persist(value = current.value) {
       const name = skillName(value); const manifest = await writeSkillDraft({ name, content: value });
       isDraft.value = false; selectedPath.value = manifest.path; files.value = await listSkillFiles(manifest.path);
       emit('saved', { ...props.skill, id: `local:${name}`, name, path: manifest.path, source: 'local', description: description(value) });
-    } else if (selectedPath.value) await writeSkillFile({ path: selectedPath.value, content: value });
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
+      notify.success('notify.saved', `${name}/SKILL.md`);
+    } else if (selectedPath.value) { await writeSkillFile({ path: selectedPath.value, content: value }); notify.success('notify.saved', selectedFile.value); }
+  } catch (cause) {
+    // 保存失败必须显式反馈：后端 /skills/draft 与 /skills/file 都是 requireAdmin，
+    // 非管理员会拿到 403，此前只写 error 容易被当成「保存成功了」。
+    error.value = cause instanceof Error ? cause.message : String(cause);
+    notify.error(cause, '保存失败');
+  }
   finally { saving.value = false; }
 }
 async function acceptDiff() {

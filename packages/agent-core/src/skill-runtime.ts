@@ -435,10 +435,10 @@ export function createSkillExecutionTools(input: {
 
     if (projectBound) {
       if (isUnderWorkspaceOutput(requested)) {
-        targetRel = requested.slice(WORKSPACE_OUTPUT_DIR.length + 1);
-        if (!targetRel || targetRel.split('/').some((part) => !part || part === '.' || part === '..')) {
-          return { ok: false as const, error: 'Invalid project path after stripping output/.' };
-        }
+        return {
+          ok: false as const,
+          error: `PROJECT_OUTPUT_DIRECTORY_NOT_ALLOWED: project mode writes directly to the project root. Retry with ${requested.slice(WORKSPACE_OUTPUT_DIR.length + 1) || '<a root-relative path>'}.`,
+        };
       }
       asDeliverable = !PROCESS_ONLY_DIRS.has(pathParts(targetRel)[0] || '');
     } else {

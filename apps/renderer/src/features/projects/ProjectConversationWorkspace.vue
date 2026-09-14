@@ -17,7 +17,7 @@ import { isDesktopShell } from "../../app/platform.js";
 import { downloadAssetBestEffort } from "../../app/platform-actions.js";
 import { readStored, writeStored } from "../../app/storage.js";
 import { useTheme } from "../../app/theme.js";
-import { exportWorkspaceZip, importWorkspaceZip, listWorkspaceFiles, materializeWorkspaceAssets, readWorkspaceFile, syncWorkspaceRun, writeWorkspaceFile } from "../../services/api.js";
+import { exportWorkspaceZip, importWorkspaceZip, listWorkspaceFiles, materializeWorkspaceAssets, normalizeWorkspaceLayout, readWorkspaceFile, readWorkspaceInfo, syncWorkspaceRun, writeWorkspaceFile } from "../../services/api.js";
 import ProjectDagPreview from "./ProjectDagPreview.vue";
 
 const { resolvedTheme } = useTheme();
@@ -69,6 +69,9 @@ const fileContent = ref('');
 const workspaceZipInput = ref<HTMLInputElement>();
 const importingZip = ref(false);
 const exportingZip = ref(false);
+const normalizingLayout = ref(false);
+const layoutNotice = ref('');
+const persistedEntrypoint = ref('');
 const savingShare = ref(false);
 const shareScope = ref<"private" | "org-shared" | "delegated">("private");
 const sharePermissions = ref<Record<string, "read" | "write">>({});
@@ -284,6 +287,14 @@ const COLLAPSED_TREE_WIDTH = 44;
 
 const deliverableFiles = computed(() => deliverableEntries(files.value));
 const fileCount = computed(() => deliverableFiles.value.filter((entry) => entry.type === "file").length);
+const hasLegacyOutput = computed(() => files.value.some((entry) => entry.relative === 'output' || entry.relative.startsWith('output/')));
+const siteEntrypoint = computed(() => {
+  const names = new Set(files.value.filter((entry) => entry.type === 'file').map((entry) => entry.relative));
+  if (persistedEntrypoint.value && names.has(persistedEntrypoint.value)) return persistedEntrypoint.value;
+  if (names.has('index.html')) return 'index.html';
+  if (names.has('output/index.html')) return 'output/index.html';
+  return '';
+});
 const visibleFiles = computed(() =>
   deliverableFiles.value.filter((entry) =>
     entry.relative
@@ -423,6 +434,33 @@ async function downloadWorkspaceZip() {
   }
 }
 
+async function normalizeProjectLayout() {
+  if (!props.project.workspacePath || normalizingLayout.value) return;
+  if (!window.confirm('将 output/ 中的项目文件移动到项目根目录。已有同名文件不会被覆盖，是否继续？')) return;
+  normalizingLayout.value = true;
+  filesError.value = '';
+  layoutNotice.value = '';
+  try {
+    const result = await normalizeWorkspaceLayout(props.project.workspacePath);
+    files.value = result.files;
+    persistedEntrypoint.value = result.entrypoint || '';
+    if (result.conflicts.length) {
+      layoutNotice.value = `已移动 ${result.moved.length} 个文件；${result.conflicts.length} 个同名冲突保留在 output/，请人工比较。`;
+    } else {
+      layoutNotice.value = `项目结构已整理：${result.moved.length} 个文件已移动到根目录。`;
+    }
+  } catch (error) {
+    filesError.value = error instanceof Error ? error.message : '整理项目结构失败。';
+  } finally {
+    normalizingLayout.value = false;
+  }
+}
+
+function selectSiteEntrypoint() {
+  const entry = files.value.find((item) => item.type === 'file' && item.relative === siteEntrypoint.value);
+  if (entry) void selectFile(entry);
+}
+
 function fileGlyph(entry: FileEntry): { label: string; className: string } {
   if (entry.type === 'directory') {
     return {
@@ -489,11 +527,13 @@ async function loadFiles(options: { recover?: boolean } = {}) {
     // 先把本项目各任务的运行工作区(生成的文件)同步到项目目录，再读取文件树。
     await syncRunWorkspacesIntoProject();
     files.value = await listWorkspaceFiles(props.project.workspacePath);
+    persistedEntrypoint.value = (await readWorkspaceInfo(props.project.workspacePath)).entrypoint || '';
     const hasTaskRuns = props.project.tasks.some((task) => Boolean(task.runId));
     const needsRecover = options.recover !== false && !files.value.some((entry) => entry.type === 'file') && (totalAssets.value.length > 0 || hasTaskRuns);
     if (needsRecover) {
       await recoverProjectFiles();
       files.value = await listWorkspaceFiles(props.project.workspacePath);
+      persistedEntrypoint.value = (await readWorkspaceInfo(props.project.workspacePath)).entrypoint || '';
     }
   } catch (error) {
     filesError.value = error instanceof Error ? error.message : '无法读取项目空间。';
@@ -880,6 +920,21 @@ onBeforeUnmount(() => {
                 @click="downloadWorkspaceZip"
               >{{ exportingZip ? '导出中…' : '导出 zip' }}</button>
               <button
+                v-if="hasLegacyOutput"
+                class="rounded-md bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-500/20 disabled:opacity-50"
+                type="button"
+                :disabled="normalizingLayout"
+                title="安全地将 output/ 内容移动到项目根目录；同名文件不会被覆盖"
+                @click="normalizeProjectLayout"
+              >{{ normalizingLayout ? '整理中…' : '整理项目结构' }}</button>
+              <button
+                v-if="siteEntrypoint"
+                class="rounded-md bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-500/20"
+                type="button"
+                :title="`网站入口：${siteEntrypoint}`"
+                @click="selectSiteEntrypoint"
+              >网站入口</button>
+              <button
                 class="rounded-md px-2 py-1 text-[10px] font-semibold text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent)]"
                 type="button"
                 :title="project.workspacePath"
@@ -890,6 +945,7 @@ onBeforeUnmount(() => {
             <p v-if="!desktopShell" class="mt-2 text-[10px] leading-4 text-[var(--muted)]">
               浏览器环境下建议通过“导入 zip / 导出 zip”在本地与服务端项目空间之间同步文件；“打开位置”会退化为复制服务端路径。
             </p>
+            <p v-if="layoutNotice" class="mt-2 text-[10px] leading-4 text-amber-700">{{ layoutNotice }}</p>
           </div>
           <p v-else class="mb-3 px-1 text-[11px] leading-4 text-[var(--muted)]">旧项目尚未配置项目空间。</p>
 

@@ -33,7 +33,7 @@ function uniqueKebab(base: string, used: Set<string>): string {
 function buildSkillMarkdown(skill: AgentSkillRuntime, kebabName: string): string {
   const description = String(skill.description || skill.name || kebabName).replace(/\s+/g, ' ').trim().slice(0, 500);
   const body = String(skill.instructions || skill.description || '').trim()
-    || `When the user task matches “${skill.name || kebabName}”, follow that skill’s purpose and produce the requested deliverable under output/.`;
+    || `When the user task matches “${skill.name || kebabName}”, follow that skill’s purpose and obey the active Workmate workspace-mode contract for the final path.`;
   const resources = (skill.resources ?? [])
     .filter((item) => item.path && item.content)
     .slice(0, 20)

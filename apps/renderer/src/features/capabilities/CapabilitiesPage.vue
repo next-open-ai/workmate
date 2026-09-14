@@ -5,6 +5,7 @@ import { defaultSkillExecution, isBaselineCatalogSkill, useCapabilities, type Sk
 import { deleteManagedSkill, discoverSkills, importGitSkill, importSkillZip, installSkillPackage, readSkillFile, streamChat, writeSkillDraft } from '../../services/api';
 import { useModelConfig, toModelPayload } from '../../app/model-config';
 import { useAuth } from '../../app/auth';
+import { useNotify } from '../../app/notify';
 import SkillAuthoringList from './SkillAuthoringList.vue';
 import McpConnectorsPanel from './McpConnectorsPanel.vue';
 import { isDesktopShell } from '../../app/platform.js';
@@ -13,6 +14,7 @@ const SkillEditorWorkspace = defineAsyncComponent(() => import('./SkillEditorWor
 type RegistrySkill = { reference: string; source: string; slug: string; name: string; description: string; installs: string; url: string };
 const { t } = useI18n(); const { skills, policies, load, saveSkills, removeSkill, setExecutionPolicy } = useCapabilities(); const { activeConfig, configured, load: loadModels } = useModelConfig();
 const { isAdmin } = useAuth();
+const notify = useNotify();
 const domain = ref<'skills' | 'mcp'>('skills');
 const tab = ref<'catalog' | 'discover' | 'create'>('catalog');
 const query = ref(''); const categoryFilter = ref('all'); const discoverQuery = ref(''); const results = ref<RegistrySkill[]>([]); const searching = ref(false); const searchError = ref(''); const selected = ref<RegistrySkill | null>(null); const libraryDetail = ref<SkillRecord | null>(null); const executionHosts = ref(''); const editingSkill = ref<SkillRecord | null>(null); const editorInitialContent = ref(''); const editorInitialRequest = ref(''); const packageRef = ref(''); const gitState = ref(''); const importingGit = ref(false); const creatorOpen = ref(false); const creatorBusy = ref(false); const creatorError = ref(''); const creatorReply = ref(''); const creatorRequest = ref(''); const newSkillName = ref(''); const newSkillDescription = ref(''); const existingSkillId = ref('new'); const draft = ref<{ name: string; content: string } | null>(null);
@@ -143,8 +145,25 @@ async function importGit() {
 }
 function parseDraft(value: string) { const json = value.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? value.match(/\{[\s\S]*\}/)?.[0]; try { const parsed = JSON.parse(json || ''); return typeof parsed.name === 'string' && typeof parsed.content === 'string' ? parsed : null; } catch { return null; } }
 function openCreator(skill?: SkillRecord | null) { existingSkillId.value = skill?.id ?? 'new'; creatorRequest.value = skill ? `${t('capabilities.creatorEditPrompt')} ${skill.name}.` : `${t('capabilities.creatorAutoPrompt')} ${canonical(newSkillName.value)}.`; creatorReply.value = ''; creatorError.value = ''; draft.value = null; creatorOpen.value = true; }
-function openEditor(skill: SkillRecord) { if (!isAdmin.value) return; if (!skill.path) { creatorError.value = t('capabilities.editorManagedOnly'); return; } editorInitialContent.value = ''; editingSkill.value = skill; }
-function startNewWorkspace() { if (!isAdmin.value) return; const name = canonical(newSkillName.value); const description = newSkillDescription.value.trim(); if (!name || !description) return; editorInitialContent.value = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n`; editorInitialRequest.value = `创建名为 ${name} 的 Skill。${description}`; editingSkill.value = { id: `local:${name}`, name, description, source: 'local', status: 'ready', risk: 'low', tags: ['local'], execution: defaultSkillExecution() }; newSkillName.value = ''; newSkillDescription.value = ''; }
+function openEditor(skill: SkillRecord) {
+  if (!isAdmin.value) { notify.warning('capabilities.adminRequiredTitle', t('capabilities.adminRequiredHint')); return; }
+  if (!skill.path) { notify.warning('capabilities.adminRequiredTitle', t('capabilities.editorManagedOnly')); return; }
+  editorInitialContent.value = ''; editingSkill.value = skill;
+}
+// 进入创作工作区。此前这里对非管理员直接 `return`，而「进入工作区」按钮只按输入
+// 是否为空来 disabled —— member 点了按钮毫无反应，也没有任何提示（后端
+// /skills/draft 有 requireAdmin，确实不允许写）。现在改为明确反馈失败原因。
+function startNewWorkspace() {
+  if (!isAdmin.value) { notify.warning('capabilities.adminRequiredTitle', t('capabilities.adminRequiredHint')); return; }
+  const name = canonical(newSkillName.value); const description = newSkillDescription.value.trim();
+  if (!name || !description) { notify.warning('capabilities.draftIncompleteTitle', t('capabilities.draftIncompleteHint')); return; }
+  const duplicate = skills.value.find((skill) => canonical(skill.name) === name);
+  if (duplicate) { notify.warning('capabilities.draftDuplicateTitle', t('capabilities.draftDuplicateHint', { name })); return; }
+  editorInitialContent.value = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n`;
+  editorInitialRequest.value = `创建名为 ${name} 的 Skill。${description}`;
+  editingSkill.value = { id: `local:${name}`, name, description, source: 'local', status: 'ready', risk: 'low', tags: ['local'], execution: defaultSkillExecution() };
+  newSkillName.value = ''; newSkillDescription.value = '';
+}
 function createSkillWorkspace(name: string, description: string) { newSkillName.value = name; newSkillDescription.value = description; startNewWorkspace(); }
 function openDraftWorkspace(value: { name: string; content: string }) { editorInitialContent.value = value.content; editingSkill.value = { id: `local:${canonical(value.name)}`, name: value.name, description: value.content.match(/^description:\s*(.+)$/mi)?.[1]?.trim() || '', source: 'local', status: 'ready', risk: 'low', tags: ['local'], execution: defaultSkillExecution() }; creatorOpen.value = false; }
 async function createWithAdministrator() {
@@ -529,7 +548,7 @@ onMounted(() => { void refresh(); void loadModels(); });
           </article>
         </div>
       </div>
-      <SkillAuthoringList v-else-if="tab === 'create'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain" :skills="authoringSkills" @create="createSkillWorkspace" @open="openEditor" @remove="deleteSkill" />
+      <SkillAuthoringList v-else-if="tab === 'create'" class="min-h-0 flex-1 overflow-y-auto overscroll-contain" :skills="authoringSkills" :can-author="isAdmin" @create="createSkillWorkspace" @open="openEditor" @remove="deleteSkill" />
     </div>
   <div v-if="selected" class="fixed inset-0 z-30 grid place-items-center bg-slate-950/35 p-5" @click.self="selected = null">
     <article class="w-full max-w-lg rounded-2xl bg-[var(--surface)] p-6 shadow-2xl">

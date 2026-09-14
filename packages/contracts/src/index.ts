@@ -117,7 +117,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
 
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
-export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'qwen', 'ollama', 'openai-compatible']);
+export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible']);
 export const EmbeddingMetaSchema = z.object({
   dimension: z.number().int().positive().max(65_536).optional(),
   normalize: z.boolean().optional(),

@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue';
 import { getServerModelConfig, saveServerModelConfig } from '../services/api.js';
 
-export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'qwen', 'ollama', 'openai-compatible'] as const;
+export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible'] as const;
 export type ProviderId = (typeof providerIds)[number];
 export type ModelCapability = 'chat' | 'image' | 'embedding' | 'asr' | 'tts';
 
@@ -92,6 +92,7 @@ export const providerSuggestedChatModels: Partial<Record<ProviderId, string[]>> 
   anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-5'],
   google: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
   deepseek: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash'],
+  glm: ['glm-4.5-flash', 'glm-4.5', 'glm-4-plus', 'glm-4-air'],
   qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen3.5:4b'],
   ollama: ['llama3.2', 'qwen2.5', 'deepseek-r1', 'mistral'],
   'openai-compatible': [],
@@ -112,6 +113,7 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
     embedding: ['text-embedding-004'],
   },
   deepseek: { chat: providerSuggestedChatModels.deepseek },
+  glm: { chat: providerSuggestedChatModels.glm },
   qwen: { chat: providerSuggestedChatModels.qwen },
   ollama: { chat: providerSuggestedChatModels.ollama },
   'openai-compatible': { chat: [] },
@@ -122,6 +124,7 @@ export const defaultBaseUrl: Record<ProviderId, string> = {
   anthropic: 'https://api.anthropic.com',
   google: 'https://generativelanguage.googleapis.com/v1beta',
   deepseek: 'https://api.deepseek.com/v1',
+  glm: 'https://open.bigmodel.cn/api/paas/v4',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   ollama: 'http://127.0.0.1:11434/v1',
   'openai-compatible': '',
@@ -133,6 +136,7 @@ export const providerDefaults: Record<ProviderId, Omit<ProviderConfig, 'apiKey' 
   anthropic: { provider: 'anthropic', baseUrl: '', chatModel: 'claude-sonnet-4-5', chatModels: ['claude-sonnet-4-5'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   google: { provider: 'google', baseUrl: '', chatModel: 'gemini-2.5-flash', chatModels: ['gemini-2.5-flash'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: 'gemini-2.5-flash-image', embeddingModel: 'text-embedding-004', asrModel: '', ttsModel: '' },
   deepseek: { provider: 'deepseek', baseUrl: defaultBaseUrl.deepseek, chatModel: 'deepseek-chat', chatModels: ['deepseek-chat'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
+  glm: { provider: 'glm', baseUrl: defaultBaseUrl.glm, chatModel: 'glm-4.5-flash', chatModels: ['glm-4.5-flash'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   qwen: { provider: 'qwen', baseUrl: defaultBaseUrl.qwen, chatModel: 'qwen-plus', chatModels: ['qwen-plus'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   ollama: { provider: 'ollama', baseUrl: defaultBaseUrl.ollama, chatModel: 'llama3.2', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   'openai-compatible': { provider: 'openai-compatible', baseUrl: '', chatModel: '', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
@@ -163,7 +167,7 @@ export function providerNeedsApiKey(provider: ProviderId) {
 }
 
 export function providerSupportsOpenAiModelList(provider: ProviderId) {
-  return provider === 'openai' || provider === 'deepseek' || provider === 'qwen' || provider === 'openai-compatible' || provider === 'ollama';
+  return provider === 'openai' || provider === 'deepseek' || provider === 'glm' || provider === 'qwen' || provider === 'openai-compatible' || provider === 'ollama';
 }
 
 export function uniqueModels(values: string[]) {
@@ -188,9 +192,10 @@ export function defaultProviderName(type: ProviderId, existing: ProviderInstance
     anthropic: 'Anthropic',
     google: 'Google',
     deepseek: 'DeepSeek',
+    glm: 'GLM（智谱）',
     qwen: '通义千问',
     ollama: 'Ollama',
-    'openai-compatible': '兼容接口',
+    'openai-compatible': 'OpenAI 兼容',
   };
   return count <= 1 ? labels[type] : `${labels[type]} #${count}`;
 }

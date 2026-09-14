@@ -53,6 +53,9 @@ export function mapWorkmateModelToDshRoute(model: ModelConfig): WorkmateDshModel
     case 'deepseek':
       if (!baseUrl) baseUrl = 'https://api.deepseek.com';
       break;
+    case 'glm':
+      if (!baseUrl) baseUrl = 'https://open.bigmodel.cn/api/paas/v4';
+      break;
     case 'ollama':
       if (!baseUrl) baseUrl = 'http://127.0.0.1:11434/v1';
       if (!apiKey) apiKey = 'ollama';

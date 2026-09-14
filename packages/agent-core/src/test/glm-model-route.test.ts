@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { mapWorkmateModelToDshRoute } from '../dsh/model-route.js';
+import { toPiModel } from '../pi-model.js';
+
+const glmConfig = {
+  provider: 'glm' as const,
+  chatModel: 'glm-4.5-flash',
+  apiKey: 'test-key',
+};
+
+test('GLM uses the Zhipu OpenAI-compatible endpoint in the Pi runtime', () => {
+  const model = toPiModel(glmConfig);
+  assert.equal(model.api, 'openai-completions');
+  assert.equal(model.baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+});
+
+test('GLM uses the Zhipu OpenAI-compatible endpoint in the dsh runtime', () => {
+  const route = mapWorkmateModelToDshRoute(glmConfig);
+  assert.equal(route.api, 'openai-completions');
+  assert.equal(route.baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+  assert.equal(route.apiKey, 'test-key');
+});

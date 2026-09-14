@@ -25,7 +25,7 @@ const MCP_KEY = 'capabilities.mcp';
 const KB_BASES_KEY = 'capabilities.knowledge';
 const KB_PROVIDERS_KEY = 'settings.knowledge-providers';
 
-const PROVIDER_IDS = new Set(['openai', 'anthropic', 'google', 'deepseek', 'qwen', 'ollama', 'openai-compatible']);
+const PROVIDER_IDS = new Set(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible']);
 const PRESET_EMPLOYEE_NAMES: Record<string, string> = {
   general: 'General Assistant',
   research: 'Research Assistant',
