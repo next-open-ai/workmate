@@ -457,6 +457,37 @@ export function chatModelList(config: ProviderConfig) {
   return uniqueModels([...(config.chatModels ?? []), config.chatModel]);
 }
 
+/** 启动时可检测的模型配置缺口类型 */
+export type ModelSetupGapId = 'no-provider' | 'provider-incomplete' | 'no-model' | 'no-active-chat-model';
+
+/**
+ * 分析当前模型配置还缺什么，供启动引导弹窗使用。
+ * 返回按严重程度排列的缺口列表；空数组表示已有可用的对话模型。
+ */
+export function analyzeModelSetup(value: ModelSettings): ModelSetupGapId[] {
+  const gaps: ModelSetupGapId[] = [];
+  if (!value.providerInstances.length) {
+    gaps.push('no-provider');
+    return gaps;
+  }
+  const readyIds = new Set(value.providerInstances.filter((item) => providerInstanceReady(item)).map((item) => item.id));
+  if (!readyIds.size) {
+    gaps.push('provider-incomplete');
+    return gaps;
+  }
+  const readyChatModels = value.models.filter(
+    (item) => item.capability === 'chat' && item.modelId.trim() && readyIds.has(item.providerInstanceId),
+  );
+  if (!readyChatModels.length) {
+    gaps.push('no-model');
+    return gaps;
+  }
+  if (!value.activeChatModelId || !readyChatModels.some((item) => item.id === value.activeChatModelId)) {
+    gaps.push('no-active-chat-model');
+  }
+  return gaps;
+}
+
 export function providerConfigured(config: ProviderConfig) {
   if (!config.chatModel.trim()) return false;
   if (!providerNeedsApiKey(config.provider)) return true;

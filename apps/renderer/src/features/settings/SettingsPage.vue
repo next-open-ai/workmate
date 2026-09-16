@@ -33,6 +33,8 @@ const props = defineProps<{
   localUsers?: AuthUser[];
   isAdmin?: boolean;
   authBusy?: boolean;
+  /** 外部（如启动引导弹窗）指定的初始 tab；消费后通过 focus-consumed 通知清空。 */
+  focusTab?: 'providers' | 'models' | null;
 }>();
 const emit = defineEmits<{
   setDefaultEmployee: [id: EmployeeId];
@@ -41,6 +43,7 @@ const emit = defineEmits<{
   createLocalUser: [payload: { username: string; displayName: string; password: string; role: 'admin' | 'member' }];
   updateLocalUser: [payload: { userId: string; displayName?: string; password?: string; role?: 'admin' | 'member'; disabled?: boolean }];
   deleteLocalUser: [userId: string];
+  'focus-consumed': [];
 }>();
 const { t, locale, setLocale } = useI18n();
 const { preference, setTheme } = useTheme();
@@ -84,6 +87,17 @@ const runtimeStatusLive = ref(false);
 const languageLabel: Record<Locale, string> = { 'zh-CN': '简体中文', 'en-US': 'English' };
 type SettingsTab = 'appearance' | 'providers' | 'models' | 'search' | 'knowledge' | 'account' | 'usage' | 'environment' | 'users' | 'general';
 const tab = ref<SettingsTab>('providers');
+
+// 外部指定初始 tab（启动引导弹窗「去配置」跳转）：应用一次后通知父组件清空，
+// 避免用户手动切换后再返回设置页时又被强制跳回。
+watch(
+  () => props.focusTab,
+  (next) => {
+    if (!next) return;
+    tab.value = next;
+    emit('focus-consumed');
+  },
+);
 const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
   { id: 'appearance', labelKey: 'settings.tabAppearance' },
   { id: 'providers', labelKey: 'settings.tabProviders' },
@@ -98,6 +112,10 @@ const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
 ];
 
 onMounted(() => {
+  if (props.focusTab) {
+    tab.value = props.focusTab;
+    emit('focus-consumed');
+  }
   void load();
   void loadSearch();
   void loadKnowledgeProviders();

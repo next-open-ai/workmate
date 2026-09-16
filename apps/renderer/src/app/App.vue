@@ -13,9 +13,11 @@ import AutomationsPage from '../features/automations/AutomationsPage.vue';
 import ProjectsPage from '../features/projects/ProjectsPage.vue';
 import RemoteOfficePage from '../features/remote/RemoteOfficePage.vue';
 import EnvironmentPage from '../features/environment/EnvironmentPage.vue';
+import DocsPage from '../features/docs/DocsPage.vue';
 import { runEnvironmentCheck } from '../services/environment';
 import AppToastHost from '../features/common/AppToastHost.vue';
 import EnvironmentCheckDialog from '../features/common/EnvironmentCheckDialog.vue';
+import ModelSetupDialog from '../features/common/ModelSetupDialog.vue';
 import DshInstallProgressDialog from '../features/dsh/DshInstallProgressDialog.vue';
 import {
   demoteDshEmployeesToPi,
@@ -28,7 +30,7 @@ import LoginPage from '../features/auth/LoginPage.vue';
 import { useI18n } from './i18n';
 import { useAuth } from './auth';
 import { useWorkspace } from './workspace';
-import { useModelConfig } from './model-config';
+import { useModelConfig, analyzeModelSetup, type ModelSetupGapId } from './model-config';
 import { useTheme } from './theme';
 import { readStored, writeStored } from './storage';
 import { useCapabilities } from './capabilities';
@@ -61,7 +63,7 @@ const serviceReady = ref(false);
 const sidebarCollapsed = ref(false);
 const authBusy = ref(false);
 const { loadTheme } = useTheme();
-const { activeConfig: modelConfig, availableChatModels, configured, load: loadModelConfig, selectChatEndpoint, chatEndpointToken, modelForProvider, modelById } = useModelConfig();
+const { activeConfig: modelConfig, settings: modelSettings, availableChatModels, configured, load: loadModelConfig, selectChatEndpoint, chatEndpointToken, modelForProvider, modelById } = useModelConfig();
 const { load: loadCapabilities } = useCapabilities();
 const { load: loadAutomations, startScheduler } = useAutomations();
 const { load: loadEmployeePrefs } = useEmployeeRuntimePrefs();
@@ -70,6 +72,12 @@ const { load: loadMcpConfig, probeStartupMcps } = useMcpConfig();
 const notify = useNotify();
 const showEnvCheckDialog = ref(false);
 const showDshInstallDialog = ref(false);
+const showModelSetupDialog = ref(false);
+const modelSetupGaps = ref<ModelSetupGapId[]>([]);
+/** 启动引导弹窗「去配置」跳转设置页时指定的初始 tab。 */
+const settingsFocusTab = ref<'providers' | 'models' | null>(null);
+/** 打开「用户手册」时定位到的章节锚点，DocsPage 消费后清空。 */
+const docsAnchor = ref<string | null>(null);
 const envReturnView = ref<View>('settings');
 const activeChatEmployee = computed(() =>
   (activeConversation.value && employees.value.find((item) => item.id === activeConversation.value?.employeeId))
@@ -131,6 +139,7 @@ async function initializeWorkspace() {
     serviceReady.value = false;
   }
   void setupEnvironmentCheck();
+  void setupModelPrompt();
 }
 const runScheduledAutomation = async (automation: Automation) => {
   const model = (automation.modelId ? modelById(automation.modelId) : undefined) ?? modelForProvider(automation.provider);
@@ -198,6 +207,41 @@ async function setupEnvironmentCheck() {
 function openEnvironmentPage() {
   if (view.value !== 'env') envReturnView.value = view.value;
   setView('env');
+}
+
+/**
+ * 启动引导：检测到没有可用的对话模型时，弹出专业配置指引。
+ * 「以后再说」会静默 7 天，避免每次启动都打扰。
+ */
+async function setupModelPrompt() {
+  try {
+    const declinedAt = Number((await readStored('model.setup-prompt.declined-at')) || '0');
+    const recentlyDeclined = Number.isFinite(declinedAt) && declinedAt > 0
+      && (Date.now() - declinedAt) < 7 * 24 * 60 * 60 * 1000;
+    if (recentlyDeclined) return;
+    const gaps = analyzeModelSetup(modelSettings.value);
+    if (!gaps.length) return;
+    modelSetupGaps.value = gaps;
+    showModelSetupDialog.value = true;
+  } catch { /* 引导提示失败不应阻塞启动 */ }
+}
+
+function dismissModelSetup() {
+  showModelSetupDialog.value = false;
+  void writeStored('model.setup-prompt.declined-at', String(Date.now()));
+}
+
+function goModelSetup(tab: 'providers' | 'models') {
+  showModelSetupDialog.value = false;
+  settingsFocusTab.value = tab;
+  setView('settings');
+}
+
+/** 启动引导弹窗「查看手册」：打开用户手册并定位到模型配置章节。 */
+function openManualFromModelSetup() {
+  showModelSetupDialog.value = false;
+  docsAnchor.value = 'model-config';
+  setView('docs');
 }
 
 function closeEnvironmentPage() {
@@ -330,6 +374,7 @@ async function handleLogout() {
       <ProjectsPage v-else-if="view === 'projects'" :employees="employees" :models="availableChatModels" :generate-draft="generateProjectDraft" :run-task="runProjectTask" />
       <RemoteOfficePage v-else-if="view === 'remote'" />
       <EnvironmentPage v-else-if="view === 'env'" @close="closeEnvironmentPage" @back="closeEnvironmentPage" />
+      <DocsPage v-else-if="view === 'docs'" :anchor="docsAnchor" @anchor-consumed="docsAnchor = null" />
       <SettingsPage
         v-else
         :employees="employees"
@@ -338,16 +383,19 @@ async function handleLogout() {
         :local-users="localUsers"
         :is-admin="isAdmin"
         :auth-busy="authBusy"
+        :focus-tab="settingsFocusTab"
         @set-default-employee="setDefaultEmployee"
         @open-environment="openEnvironmentPage"
         @open-check="runCheckInDialog(true)"
         @create-local-user="handleCreateLocalUser"
         @update-local-user="handleUpdateLocalUser"
         @delete-local-user="handleDeleteLocalUser"
+        @focus-consumed="settingsFocusTab = null"
       />
     </main>
     <AppToastHost />
     <EnvironmentCheckDialog v-if="showEnvCheckDialog" @close="showEnvCheckDialog = false" @go="openEnvDetails" />
+    <ModelSetupDialog v-if="showModelSetupDialog" :gaps="modelSetupGaps" @close="dismissModelSetup" @go="goModelSetup" @manual="openManualFromModelSetup" />
     <DshInstallProgressDialog
       v-if="showDshInstallDialog"
       @close="showDshInstallDialog = false"

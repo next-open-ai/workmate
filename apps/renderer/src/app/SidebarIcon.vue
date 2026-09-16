@@ -11,6 +11,7 @@ defineProps<{
     | 'projects'
     | 'settings'
     | 'remote'
+    | 'docs'
     | 'env'
     | 'plus'
     | 'chevron-left'
@@ -68,6 +69,11 @@ defineProps<{
     <template v-else-if="name === 'remote'">
       <path d="M12 20.5c3.2 0 5.5-3.8 5.5-8.5S15.2 3.5 12 3.5 6.5 7.3 6.5 12s2.3 8.5 5.5 8.5Z" />
       <path d="M4.5 9.5h15M4.5 14.5h15M12 3.5v17" />
+    </template>
+    <template v-else-if="name === 'docs'">
+      <path d="M5 5.5h6.5A2.5 2.5 0 0 1 14 8v11.5H7.5A2.5 2.5 0 0 1 5 17V5.5Z" />
+      <path d="M19 5.5h-6.5A2.5 2.5 0 0 0 10 8v11.5H16.5A2.5 2.5 0 0 0 19 17V5.5Z" />
+      <path d="M8.5 9h3M8.5 12h3M14.5 9h2M14.5 12h2" />
     </template>
     <template v-else-if="name === 'env'">
       <path d="M4 18h16M6 14l4-4 3 3 5-6" />

@@ -20,7 +20,7 @@ import {
 } from './employees.js';
 
 export type { Employee, EmployeeDraft, EmployeeId } from './employees.js';
-export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'data' | 'automations' | 'projects' | 'remote' | 'env' | 'settings';
+export type View = 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'assets' | 'data' | 'automations' | 'projects' | 'remote' | 'env' | 'docs' | 'settings';
 export type CollaborationDelivery = 'synthesize' | 'direct';
 export interface CollaborationRun { employeeId: EmployeeId; task: string; status: 'running' | 'completed' | 'failed'; summary: string; activities: ToolActivity[]; error?: string; }
 export type ScheduleTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
