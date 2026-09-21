@@ -36,7 +36,7 @@ function skill(partial: Partial<AgentSkillRuntime> = {}): AgentSkillRuntime {
   };
 }
 
-test('document artifact tasks hide irrelevant finance and sequential-thinking MCP tools', () => {
+test('document artifact tasks retain associated domain MCP tools', () => {
   const filtered = filterMcpToolsetForTask({
     tools: [
       tool('mcp_akshare_list_akshare_categories_tool'),
@@ -55,12 +55,12 @@ test('document artifact tasks hide irrelevant finance and sequential-thinking MC
     close: async () => undefined,
   }, '创建一个从上海到西藏的10天的行程pdf', [skill()]);
 
-  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_amap_maps_geocode']);
-  assert.deepEqual(filtered.labels, ['Amap Maps']);
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_akshare_list_akshare_categories_tool', 'mcp_amap_maps_geocode']);
+  assert.deepEqual(filtered.labels, ['Akshare', 'Amap Maps']);
   assert.equal(filtered.instructions, '');
 });
 
-test('brand-tone finance words do not keep market MCP; filesystem stays blocked in project mode', () => {
+test('associated market MCP remains visible while filesystem stays blocked in project mode', () => {
   const filtered = filterMcpToolsetForTask({
     tools: [
       tool('mcp_akshare_list_akshare_categories_tool'),
@@ -82,8 +82,8 @@ test('brand-tone finance words do not keep market MCP; filesystem stays blocked 
     instructions: 'Write the brief under the project root.',
   })], { projectBound: true });
 
-  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_memory_read_graph']);
-  assert.deepEqual(filtered.labels, ['Memory']);
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_akshare_list_akshare_categories_tool', 'mcp_memory_read_graph']);
+  assert.deepEqual(filtered.labels, ['Akshare', 'Memory']);
 });
 
 test('live market tasks keep akshare tools', () => {
@@ -105,7 +105,7 @@ test('live market tasks keep akshare tools', () => {
   assert.ok(!filtered.tools.some((item) => item.name.includes('filesystem')));
 });
 
-test('stock_sdk trading-day tools are finance-like and filtered on compliance doc tasks', () => {
+test('stock_sdk trading-day tools are finance-like but remain authorized when associated', () => {
   assert.equal(isFinanceLikeMcpName('mcp_stock_sdk_is_trading_day'), true);
   assert.equal(isFinanceLikeMcpName('stock_sdk'), true);
   assert.equal(isFinanceLikeMcpName('amap-maps'), false);
@@ -124,11 +124,11 @@ test('stock_sdk trading-day tools are finance-like and filtered on compliance do
     close: async () => undefined,
   }, '梳理计生用品主流品类，建立分类体系与合规文案规范文档', [skill()], { projectBound: true });
 
-  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_amap_maps_geocode']);
-  assert.deepEqual(filtered.labels, ['Amap Maps']);
+  assert.deepEqual(filtered.tools.map((item) => item.name), ['mcp_stock_sdk_is_trading_day', 'mcp_amap_maps_geocode']);
+  assert.deepEqual(filtered.labels, ['stock_sdk', 'Amap Maps']);
 });
 
-test('filterMcpConnectionsForTask drops stock_sdk on project-bound doc tasks', () => {
+test('filterMcpConnectionsForTask retains associated stock_sdk on project-bound doc tasks', () => {
   const kept = filterMcpConnectionsForTask(
     [
       { id: 'stock_sdk', name: 'Stock SDK', enabled: true },
@@ -137,7 +137,7 @@ test('filterMcpConnectionsForTask drops stock_sdk on project-bound doc tasks', (
     '输出分类清单与合规文案规范',
     { projectBound: true },
   );
-  assert.deepEqual(kept.map((item) => item.id), ['amap']);
+  assert.deepEqual(kept.map((item) => item.id), ['stock_sdk', 'amap']);
 });
 
 test('data-app instant programming blocks MCP fetch even when name is localized', () => {

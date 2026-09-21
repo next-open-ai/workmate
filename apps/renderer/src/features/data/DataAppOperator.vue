@@ -23,6 +23,14 @@ const props = defineProps<{ app: DataApp | DataAppDetail }>();
 const emit = defineEmits<{ close: [] }>();
 const detail = ref<DataAppDetail | null>('table' in props.app && 'records' in props.app ? props.app as DataAppDetail : null);
 const search = ref('');
+const testResult = ref('');
+async function testDataApp() {
+  testResult.value = '';
+  await load();
+  await loadPublish();
+  if (!error.value && detail.value) testResult.value = `数据读取通过：${detail.value.table.columns.length} 个字段，返回 ${detail.value.records.length} 条记录。${customSite.value.bound ? 'AI 页面已绑定，可打开网站验证交互。' : 'AI 页面尚未绑定，当前仅验证基础数据接口。'}`;
+}
+
 const loading = ref(false);
 const saving = ref(false);
 const deletingId = ref('');
@@ -186,11 +194,13 @@ onBeforeUnmount(() => { if (publishPoll) window.clearInterval(publishPoll); });
           <p class="mt-2 text-sm text-[var(--muted)]">{{ detail?.table.name || '数据表' }} · {{ detail?.table.rowCount ?? 0 }} 条记录</p>
         </div>
         <div class="flex flex-wrap gap-2">
+          <button class="rounded-xl border border-[var(--border)] px-4 py-2.5 text-sm" type="button" :disabled="loading" @click="testDataApp">测试数据读取与页面状态</button>
           <button class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm font-semibold hover:bg-[var(--surface-muted)]" type="button" :disabled="publishing" @click="publish">{{ publishing ? '发布中…' : (primaryUrl ? '重新发布' : '本机部署') }}</button>
           <button class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:opacity-90" type="button" @click="openCreate">新增记录</button>
         </div>
       </div>
 
+      <p v-if="testResult" role="status" class="mt-5 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-900">{{ testResult }}</p>
       <div v-if="error" class="mt-5 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-700">{{ error }}</div>
 
       <div v-if="primaryUrl" class="mt-5 rounded-2xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-900">

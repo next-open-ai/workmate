@@ -1,4 +1,5 @@
 export { Orchestrator } from './orchestrator.js';
+export { TemplateTaskService, TemplateTaskError } from './template-tasks.js';
 export type { OrchestratorOptions } from './orchestrator.js';
 export { EventHub } from './hub.js';
 export type { HubListener } from './hub.js';
@@ -95,3 +96,5 @@ export type { ScriptedRunnerMode } from './echo-runner.js';
 export { buildUsageStats, emptyRunUsage, modelInfoFromRequest, applyUsageEvent, maybeCompactUsage, usagePeriodKeys, USAGE_DETAIL_LIMIT, USAGE_DETAIL_KEEP } from './usage.js';
 export type { UsageStats, UsageBucketTotals, UsageRollup } from './usage.js';
 export type { RunModelInfo, RunUsage, RunUsageStep } from './types.js';
+
+export { withKeyLock } from './lock.js';

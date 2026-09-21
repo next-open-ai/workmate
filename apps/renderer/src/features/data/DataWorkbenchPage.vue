@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import DataTaskDemo from './DataTaskDemo.vue';
+const demoOpen = ref(false);
 import { computed, onMounted, ref, watch } from 'vue';
 import {
   archivedAssetContentUrl,
@@ -348,7 +350,7 @@ function showCatalog(category: SourceCategory = 'all') { activeCategory.value = 
 
 function openCreateWebsite() {
   if (!selectedTable.value) return;
-  createMode.value = 'template';
+  createMode.value = 'idea';
   appType.value = '管理后台';
   appName.value = `${selectedTable.value.name}网站`;
   customizeIdea.value = '';
@@ -476,10 +478,13 @@ onMounted(load);
         <p class="mt-2 text-sm text-[var(--muted)]">统一管理文件与本地数据库，再用真实数据创建网站和工作台。</p>
       </div>
       <div class="flex items-center gap-2">
+        <button class="rounded-xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-800" type="button" :disabled="!selectedTable" @click="openCreateWebsite">AI 对话创建数据应用</button>
+        <button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="demoOpen = true">数据任务闭环体验</button>
         <button class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm font-semibold hover:bg-[var(--surface-muted)]" type="button" :disabled="loading" @click="load">{{ loading ? '刷新中…' : '刷新' }}</button>
         <input ref="fileInput" class="hidden" type="file" :accept="acceptedFiles" @change="upload" />
       </div>
     </header>
+    <div v-if="demoOpen" class="absolute inset-0 z-40 overflow-y-auto bg-[var(--background)] p-8"><button class="mb-4 rounded-lg border px-4 py-2" @click="demoOpen = false; load()">← 返回数据工作台</button><DataTaskDemo @changed="load" /></div>
 
     <div v-if="error || notice" class="mx-8 mt-4 rounded-xl border px-4 py-3 text-sm" :class="error ? 'border-rose-300 bg-rose-50 text-rose-700' : 'border-emerald-300 bg-emerald-50 text-emerald-700'">
       {{ error || notice }}
@@ -573,7 +578,7 @@ onMounted(load);
               :disabled="!selectedTable"
               @click="openCreateWebsite"
             >
-              创建网站应用
+              AI 对话创建数据应用
             </button>
           </div>
         </div>
@@ -646,7 +651,7 @@ onMounted(load);
 
               <div class="mt-4 flex flex-wrap gap-2">
                 <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white" type="button" @click="openPublishedApp(app)">打开站点</button>
-                <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="openExistingApp(app)">管理数据</button>
+                <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="openExistingApp(app)">测试验证 / 管理数据</button>
                 <button class="rounded-lg border border-teal-200 px-3 py-1.5 text-xs font-semibold text-teal-700 hover:bg-teal-50" type="button" @click="optimizeApp = app; optimizeIdea = ''">对话优化</button>
                 <button
                   class="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
@@ -810,7 +815,7 @@ onMounted(load);
     </div>
 
     <div v-if="schemaEditing && schemaDraft" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]">
-      <section class="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="schemaEditing = false">×</button><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">SCHEMA EDITOR</p><h2 class="mt-2 text-2xl font-bold">编辑数据结构</h2><p class="mt-2 text-sm text-[var(--muted)]">仅调整工作台元数据；字段 ID 与原始归档文件不会改变。</p><label class="mt-5 block"><span class="mb-1.5 block text-xs font-semibold">数据表名称</span><input v-model="schemaDraft.name" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" /></label><div class="mt-5 space-y-2"><div v-for="column in schemaDraft.columns" :key="column.id" class="grid grid-cols-[80px_minmax(150px,1fr)_130px_80px] items-center gap-2 rounded-xl border border-[var(--border)] p-3"><code class="text-xs text-[var(--accent)]">{{ column.id }}</code><input v-model="column.name" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm" /><select v-model="column.type" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm"><option v-for="type in ['文本', '整数', '小数', '日期', '布尔值']" :key="type">{{ type }}</option></select><label class="flex items-center gap-2 text-xs"><input v-model="column.nullable" type="checkbox" />可空</label></div></div><div class="mt-6 flex justify-end gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="schemaEditing = false">取消</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="schemaSaving" @click="saveSchema">{{ schemaSaving ? '保存中…' : '保存 Schema' }}</button></div></section>
+      <section class="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="schemaEditing = false">×</button><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">SCHEMA EDITOR</p><h2 class="mt-2 text-2xl font-bold">编辑数据结构</h2><p class="mt-2 text-sm text-[var(--muted)]">仅调整工作台元数据；字段 ID 与原始归档文件不会改变。</p><label class="mt-5 block"><span class="mb-1.5 block text-xs font-semibold">数据表名称</span><input v-model="schemaDraft.name" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" /></label><div class="mt-5 space-y-2"><div v-for="column in schemaDraft.columns" :key="column.id" class="grid grid-cols-[80px_minmax(150px,1fr)_130px_80px] items-center gap-2 rounded-xl border border-[var(--border)] p-3"><code class="text-xs text-[var(--accent)]">{{ column.id }}</code><input v-model="column.name" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm" /><select v-model="column.type" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm"><option v-for="type in ['文本', '整数', '小数', '日期', '布尔值']" :key="type">{{ type }}</option></select><label class="flex items-center gap-2 text-xs"><input v-model="column.nullable" type="checkbox" />可空</label><input v-model="column.description" :aria-label="`${column.name}业务说明`" placeholder="业务说明：含义、单位、枚举、关联关系" class="col-span-4 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm" /></div></div><div class="mt-6 flex justify-end gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="schemaEditing = false">取消</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="schemaSaving" @click="saveSchema">{{ schemaSaving ? '保存中…' : '保存 Schema' }}</button></div></section>
     </div>
 
     <div v-if="createOpen && selected && selectedTable" class="absolute inset-0 z-20 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[1px]">
@@ -818,8 +823,9 @@ onMounted(load);
         <button class="float-right text-lg text-[var(--muted)]" type="button" @click="createOpen = false">×</button>
         <p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">创建网站应用</p>
         <h2 class="mt-2 text-2xl font-bold">基于「{{ selectedTable.name }}」</h2>
-        <p class="mt-2 text-sm text-[var(--muted)]">选择模板快速生成，或描述想法交给 Agent 定制。</p>
+        <p class="mt-2 text-sm text-[var(--muted)]">使用当前已保存的 Schema 与业务注释创建应用。提交后进入 AI 对话，可继续修改需求；完成后返回应用卡片进行测试验证。</p>
 
+        <details class="mt-4 rounded-xl border border-[var(--border)] p-3"><summary>确认数据来源与 Schema · {{ selected.name }} / {{ selectedTable.name }}</summary><p v-for="column in selectedTable.columns" :key="column.id" class="mt-2 text-xs">{{ column.id }} · {{ column.name }} · {{ column.type }} · {{ column.description || '尚未填写业务说明' }}</p></details>
         <div class="mt-5 grid grid-cols-2 gap-2">
           <button
             class="rounded-xl border p-3 text-left"
@@ -836,7 +842,7 @@ onMounted(load);
             type="button"
             @click="createMode = 'idea'"
           >
-            <b class="text-sm">按想法定制</b>
+            <b class="text-sm">AI 对话创建</b>
             <p class="mt-1 text-xs text-[var(--muted)]">Agent 即时编程单页站</p>
           </button>
         </div>
@@ -877,7 +883,7 @@ onMounted(load);
             :disabled="createBusy || (createMode === 'idea' && !customizeIdea.trim())"
             @click="submitCreate"
           >
-            {{ createBusy ? '处理中…' : createMode === 'idea' ? '开始定制' : '生成应用' }}
+            {{ createBusy ? '处理中…' : createMode === 'idea' ? '开始 AI 对话' : '生成应用' }}
           </button>
         </div>
       </section>

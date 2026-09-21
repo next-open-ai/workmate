@@ -43,6 +43,8 @@ pnpm dev
 
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
+| [data-capability-platform.md](data-capability-platform.md) | 数据工作台、统一数据网关、应用数据单元、操作 Spec 与 Skill 的边界和闭环 | ✅ 当前方案 |
+| --- | --- | --- |
 | [architecture.md](architecture.md) | 当前项目架构 / 进程与模块边界 / 主要逻辑（会话·滚动记忆·可续跑审批·**Plan/Run/ChangeSet 项目编排**·存储 keyring·通道） | ✅ 当前权威 |
 | [execution-backend.md](execution-backend.md) | 多引擎统一抽象：`ExecutionBackend` 注册表（pi / agentscope / dsh） | ✅ 当前实现 |
 | [dsh-sidecar.md](dsh-sidecar.md) | DeepSeek Harness 编码 Sidecar：JSON-RPC 桥、环境变量、事件映射 | ✅ Phase 1 |

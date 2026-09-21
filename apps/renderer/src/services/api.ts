@@ -1374,7 +1374,8 @@ export function archivedAssetContentUrl(assetId: string, options: { download?: b
   return `${apiBase}/api/assets/content?${params.toString()}`;
 }
 
-export type DataColumn = { id: string; name: string; type: '文本' | '整数' | '小数' | '日期' | '布尔值'; nullable: boolean; sample: string };
+export type { DataColumn } from '@workmate/contracts';
+import type { DataColumn } from '@workmate/contracts';
 export type DataTable = { id: string; name: string; sheetName: string; rowCount: number; columns: DataColumn[] };
 export type DataApiConnection = {
   baseUrl: string;

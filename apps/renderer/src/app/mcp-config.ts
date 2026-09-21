@@ -233,8 +233,19 @@ function normalizeOne(value: unknown): McpConnection | null {
 }
 
 function normalizeAll(value: unknown): McpConnection[] {
-  if (!Array.isArray(value)) return [];
-  return value.map(normalizeOne).filter((item): item is McpConnection => Boolean(item));
+  if (Array.isArray(value)) return value.map(normalizeOne).filter((item): item is McpConnection => Boolean(item));
+  if (!value || typeof value !== 'object') return [];
+  const envelope = value as { meta?: unknown; secrets?: unknown };
+  if (!Array.isArray(envelope.meta)) return [];
+  const connections = (envelope.secrets && typeof envelope.secrets === 'object'
+    ? (envelope.secrets as { connections?: unknown }).connections
+    : undefined) as Record<string, { apiKey?: string; env?: Record<string, string> }> | undefined;
+  return envelope.meta.map((entry) => {
+    if (!entry || typeof entry !== 'object') return null;
+    const row = entry as Record<string, unknown>;
+    const secret = connections?.[String(row.id || '')];
+    return normalizeOne({ ...row, apiKey: secret?.apiKey || row.apiKey, env: secret?.env || row.env });
+  }).filter((item): item is McpConnection => Boolean(item));
 }
 
 function configFingerprint(item: Pick<McpConnection, 'kind' | 'transport' | 'url' | 'apiKey' | 'command' | 'args' | 'env' | 'cwd'>) {

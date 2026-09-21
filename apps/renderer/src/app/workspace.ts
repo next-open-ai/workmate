@@ -201,6 +201,12 @@ function labelEmployee(employee: Employee) {
 }
 
 function profileInstructions(employee: Employee, extra = '') {
+  const configuredLanguage = typeof document !== 'undefined' && document.documentElement.lang.toLowerCase().startsWith('en')
+    ? 'English'
+    : '简体中文';
+  const languageDirective = configuredLanguage === 'English'
+    ? 'The application language is English. Respond in English by default, including headings, explanations, progress updates, and tool-facing summaries. Only use another language when the user explicitly asks for it.'
+    : '当前应用语言为简体中文。默认使用简体中文回答，包括标题、解释、进度更新和工具结果摘要；只有用户明确要求时才切换为其他语言。';
   const role = employee.name?.trim()
     || (employee.id === 'general' ? 'General Assistant'
       : employee.id === 'research' ? 'Research Assistant'
@@ -217,7 +223,7 @@ function profileInstructions(employee: Employee, extra = '') {
   const researchMode = employee.id === 'research'
     ? ' Research output mode: deliver a concise Markdown or structured research brief with findings, evidence/source pointers, uncertainty, and next actions. Do not narrate planning or self-correction. Use only the minimum relevant tools; after a failed file operation, state the concrete blocker instead of repeatedly retrying the same write/read path.'
     : '';
-  return `You are Workmate's digital employee "${role}" (${employee.id}).${roleBrief} ${focus} Reply in the user's language.${researchMode} ${extra}`.trim();
+  return `You are QuantumAI's digital employee "${role}" (${employee.id}).${roleBrief} ${focus} ${languageDirective} Reply in the user's language when it differs only because the user explicitly requests another language.${researchMode} ${extra}`.trim();
 }
 
 function collaboratorFocus(employee: Employee) {
@@ -1749,7 +1755,7 @@ HARD PLANNING CONSTRAINTS (must obey):
 
     // Phase 1 — structure only (roles + edges).
     let structureOut = '';
-    const structurePrompt = `You are Workmate's project coordinator (phase 1: structure). Preferred collaboration mode: ${preferredMode}. ${modeGuide[preferredMode]} If the goal cannot honestly fit that mode, still propose the best graph and set suggestedMode accordingly.
+    const structurePrompt = `You are QuantumAI's project coordinator (phase 1: structure). Preferred collaboration mode: ${preferredMode}. ${modeGuide[preferredMode]} If the goal cannot honestly fit that mode, still propose the best graph and set suggestedMode accordingly.
 ${minimalRules}
 
 Available employees (choose only from these):
@@ -1848,7 +1854,7 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
 
     // Phase 2 — fill objectives + contracts for the fixed structure.
     let detailOut = '';
-    const detailPrompt = `You are Workmate's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. The platform baseline is 50 tool steps for every project task. Omit contract.maxSteps when 50 is sufficient; set it only when a task clearly needs MORE than 50. Never set it below 50. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
+    const detailPrompt = `You are QuantumAI's project coordinator (phase 2: objectives). Fill objectives for this fixed task structure. Return ONLY a JSON array aligned 1:1 with the structure (same length/order). Each item: {"objective":string,"skillIds":string[],"contract"?:{"outputs"?:string[],"acceptance"?:string,"maxSteps"?:number,"maxAttempts"?:number}}. The platform baseline is 50 tool steps for every project task. Omit contract.maxSteps when 50 is sufficient; set it only when a task clearly needs MORE than 50. Never set it below 50. Prefer concrete deliverable contracts when the goal clearly needs files, but do not force fixed filenames. Keep objectives focused — do not invent work that would require extra agents. Structure: ${JSON.stringify(structureTasks)}. Goal: ${goal}`;
     await streamChat({
       profile: { id: 'project-coordinator-detail', name: 'Project coordinator', instructions: 'Output valid JSON array only.', toolIds: [] },
       messages: [{ role: 'user', content: detailPrompt }],

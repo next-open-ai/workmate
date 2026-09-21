@@ -9,6 +9,9 @@ import { useAutomations, type Automation, type AutomationRun, type AutomationSch
 import { employeeDisplayName } from '../../app/employees';
 import { useI18n } from '../../app/i18n';
 import AutomationRunDetail from './AutomationRunDetail.vue';
+import DataTaskDemo from '../data/DataTaskDemo.vue';
+import TemplateTasksPanel from './TemplateTasksPanel.vue';
+import TaskTemplateManager from './TaskTemplateManager.vue';
 
 const props = defineProps<{
   employees: Employee[];
@@ -25,7 +28,7 @@ const creating = ref(false);
 const createStep = ref<'pick' | 'configure'>('pick');
 const running = ref('');
 const error = ref('');
-const tab = ref<'tasks' | 'runs'>('tasks');
+const tab = ref<'templates' | 'configure' | 'data-demo' | 'tasks' | 'runs'>('templates');
 const selectedRun = ref<AutomationRun | null>(null);
 const form = ref({ name: '', prompt: '', employeeId: 'general' as EmployeeId, modelId: '', skillIds: [] as string[], kind: 'once' as 'once' | 'recurring', at: '', frequency: 'daily' as 'daily' | 'weekly' | 'monthly', time: '09:00', weekdays: [1] as number[], dayOfMonth: 1 });
 const availableSkills = computed(() => allowedSkillsFor(form.value.employeeId).filter((skill) => skill.status === 'ready'));
@@ -164,22 +167,28 @@ onMounted(async () => {
         <div class="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p class="text-[11px] font-extrabold tracking-[.13em] text-[var(--accent)]">Workmate / AUTOMATION</p>
-            <h1 class="mt-2 text-4xl font-bold tracking-[-.045em]">自动化</h1>
-            <p class="mt-3 text-[var(--muted)]">在 Workmate 保持运行时，让数字员工按单次或日历周期完成任务。</p>
+            <h1 class="mt-2 text-4xl font-bold tracking-[-.045em]">自动化与任务</h1>
+            <p class="mt-3 text-[var(--muted)]">通过模板配置输入、执行任务并查看结果，也可管理数字员工的定时自动化。</p>
           </div>
           <button v-if="tab === 'tasks'" class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white" type="button" @click="toggleCreateHeader">{{ creating ? '取消' : '＋ 新增自动化' }}</button>
         </div>
         <div class="mt-6 inline-flex rounded-xl bg-[var(--surface-muted)] p-1">
+          <button class="rounded-lg px-4 py-2 text-sm font-semibold" :class="tab === 'data-demo' ? 'bg-[var(--surface)] shadow-sm' : 'text-[var(--muted)]'" @click="tab = 'data-demo'">数据库任务体验</button>
+          <button :class="['rounded-lg px-4 py-2 text-sm font-semibold', tab === 'templates' ? 'bg-[var(--surface)] shadow-sm' : 'text-[var(--muted)]']" type="button" @click="tab = 'templates'">模板任务</button>
+          <button :class="['rounded-lg px-4 py-2 text-sm font-semibold', tab === 'configure' ? 'bg-[var(--surface)] shadow-sm' : 'text-[var(--muted)]']" type="button" @click="tab = 'configure'">模板配置</button>
           <button :class="['rounded-lg px-4 py-2 text-sm font-semibold', tab === 'tasks' ? 'bg-[var(--surface)] shadow-sm' : 'text-[var(--muted)]']" type="button" @click="tab = 'tasks'">定时任务</button>
           <button :class="['rounded-lg px-4 py-2 text-sm font-semibold', tab === 'runs' ? 'bg-[var(--surface)] shadow-sm' : 'text-[var(--muted)]']" type="button" @click="tab = 'runs'">
-            运行记录
+            自动化记录
             <span class="ml-1 rounded-md bg-[var(--surface-muted)] px-1.5 py-0.5 text-xs font-bold">{{ runs.length }}</span>
           </button>
         </div>
       </header>
 
       <div class="mt-6 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
-        <template v-if="tab === 'tasks'">
+        <DataTaskDemo v-if="tab === 'data-demo'" />
+        <TemplateTasksPanel v-else-if="tab === 'templates'" />
+        <TaskTemplateManager v-else-if="tab === 'configure'" />
+        <template v-else-if="tab === 'tasks'">
           <!-- 无任务：全屏引导 + 全量模板 -->
           <section v-if="!hasTasks && !creating" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-8 shadow-sm sm:p-10">
             <div class="mx-auto max-w-2xl text-center">

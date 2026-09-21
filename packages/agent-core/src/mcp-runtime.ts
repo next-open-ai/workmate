@@ -60,8 +60,13 @@ function expandUserPath(value: string): string {
 }
 
 function prepareStdioLaunch(connection: McpConnection | McpConnectionRuntime) {
-  const command = 'command' in connection ? String(connection.command || '').trim() : '';
-  if (!command) throw new Error('Local MCP requires a command (npx / uvx / custom).');
+  const requestedCommand = 'command' in connection ? String(connection.command || '').trim() : '';
+  if (!requestedCommand) throw new Error('Local MCP requires a command (npx / uvx / custom).');
+  // Windows resolves package runners through .cmd shims. With shell=false
+  // (the secure default), Node does not reliably resolve the extension.
+  const command = process.platform === 'win32'
+    ? ({ npx: 'npx.cmd', uvx: 'uvx.cmd' } as Record<string, string>)[requestedCommand.toLowerCase()] || requestedCommand
+    : requestedCommand;
   const args = ('args' in connection && Array.isArray(connection.args) ? connection.args.map(String) : []).map(expandUserPath);
   // Ensure sandbox dirs exist for filesystem-style MCP seeds (e.g. ~/.workmate/mcp-files).
   for (const arg of args) {

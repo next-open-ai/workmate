@@ -148,7 +148,7 @@ function profileFor(
     PRESET_DEFAULT_INSTRUCTIONS[employeeId] ||
     '按要求完成任务，不虚构执行结果。';
   const roleBrief = description ? ` Role brief: ${description}` : '';
-  const instructions = `${name}（Workmate 数字员工）。${roleBrief} ${focus}`.trim();
+  const instructions = `${name}（QuantumAI 数字员工）。${roleBrief} ${focus}`.trim();
   return { id: employeeId, name, instructions, toolIds: [] };
 }
 
@@ -265,8 +265,18 @@ async function skillRuntimeFor(store: KeyValueStore, task: ProjectTask, tier: st
   return runtime;
 }
 
-async function mcpConnectionsFor(store: KeyValueStore, prefs: PrefsRow): Promise<ChatRunContext['mcpConnections']> {
-  const all = rows(await kvJson(store, MCP_KEY)) as Array<Record<string, unknown>>;
+async function mcpConnectionsFor(
+  store: KeyValueStore,
+  prefs: PrefsRow,
+  ownerUserId?: string | null,
+): Promise<ChatRunContext['mcpConnections']> {
+  // Desktop/web settings are user-scoped so one tenant/user cannot leak MCP
+  // credentials or tools into another. The previous implementation only read
+  // the legacy unscoped key, which made MCP tests pass in the UI but left chat
+  // runs with no connectors at all.
+  const scoped = ownerUserId?.trim() ? await kvJson(store, `user:${ownerUserId.trim()}:${MCP_KEY}`) : null;
+  const scopedRows = rows(scoped) as Array<Record<string, unknown>>;
+  const all = (scopedRows.length > 0 ? scopedRows : rows(await kvJson(store, MCP_KEY))) as Array<Record<string, unknown>>;
   const wanted = new Set(prefs.mcpIds ?? []);
   const AUTO_SKIP = new Set(['mcp-baseline-playwright', 'mcp-baseline-chrome-devtools']);
   const out: ChatRunContext['mcpConnections'] = [];
@@ -303,6 +313,11 @@ async function mcpConnectionsFor(store: KeyValueStore, prefs: PrefsRow): Promise
     return 2;
   };
   out.sort((a, b) => rank(a.id) - rank(b.id));
+  console.info('[orch] resolved MCP connectors', {
+    ownerUserId: ownerUserId || null,
+    requested: [...wanted],
+    connectors: out.map((item) => item.id),
+  });
   return out.slice(0, 12);
 }
 
@@ -355,7 +370,7 @@ export async function resolveEmployeeMcpConnections(
 ): Promise<ChatRunContext['mcpConnections']> {
   const prefsAll = await readEmployeePrefsMap(store, ownerUserId);
   const prefs = (prefsAll[employeeId] ?? {}) as PrefsRow;
-  return mcpConnectionsFor(store, prefs);
+  return mcpConnectionsFor(store, prefs, ownerUserId);
 }
 
 /**
@@ -395,7 +410,7 @@ export async function resolveTaskContext(
     model: enableSearch ? { ...model, enableSearch: true } : model,
     skills: await skillRuntimeFor(store, task, tier),
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
-    mcpConnections: await mcpConnectionsFor(store, prefs),
+    mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
     knowledgeBases: await knowledgeBasesFor(store, prefs),
     maxSteps,
     runTimeoutMs,

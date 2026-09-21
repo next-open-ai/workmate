@@ -39,31 +39,40 @@ export function previewKindForName(name: string): PreviewKind {
   return 'unsupported';
 }
 
-/** Minimal Markdown → HTML for asset preview (no external dependency). */
+/** Safe, dependency-free Markdown → HTML used by asset previews and chat replies. */
 export function markdownToHtml(source: string) {
   const escape = (value: string) =>
-    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const lines = source.replace(/\r\n/g, '\n').split('\n');
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const lines = source.replace(/\r\n?/g, '\n').split('\n');
   const html: string[] = [];
-  let inList = false;
+  let list: 'ul' | 'ol' | null = null;
   let inCode = false;
   let codeBuf: string[] = [];
+  let table: string[] = [];
 
   const closeList = () => {
-    if (inList) {
-      html.push('</ul>');
-      inList = false;
-    }
+    if (list) { html.push(`</${list}>`); list = null; }
+  };
+  const flushTable = () => {
+    if (!table.length) return;
+    const rows = table.map((line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim()));
+    const separator = rows.findIndex((row) => row.every((cell) => /^:?-{3,}:?$/.test(cell)));
+    if (rows.length >= 2 && separator === 1) {
+      const headers = rows[0];
+      const body = rows.slice(2);
+      html.push(`<div class="chat-md-table-wrap"><table><thead><tr>${headers.map((cell) => `<th>${inlineMd(escape(cell))}</th>`).join('')}</tr></thead><tbody>${body.map((row) => `<tr>${headers.map((_, index) => `<td>${inlineMd(escape(row[index] ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+    } else table.forEach((line) => html.push(`<p>${inlineMd(escape(line))}</p>`));
+    table = [];
   };
 
   for (const raw of lines) {
-    if (raw.startsWith('```')) {
+    if (/^\s*```/.test(raw)) {
       if (inCode) {
         html.push(`<pre><code>${escape(codeBuf.join('\n'))}</code></pre>`);
         codeBuf = [];
         inCode = false;
       } else {
-        closeList();
+        closeList(); flushTable();
         inCode = true;
       }
       continue;
@@ -72,22 +81,27 @@ export function markdownToHtml(source: string) {
       codeBuf.push(raw);
       continue;
     }
-    if (/^\s*[-*]\s+/.test(raw)) {
-      if (!inList) {
-        html.push('<ul>');
-        inList = true;
-      }
-      html.push(`<li>${inlineMd(escape(raw.replace(/^\s*[-*]\s+/, '')))}</li>`);
+    const unordered = raw.match(/^\s*[-*+]\s+(.+)/);
+    const ordered = raw.match(/^\s*\d+[.)]\s+(.+)/);
+    if (unordered || ordered) {
+      flushTable();
+      const nextList = ordered ? 'ol' : 'ul';
+      if (list !== nextList) { closeList(); html.push(`<${nextList}>`); list = nextList; }
+      html.push(`<li>${inlineMd(escape((ordered ?? unordered)![1]))}</li>`);
       continue;
     }
     closeList();
-    if (/^###\s+/.test(raw)) html.push(`<h3>${inlineMd(escape(raw.slice(4)))}</h3>`);
-    else if (/^##\s+/.test(raw)) html.push(`<h2>${inlineMd(escape(raw.slice(3)))}</h2>`);
-    else if (/^#\s+/.test(raw)) html.push(`<h1>${inlineMd(escape(raw.slice(2)))}</h1>`);
-    else if (!raw.trim()) html.push('<br/>');
+    if (/^\s*\|.*\|\s*$/.test(raw)) { table.push(raw); continue; }
+    flushTable();
+    const heading = raw.match(/^\s*(#{1,6})\s+(.+)/);
+    if (heading) html.push(`<h${heading[1].length}>${inlineMd(escape(heading[2]))}</h${heading[1].length}>`);
+    else if (/^\s*>\s?/.test(raw)) html.push(`<blockquote>${inlineMd(escape(raw.replace(/^\s*>\s?/, '')))}</blockquote>`);
+    else if (/^\s*(\*{3,}|-{3,}|_{3,})\s*$/.test(raw)) html.push('<hr/>');
+    else if (!raw.trim()) { if (html.length && html.at(-1) !== '<br/>') html.push('<br/>'); }
     else html.push(`<p>${inlineMd(escape(raw))}</p>`);
   }
   closeList();
+  flushTable();
   if (inCode) html.push(`<pre><code>${escape(codeBuf.join('\n'))}</code></pre>`);
   return html.join('\n');
 }
@@ -96,5 +110,8 @@ function inlineMd(value: string) {
   return value
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)(?:\s+"[^"]*")?\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 }

@@ -24,6 +24,7 @@ import { employeeDisplayDescription, employeeDisplayName } from "../../app/emplo
 import { getServerRuntimeConfig, createMobileChatSession, getMobileChatSession, importDataFromAsset } from "../../services/api";
 import { chatBusy } from "../../app/workspace";
 import { qrDataUrl } from "../../app/qr-data-url.js";
+import { markdownToHtml } from "../../app/project-files";
 
 type EngineId = "pi" | "agentscope" | "dsh";
 function isEngineId(value: unknown): value is EngineId {
@@ -826,17 +827,18 @@ onBeforeUnmount(() => {
                 :title="t('chat.engineTurnHelp')"
               >{{ t('chat.engine') }} · {{ t(`employee.engine.${message.engine}`) }}</span>
             </small>
-            <p
+            <div
               v-if="message.content"
               :class="[
-                'mt-1 max-w-none whitespace-pre-wrap border px-4 py-3.5 leading-7 text-[var(--text)] shadow-[0_10px_30px_rgba(15,23,42,0.04)]',
+                'mt-1 max-w-none border px-4 py-3.5 leading-7 text-[var(--text)] shadow-[0_10px_30px_rgba(15,23,42,0.04)]',
                 message.role === 'user'
-                  ? 'rounded-[18px_6px_18px_18px] border-[var(--accent)]/15 bg-[var(--accent-soft)]'
-                  : 'rounded-[8px_18px_18px_18px] border-[var(--border)] bg-[var(--surface)]',
+                  ? 'whitespace-pre-wrap rounded-[18px_6px_18px_18px] border-[var(--accent)]/15 bg-[var(--accent-soft)]'
+                  : 'chat-markdown rounded-[8px_18px_18px_18px] border-[var(--border)] bg-[var(--surface)]',
               ]"
             >
-              {{ message.content }}
-            </p>
+              <div v-if="message.role === 'assistant'" v-html="markdownToHtml(message.content)" />
+              <template v-else>{{ message.content }}</template>
+            </div>
             <details
               v-if="message.role === 'assistant' && message.reasoning"
               class="mt-2 overflow-hidden rounded-lg border border-[var(--border)]/80 bg-[var(--surface)]/92 text-[11px] shadow-[0_4px_14px_rgba(15,23,42,0.035)]"

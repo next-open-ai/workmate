@@ -19,6 +19,7 @@ import { skillRoutes } from './modules/skills/routes.js';
 import { workspaceRoutes } from './modules/workspace/routes.js';
 import { dataRoutes, publicDataAppRoutes } from './modules/data/routes.js';
 import { chatMobileRoutes, publicChatMobileRoutes } from './modules/chat-mobile/routes.js';
+import { templateTaskRoutes } from './modules/tasks/routes.js';
 
 export async function createApp() {
   const app = Fastify({ logger: true });
@@ -44,6 +45,7 @@ export async function createApp() {
     await secured.register(dataRoutes, { prefix: '/api' });
     await secured.register(chatMobileRoutes, { prefix: '/api' });
     await secured.register(orchestrationRoutes, { prefix: '/api/orch' });
+    await secured.register(templateTaskRoutes, { prefix: '/api' });
   });
   if (staticRoot) {
     const indexFile = path.join(staticRoot, 'index.html');

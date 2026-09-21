@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export * from './task-templates.js';
 
 export const HealthResponseSchema = z.object({
   status: z.literal('ok'),
@@ -347,3 +348,5 @@ export const ChatRequestSchema = z.object({
   engine: AgentEngineIdSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+export * from './data-schema.js';
