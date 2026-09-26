@@ -11,7 +11,7 @@ import type { ProjectDraftResult } from "../../app/project-planning.js";
 import { employeeDisplayName } from "../../app/employees.js";
 import type { ProviderConfig, ProviderId } from "../../app/model-config.js";
 import { useModelConfig } from "../../app/model-config.js";
-import { createManagedWorkspace, materializeWorkspaceAssets, syncWorkspaceRun, type ToolActivity, type ToolApproval } from "../../services/api.js";
+import { createManagedWorkspace, materializeWorkspaceAssets, mergeToolActivity, syncWorkspaceRun, type ToolActivity, type ToolApproval } from "../../services/api.js";
 import { useCapabilities } from "../../app/capabilities.js";
 import { useEmployeeRuntimePrefs } from "../../app/employee-prefs.js";
 import { useMcpConfig, isAssociableMcp } from "../../app/mcp-config.js";
@@ -479,11 +479,7 @@ function applyManagedEvent(projectId: string, event: orch.OrcEvent): void {
   } else if (event.type === "run.activity" && event.activity) {
     const transcript = ensureTaskTranscript(task);
     const activity = event.activity;
-    const existing = transcript.activities.find(
-      (item) => item.toolName === activity.toolName && item.status === "running",
-    );
-    if (existing && activity.status !== "running") Object.assign(existing, activity);
-    else transcript.activities.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
+    mergeToolActivity(transcript.activities, activity);
     const message = ensureTaskMessage(project, task);
     message.activities = [...transcript.activities];
     bumpProject();
@@ -1166,13 +1162,7 @@ async function executeTask(project: Project, task: ProjectTask) {
       },
       (activity) => {
         const current = task.transcript!;
-        const existing = current.activities.find(
-          (item) =>
-            item.toolName === activity.toolName && item.status === "running",
-        );
-        if (existing && activity.status !== "running")
-          Object.assign(existing, activity);
-        else current.activities.push(activity);
+        mergeToolActivity(current.activities, activity);
         message.activities = current.activities;
         void update(project);
       },

@@ -28,16 +28,20 @@ export function defineAgentTool<T extends TSchema>(options: {
   label?: string;
   description: string;
   parameters: T;
-  execute: (params: Static<T>, ctx: { toolCallId: string; signal?: AbortSignal }) => Promise<unknown> | unknown;
+  execute: (params: Static<T>, ctx: { toolCallId: string; signal?: AbortSignal; reportProgress: (details: unknown) => void }) => Promise<unknown> | unknown;
 }): AgentTool {
   return {
     name: options.name,
     label: options.label ?? options.name,
     description: options.description,
     parameters: options.parameters,
-    execute: async (toolCallId, params, signal) => {
+    execute: async (toolCallId, params, signal, onUpdate) => {
       try {
-        const details = await options.execute(params as Static<T>, { toolCallId, signal });
+        const details = await options.execute(params as Static<T>, {
+          toolCallId,
+          signal,
+          reportProgress: (partial) => onUpdate?.(toolTextResult(partial)),
+        });
         return toolTextResult(details);
       } catch (error) {
         return toolErrorResult(error);

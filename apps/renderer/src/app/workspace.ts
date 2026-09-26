@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { materializeWorkspaceAssets, createManagedWorkspace, streamChat, syncWorkspaceRun, type RuntimeSkill, type ToolActivity, type ToolApproval, type SearchSource } from '../services/api.js';
+import { materializeWorkspaceAssets, createManagedWorkspace, mergeToolActivity, streamChat, syncWorkspaceRun, type RuntimeSkill, type ToolActivity, type ToolApproval, type SearchSource } from '../services/api.js';
 import * as orch from '../services/orchestration.js';
 import type { ProviderConfig } from './model-config.js';
 import { toModelPayload, useModelConfig } from './model-config.js';
@@ -11,6 +11,7 @@ import { readStored, writeStored } from './storage.js';
 import { useCapabilities, type ExecutionLevel } from './capabilities.js';
 import { useAssets, type Asset } from './assets.js';
 import { useAutoScheduleConfig } from './auto-schedule-config.js';
+import { resolveAssistantTiming } from './chat-run-timing.js';
 import type { Automation } from './automations.js';
 import {
   useEmployeeCatalog,
@@ -45,6 +46,7 @@ export interface ChatScheduleState {
   selectedTaskId?: string;
 }
 export interface Message {
+  attachments?: import('@workmate/contracts').ChatImageAttachment[];
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -64,7 +66,16 @@ export interface Message {
   startedAt?: number;
   elapsedMs?: number;
 }
-export interface Conversation { id: string; title: string; employeeId: EmployeeId; messages: Message[]; updatedAt: number; serverSessionId?: string; }
+export interface Conversation {
+  id: string;
+  title: string;
+  employeeId: EmployeeId;
+  messages: Message[];
+  updatedAt: number;
+  serverSessionId?: string;
+  /** Periodic server mirror is opt-in after the user creates a mobile chat link. */
+  mobileMirrorEnabled?: boolean;
+}
 export interface ProjectTaskDraft { title: string; objective: string; employeeId: EmployeeId; skillIds: string[]; dependsOn?: number[]; contract?: { outputs?: string[]; acceptance?: string; maxSteps?: number; timeoutMs?: number; maxAttempts?: number } };
 export interface ProjectTaskTranscript {
   assistantContent: string;
@@ -131,10 +142,12 @@ function markActivitiesSettled(activities?: ToolActivity[]) {
   if (!activities?.length) return;
   for (const activity of activities) {
     if (activity.status === 'running') {
-      activity.status = 'completed';
-      if (!/完成|completed|已中止/i.test(activity.summary)) {
-        activity.summary = activity.summary ? `${activity.summary}（已完成）` : '已完成';
-      }
+      // A settled run is not proof that a tool/capability succeeded. If its
+      // terminal event was lost, presenting green "completed" is misleading.
+      activity.status = 'failed';
+      activity.summary = activity.summary
+        ? `${activity.summary} — 运行已结束，但未收到该步骤的完成结果`
+        : '运行已结束，但未收到该步骤的完成结果';
     }
   }
 }
@@ -265,7 +278,7 @@ export function useWorkspace() {
   const { archiveArtifact, archiveBundle } = useAssets();
   const { config: autoScheduleConfig, load: loadAutoScheduleConfig } = useAutoScheduleConfig();
   void loadAutoScheduleConfig();
-  const { modelForEmployee } = useModelConfig();
+  const { modelForEmployee, modelCapabilitiesForAgent } = useModelConfig();
 
   const runOptionsFor = (employeeId: EmployeeId, onlineSearch = true) => {
     const prefs = getEmployeePrefs(employeeId);
@@ -283,6 +296,7 @@ export function useWorkspace() {
         engine,
         mcpConnections: mcpRuntimePayload(prefs.mcpIds),
         knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
+        modelCapabilities: modelCapabilitiesForAgent(employeeId),
       };
     }
     const enableBuiltinSearch = prefs.searchMode === 'llm-builtin';
@@ -294,6 +308,7 @@ export function useWorkspace() {
       engine,
       mcpConnections: mcpRuntimePayload(prefs.mcpIds),
       knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
+      modelCapabilities: modelCapabilitiesForAgent(employeeId),
     };
   };
 
@@ -349,22 +364,27 @@ export function useWorkspace() {
         const failedText = run?.status === 'failed' ? `⚠ ${run.error || '回复失败'}` : '';
         const cancelledText = run?.status === 'cancelled' ? `⏹ ${run.error || '已中止'}` : '';
         const base: Message = {
+          attachments: message.attachments,
           id: message.id,
           role: message.role,
           content: message.content || liveText || failedText || cancelledText || old?.content || '',
           runId: message.runId || old?.runId,
         };
-        if (message.role === 'assistant' && old) {
-          if (old.reasoning) base.reasoning = old.reasoning;
-          if (old.schedule) base.schedule = old.schedule;
-          base.activities = old.activities ?? [];
-          base.approvals = old.approvals ?? [];
-          base.assets = old.assets ?? [];
-          base.sources = old.sources ?? [];
-          base.collaborations = old.collaborations;
-          if (old.engine) base.engine = old.engine;
-          if (old.startedAt) base.startedAt = old.startedAt;
-          if (old.elapsedMs != null) base.elapsedMs = old.elapsedMs;
+        if (message.role === 'assistant') {
+          if (old?.reasoning) base.reasoning = old.reasoning;
+          if (old?.schedule) base.schedule = old.schedule;
+          // Durable terminal activity state wins over a stale renderer copy.
+          // This prevents a locally inferred "completed" row from hiding a
+          // persisted capability failure after hydration/navigation.
+          base.activities = run?.activities?.length
+            ? run.activities.map((activity) => ({ ...activity }))
+            : old?.activities ?? [];
+          base.approvals = old?.approvals ?? [];
+          base.assets = old?.assets ?? [];
+          base.sources = old?.sources ?? [];
+          base.collaborations = old?.collaborations;
+          if (old?.engine) base.engine = old.engine;
+          Object.assign(base, resolveAssistantTiming(old, run, message.createdAt));
         }
         if (message.role === 'assistant' && run?.engine && !base.engine) base.engine = run.engine;
         return base;
@@ -445,6 +465,7 @@ export function useWorkspace() {
     const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
     const run = runs.find((item) => item.id === runId);
     if (!assistantMessage.engine && run?.engine) assistantMessage.engine = run.engine;
+    Object.assign(assistantMessage, resolveAssistantTiming(assistantMessage, run, serverAssistant?.createdAt));
     if (run?.artifacts?.length) {
       await archiveMissingArtifactsFromRuns(conversation, [assistantMessage], [run]);
     }
@@ -507,16 +528,7 @@ export function useWorkspace() {
         serverBump();
       } else if (event.type === 'run.activity' && event.activity) {
         const activity = event.activity;
-        const existing = assistantMessage.activities?.find((item) => item.toolName === activity.toolName && item.status === 'running');
-        if (existing && activity.status !== 'running') {
-          // Preserve the richer started summary (command/args); only settle status.
-          existing.status = activity.status;
-          if (activity.status === 'failed' && activity.summary && !existing.summary.includes(activity.summary)) {
-            existing.summary = `${existing.summary} — ${activity.summary}`;
-          }
-        } else {
-          assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
-        }
+        mergeToolActivity(assistantMessage.activities ??= [], activity);
         serverBump();
       } else if (event.type === 'run.approval' && event.approval) {
         const approval = event.approval;
@@ -588,6 +600,7 @@ export function useWorkspace() {
         searchProviders: opts.searchProviders,
         mcpConnections: opts.mcpConnections,
         knowledgeBases: opts.knowledgeBases,
+        modelCapabilities: opts.modelCapabilities,
         maxSteps: opts.maxSteps,
         runTimeoutMs: opts.runTimeoutMs,
         mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
@@ -600,6 +613,7 @@ export function useWorkspace() {
       }
       const result = await orch.sendChatMessage(sessionId, {
         content: text,
+        attachments: userMessage.attachments,
         employeeId: conversation.employeeId,
         context,
       });
@@ -684,7 +698,7 @@ export function useWorkspace() {
   ): Promise<void> {
     const deadline = Date.now() + 12 * 60_000;
     const STREAM_IDLE_MS = 120_000;
-    const POLL_MS_SSE_LIVE = 2_500;
+    const POLL_MS_SSE_LIVE = 15_000;
     const POLL_MS_FALLBACK = 800;
     let lastFingerprint = '';
     let lastProgressAt = Date.now();
@@ -781,44 +795,7 @@ export function useWorkspace() {
         if (run?.activities?.length) {
           let activitiesChanged = false;
           for (const activity of run.activities) {
-            if (activity.status === 'running') {
-              // Prefer in-place update of an open row; ignore stale running rows from older storage.
-              const existingRunning = assistantMessage.activities?.find(
-                (item) => item.toolName === activity.toolName && item.status === 'running',
-              );
-              if (existingRunning) {
-                if (existingRunning.summary !== activity.summary) {
-                  existingRunning.summary = activity.summary;
-                  activitiesChanged = true;
-                }
-                continue;
-              }
-              const alreadyDone = assistantMessage.activities?.some(
-                (item) => item.toolName === activity.toolName && item.status !== 'running'
-                  && (item.summary === activity.summary || item.summary.startsWith(activity.toolName)),
-              );
-              if (alreadyDone) continue;
-              assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
-              activitiesChanged = true;
-              continue;
-            }
-            const existing = assistantMessage.activities?.find(
-              (item) => item.toolName === activity.toolName && item.status === 'running',
-            );
-            if (existing) {
-              existing.status = activity.status;
-              // Do not clobber started summary with generic "bash completed".
-              if (activity.status === 'failed' && activity.summary && !existing.summary.includes(activity.summary)) {
-                existing.summary = `${existing.summary} — ${activity.summary}`;
-              }
-              activitiesChanged = true;
-              continue;
-            }
-            const duplicate = assistantMessage.activities?.find(
-              (item) => item.toolName === activity.toolName && item.summary === activity.summary && item.status === activity.status,
-            );
-            if (duplicate) continue;
-            assistantMessage.activities?.push({ toolName: activity.toolName, summary: activity.summary, status: activity.status });
+            mergeToolActivity(assistantMessage.activities ??= [], activity);
             activitiesChanged = true;
           }
           if (activitiesChanged) serverBump();
@@ -1036,8 +1013,13 @@ export function useWorkspace() {
       void writeStored('workspace.default-employee', currentEmployeeId.value);
     }
   };
-  const addMessage = async (content: string, model: ProviderConfig, options: { employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
+  const addMessage = async (content: string, model: ProviderConfig, options: { attachments?: import('@workmate/contracts').ChatImageAttachment[]; employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
     const text = content.trim(); if (!text) return undefined;
+    const hasImages = Boolean(options.attachments?.length || activeConversation.value?.messages.some((message) => message.attachments?.length));
+    if (hasImages && (options.autoSchedule || options.collaboratorIds?.length)) throw new Error('含图片的会话暂只支持单员工对话，请关闭自动调度并移除协作者。');
+    const effectiveModel = modelForEmployee(options.employeeId ?? activeConversation.value?.employeeId ?? currentEmployeeId.value, model) ?? model;
+    const visionService = modelCapabilitiesForAgent(options.employeeId ?? activeConversation.value?.employeeId ?? currentEmployeeId.value).find((item) => item.capability === 'vision');
+    if (hasImages && !effectiveModel.supportsVision && !visionService) throw new Error('请使用视觉主模型，或绑定“图片理解”应用模型并为员工开启该能力。');
     chatBusy.value = true;
     try {
     if (options.employeeId) currentEmployeeId.value = options.employeeId;
@@ -1047,7 +1029,7 @@ export function useWorkspace() {
       conversation = { id: crypto.randomUUID(), title: text.slice(0, 28), employeeId: currentEmployeeId.value, messages: [], updatedAt: Date.now() };
       conversations.value.unshift(conversation); activeConversationId.value = conversation.id;
     }
-    conversation.messages.push({ id: crypto.randomUUID(), role: 'user', content: text });
+    conversation.messages.push({ id: crypto.randomUUID(), role: 'user', content: text, attachments: options.attachments });
     const userMessage = conversation.messages[conversation.messages.length - 1];
     conversation.updatedAt = Date.now();
     conversations.value = [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -1219,6 +1201,7 @@ export function useWorkspace() {
               // slow boot and distract the agent (e.g. mcp filesystem vs dsh write).
               mcpConnections: opts.engine === 'dsh' ? [] : opts.mcpConnections,
               knowledgeBases: opts.knowledgeBases,
+              modelCapabilities: opts.modelCapabilities,
               maxSteps: opts.maxSteps,
               runTimeoutMs: opts.runTimeoutMs,
               mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
@@ -1232,9 +1215,7 @@ export function useWorkspace() {
               task.summary += chunk;
               bump();
             }, (activity) => {
-              const existing = task.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
-              if (existing && activity.status !== 'running') Object.assign(existing, activity);
-              else task.activities.push(activity);
+              mergeToolActivity(task.activities, activity);
               bump();
             }, (approval) => {
               if (!assistantMessage.approvals?.some((item) => item.skillId === approval.skillId && item.capability === approval.capability)) {
@@ -1422,7 +1403,7 @@ export function useWorkspace() {
     }
 
     const plannedCollaborators = [...new Set(options.collaboratorIds ?? [])].filter((cid) => cid !== employee.id).slice(0, 3);
-    if (serverChatActive() && !plannedCollaborators.length) {
+    if ((serverChatActive() || hasImages) && !plannedCollaborators.length) {
       // M0 server-backed turn: the orchestration server owns the run/approval
       // state machine; UI only mirrors deltas and persists the local copy.
       // Skill hydration happens once inside serverChatTurn (avoid double IO here).
@@ -1506,14 +1487,14 @@ export function useWorkspace() {
               searchProviders: primarySearch.searchProviders,
               mcpConnections: collabOpts.mcpConnections,
               knowledgeBases: collabOpts.knowledgeBases,
+              modelCapabilities: collabOpts.modelCapabilities,
               maxSteps: collabOpts.maxSteps,
               runTimeoutMs: collabOpts.runTimeoutMs,
               mcpToolTimeoutMs: collabOpts.mcpToolTimeoutMs,
               ...(collabOpts.engine ? { engine: collabOpts.engine } : {}),
               signal: runAbort.signal,
             }, (delta) => { run.summary += delta; conversations.value = [...conversations.value]; }, (activity) => {
-              const existing = run.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
-              if (existing && activity.status !== 'running') Object.assign(existing, activity); else run.activities.push(activity);
+              mergeToolActivity(run.activities, activity);
               conversations.value = [...conversations.value];
             });
             run.status = 'completed';
@@ -1565,14 +1546,13 @@ export function useWorkspace() {
         searchProviders: primarySearch.searchProviders,
         mcpConnections: primarySearch.mcpConnections,
         knowledgeBases: primarySearch.knowledgeBases,
+        modelCapabilities: primarySearch.modelCapabilities,
         maxSteps: primarySearch.maxSteps,
         runTimeoutMs: primarySearch.runTimeoutMs,
         mcpToolTimeoutMs: primarySearch.mcpToolTimeoutMs,
         signal: runAbort.signal,
       }, (delta: string) => { assistantMessage.content += delta; conversations.value = [...conversations.value]; }, (activity) => {
-        const existing = assistantMessage.activities?.find((item) => item.toolName === activity.toolName && item.status === 'running');
-        if (existing && activity.status !== 'running') Object.assign(existing, activity);
-        else assistantMessage.activities?.push(activity);
+        mergeToolActivity(assistantMessage.activities ??= [], activity);
         conversations.value = [...conversations.value];
       }, (approval) => { if (!assistantMessage.approvals?.some((item) => item.skillId === approval.skillId && item.capability === approval.capability)) assistantMessage.approvals?.push(approval); conversations.value = [...conversations.value]; }, async (artifact) => {
         const normalized = artifact.path.replace(/\\/g, '/').replace(/^\/+/, '');
@@ -1673,14 +1653,14 @@ export function useWorkspace() {
       searchProviders: opts.searchProviders,
       mcpConnections: opts.mcpConnections,
       knowledgeBases: opts.knowledgeBases,
+      modelCapabilities: opts.modelCapabilities,
       projectWorkspacePath: input.workspacePath,
       maxSteps: opts.maxSteps,
       runTimeoutMs: opts.runTimeoutMs,
       mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
       ...(opts.engine ? { engine: opts.engine } : {}),
     }, (delta) => { transcript.assistantContent += delta; onDelta?.(delta); }, (activity) => {
-      const existing = transcript.activities.find((item) => item.toolName === activity.toolName && item.status === 'running');
-      if (existing && activity.status !== 'running') Object.assign(existing, activity); else transcript.activities.push(activity);
+      mergeToolActivity(transcript.activities, activity);
       onActivity?.(activity);
     }, (approval) => { if (!transcript.approvals.some((item) => item.skillId === approval.skillId && item.capability === approval.capability)) transcript.approvals.push(approval); }, async (artifact) => {
       transcript.runId = artifact.runId;
@@ -1961,8 +1941,12 @@ dependsOn are 0-based indices of prior tasks. Goal: ${goal}`;
     }
   };
   async function ensureActiveServerSession(): Promise<string | null> {
-    const conversation = activeConversation.value;
-    if (!conversation) return null;
+    let conversation = activeConversation.value;
+    if (!conversation) {
+      conversation = { id: crypto.randomUUID(), title: '新对话', employeeId: currentEmployeeId.value, messages: [], updatedAt: Date.now() };
+      conversations.value.unshift(conversation);
+      activeConversationId.value = conversation.id;
+    }
     return ensureServerSession(conversation, conversation.title || '手机对话');
   }
 

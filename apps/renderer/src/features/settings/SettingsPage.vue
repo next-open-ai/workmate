@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n, localeOptions, type Locale } from '../../app/i18n';
 import { themeOptions, type ThemePreference, useTheme } from '../../app/theme';
-import { useModelConfig, type ModelSettings } from '../../app/model-config';
+import { applyRecommendedProviderSetup, useModelConfig, type ModelSettings, type ProviderInstance } from '../../app/model-config';
 import type { Employee, EmployeeId } from '../../app/workspace';
 import type { AuthUser } from '../../services/auth';
 import { employeeDisplayName } from '../../app/employees';
@@ -56,6 +56,7 @@ const {
 } = useKnowledgeConfig();
 const notify = useNotify();
 const dirty = ref(false);
+const autoConfigSummary = ref('');
 const {
   config: autoScheduleStored,
   load: loadAutoScheduleConfig,
@@ -177,6 +178,32 @@ function onDirty() {
   dirty.value = true;
 }
 
+function providerRuntimeFingerprint(instance: ProviderInstance | undefined) {
+  if (!instance) return '';
+  return JSON.stringify({
+    type: instance.type,
+    baseUrl: instance.baseUrl.trim(),
+    workspaceId: instance.workspaceId?.trim() || '',
+    appId: instance.appId?.trim() || '',
+    apiKey: instance.apiKey,
+    apiSecret: instance.apiSecret || '',
+    disableThinking: instance.disableThinking,
+  });
+}
+
+function updateProviderInstances(next: ProviderInstance[]) {
+  const previous = new Map(settings.value.providerInstances.map((item) => [item.id, providerRuntimeFingerprint(item)]));
+  const changed = new Set(next
+    .filter((item) => previous.has(item.id) && previous.get(item.id) !== providerRuntimeFingerprint(item))
+    .map((item) => item.id));
+  settings.value.providerInstances = next;
+  if (changed.size) {
+    settings.value.models = settings.value.models.map((model) => changed.has(model.providerInstanceId)
+      ? { ...model, health: undefined }
+      : model);
+  }
+}
+
 async function saveModelConfig() {
   try {
     const next: ModelSettings = JSON.parse(JSON.stringify(settings.value));
@@ -194,6 +221,24 @@ async function saveModelConfig() {
     await save(next);
     dirty.value = false;
     notify.success('notify.saved');
+  } catch (cause) {
+    notify.error(cause, 'notify.saveFailed');
+  }
+}
+
+async function autoConfigureProvider(instance: ProviderInstance) {
+  try {
+    const result = applyRecommendedProviderSetup(settings.value, instance, [props.defaultEmployeeId]);
+    if (result.manualRequired) {
+      autoConfigSummary.value = t('settings.providerAutoManualRequired');
+      tab.value = 'models';
+      return;
+    }
+    await save(result.settings);
+    dirty.value = false;
+    const capabilities = result.configured.map((item) => t(`settings.capability.${item}`)).join('、');
+    autoConfigSummary.value = t('settings.providerAutoConfigured', { count: result.addedModels, capabilities });
+    notify.success('notify.saved', autoConfigSummary.value);
   } catch (cause) {
     notify.error(cause, 'notify.saveFailed');
   }
@@ -457,9 +502,17 @@ function handleDefaultEmployeeChange(event: Event) {
       <div class="mt-6">
         <ProviderInstancesEditor
           :instances="settings.providerInstances"
-          @update:instances="settings.providerInstances = $event"
+          :models="settings.models"
+          @update:instances="updateProviderInstances"
           @dirty="onDirty"
+          @auto-configure="autoConfigureProvider"
+          @review-models="tab = 'models'"
         />
+      </div>
+      <div v-if="autoConfigSummary" class="mt-4 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4 text-sm">
+        <strong class="block text-emerald-700">{{ t('settings.providerAutoResultTitle') }}</strong>
+        <p class="mt-1 text-xs leading-relaxed text-[var(--muted)]">{{ autoConfigSummary }} {{ t('settings.providerAutoFirstUse') }}</p>
+        <button class="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold" type="button" @click="tab = 'models'">{{ t('settings.providerAutoReview') }}</button>
       </div>
       <div class="mt-6 flex items-center justify-between gap-3">
         <span class="text-[13px] text-[var(--muted)]">{{ dirty ? t('settings.saveHint') : t('settings.tabProvidersHint') }}</span>
@@ -476,9 +529,12 @@ function handleDefaultEmployeeChange(event: Event) {
           :models="settings.models"
           :active-chat-model-id="settings.activeChatModelId"
           :active-embedding-model-id="settings.activeEmbeddingModelId"
+          :capability-bindings="settings.capabilityBindings"
           @update:models="settings.models = $event"
           @update:active-chat-model-id="settings.activeChatModelId = $event"
           @update:active-embedding-model-id="settings.activeEmbeddingModelId = $event"
+          @update:capability-bindings="settings.capabilityBindings = $event"
+          @configure-provider="tab = 'providers'"
           @dirty="onDirty"
         />
       </div>

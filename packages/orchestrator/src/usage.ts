@@ -26,6 +26,7 @@ export function emptyRunUsage(): RunUsage {
     reasoningTokens: 0,
     totalTokens: 0,
     steps: [],
+    byModel: [],
   };
 }
 
@@ -47,8 +48,9 @@ export function applyUsageEvent(
   run: RunRecord,
   usage: TokenUsage,
   model?: RunModelRef,
+  capability?: import('@workmate/contracts').ModelCapability,
 ): void {
-  if (model) {
+  if (model && !run.model) {
     run.model = {
       provider: model.provider,
       chatModel: model.chatModel,
@@ -65,6 +67,8 @@ export function applyUsageEvent(
     ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
     ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
     ...(usage.reasoningTokens ? { reasoningTokens: usage.reasoningTokens } : {}),
+    ...(model ? { model: { ...model } } : {}),
+    ...(capability ? { capability } : {}),
   };
   bucket.steps.push(step);
   if (bucket.steps.length > MAX_USAGE_STEPS) {
@@ -76,6 +80,26 @@ export function applyUsageEvent(
   bucket.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
   bucket.reasoningTokens += usage.reasoningTokens ?? 0;
   bucket.totalTokens += usage.totalTokens;
+  const attributedModel = model ?? run.model;
+  if (attributedModel) {
+    const key = modelKey(attributedModel, capability);
+    const models = bucket.byModel ??= [];
+    let row = models.find((item) => modelKey(item, item.capability) === key);
+    if (!row) {
+      row = {
+        ...attributedModel,
+        ...(capability ? { capability } : {}),
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 0,
+      };
+      models.push(row);
+    }
+    row.inputTokens += usage.inputTokens;
+    row.outputTokens += usage.outputTokens;
+    row.cacheReadTokens += usage.cacheReadTokens ?? 0;
+    row.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+    row.reasoningTokens += usage.reasoningTokens ?? 0;
+    row.totalTokens += usage.totalTokens;
+  }
   run.usage = bucket;
 }
 
@@ -97,6 +121,7 @@ export interface UsageStats {
     baseUrl?: string;
     providerLabel?: string;
     key: string;
+    capability?: import('@workmate/contracts').ModelCapability;
   }>;
   byProject: Array<UsageBucketTotals & { projectId: string; name: string }>;
   byChat: Array<UsageBucketTotals & { sessionId: string; title: string }>;
@@ -190,9 +215,9 @@ function addRunToTotals(target: UsageBucketTotals, run: RunRecord) {
   return true;
 }
 
-function modelKey(model: RunModelInfo | undefined): string {
+function modelKey(model: RunModelInfo | undefined, capability?: import('@workmate/contracts').ModelCapability): string {
   if (!model) return 'unknown';
-  return [model.provider, model.chatModel, model.baseUrl || '', model.providerLabel || ''].join('|');
+  return [model.provider, model.chatModel, model.baseUrl || '', model.providerLabel || '', capability || 'chat'].join('|');
 }
 
 function sortByTotal<T extends UsageBucketTotals>(rows: T[]) {
@@ -266,6 +291,7 @@ function mergeModelRows(
       bucket = { ...emptyTotals(), key: row.key, provider: row.provider, chatModel: row.chatModel };
       if (row.baseUrl) bucket.baseUrl = row.baseUrl;
       if (row.providerLabel) bucket.providerLabel = row.providerLabel;
+      if (row.capability) bucket.capability = row.capability;
       into.set(row.key, bucket);
     }
     addTotals(bucket, row);
@@ -317,20 +343,32 @@ function contributeRun(
 ) {
   if (!addRunToTotals(totals, run)) return;
 
-  const key = modelKey(run.model);
-  let modelBucket = modelMap.get(key);
-  if (!modelBucket) {
-    modelBucket = {
-      ...emptyTotals(),
-      key,
-      provider: run.model?.provider || 'unknown',
-      chatModel: run.model?.chatModel || 'unknown',
-      ...(run.model?.baseUrl ? { baseUrl: run.model.baseUrl } : {}),
-      ...(run.model?.providerLabel ? { providerLabel: run.model.providerLabel } : {}),
-    };
-    modelMap.set(key, modelBucket);
+  const attributed = run.usage?.byModel?.length ? run.usage.byModel : [{
+    ...(run.model ?? { provider: 'unknown', chatModel: 'unknown' }),
+    inputTokens: run.usage!.inputTokens, outputTokens: run.usage!.outputTokens,
+    cacheReadTokens: run.usage!.cacheReadTokens, cacheWriteTokens: run.usage!.cacheWriteTokens,
+    reasoningTokens: run.usage!.reasoningTokens, totalTokens: run.usage!.totalTokens,
+  }];
+  for (const item of attributed) {
+    const key = modelKey(item, item.capability);
+    let modelBucket = modelMap.get(key);
+    if (!modelBucket) {
+      modelBucket = {
+        ...emptyTotals(), key, provider: item.provider, chatModel: item.chatModel,
+        ...(item.baseUrl ? { baseUrl: item.baseUrl } : {}),
+        ...(item.providerLabel ? { providerLabel: item.providerLabel } : {}),
+        ...(item.capability ? { capability: item.capability } : {}),
+      };
+      modelMap.set(key, modelBucket);
+    }
+    modelBucket.inputTokens += item.inputTokens;
+    modelBucket.outputTokens += item.outputTokens;
+    modelBucket.cacheReadTokens += item.cacheReadTokens;
+    modelBucket.cacheWriteTokens += item.cacheWriteTokens;
+    modelBucket.reasoningTokens += item.reasoningTokens;
+    modelBucket.totalTokens += item.totalTokens;
+    modelBucket.runCount += 1;
   }
-  addRunToTotals(modelBucket, run);
 
   if (run.kind === 'project-task') {
     let projectBucket = projectMap.get(run.sessionId);

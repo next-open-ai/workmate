@@ -4,6 +4,8 @@ import { extractToolDetails, type AgentTool } from '../pi-tools.js';
 import { executeAgentscopeCapabilityCalls } from '../agentscope-capability-adapter.js';
 import { createPreviewServerTools } from '../preview-server.js';
 import { resolveAgentWorkspaceRoot, resolveWorkspaceMode } from '../workspace-mode.js';
+import { createModelCapabilityTools, MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
+import { createUnifiedToolSession, registrationsFromTools } from '../unified-tool-runtime.js';
 
 export type HostToolCall = {
   id: string;
@@ -145,35 +147,57 @@ async function executeTool(call: HostToolCall, tool: AgentTool): Promise<HostToo
 }
 
 export async function prepareAgentscopeHostTools(
-  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath' | 'conversationId'>,
+  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath' | 'conversationId' | 'modelCapabilities'> & { runId: string },
 ): Promise<AgentscopeHostToolSession> {
   const mcp = await loadMcpToolset(request.mcpConnections, { toolTimeoutMs: request.mcpToolTimeoutMs });
-  const mcpByName = new Map<string, AgentTool>(mcp.tools.map((tool) => [tool.name, tool]));
+  const workspaceRoot = resolveAgentWorkspaceRoot({ runId: request.runId, projectWorkspacePath: request.projectWorkspacePath });
+  const modelCapabilityTools = createModelCapabilityTools({
+    configs: request.modelCapabilities,
+    workspaceRoot,
+  });
+  const unified = createUnifiedToolSession([
+    ...registrationsFromTools(mcp.tools, { category: 'mcp' }),
+    ...registrationsFromTools(modelCapabilityTools, { category: 'model-capability', capabilities: MODEL_CAPABILITY_BY_TOOL }),
+  ]);
+  const unifiedDescriptors: HostedMcpToolDescriptor[] = unified.descriptors.map((item) => ({
+    name: item.name,
+    description: item.description,
+    inputSchema: item.inputSchema,
+    ...(item.category === 'mcp' || item.category === 'model-capability' ? { capability: 'network-access' as const } : {}),
+  }));
+  const unifiedNames = new Set(unified.descriptors.map((item) => item.id));
   return {
     runtimePatch: {
-      ...(mcp.toolDescriptors.length ? { mcpTools: mcp.toolDescriptors } : {}),
-      ...(mcp.instructions ? { mcpInstructions: mcp.instructions } : {}),
+      ...(unifiedDescriptors.length ? { mcpTools: unifiedDescriptors } : {}),
+      ...((mcp.instructions || modelCapabilityTools.length) ? {
+        mcpInstructions: [
+          mcp.instructions,
+          modelCapabilityTools.length ? 'Authorized application-model tools are host-provided. Use only when the task matches their descriptions.' : '',
+        ].filter(Boolean).join('\n\n'),
+      } : {}),
     },
     executeHostToolCalls: async (runId, toolCalls) => {
       const baseCalls: HostToolCall[] = [];
       const results: HostToolResult[] = [];
       for (const call of toolCalls) {
-        const tool = mcpByName.get(call.name);
-        if (!tool) {
-          baseCalls.push(call);
-          continue;
-        }
-        try {
-          results.push(await executeTool(call, tool));
-        } catch (error) {
+        if (unifiedNames.has(call.name)) {
+          const result = await unified.invoke({
+            version: 1,
+            invocationId: call.id,
+            runId,
+            toolId: call.name,
+            input: call.input ?? {},
+          });
           results.push({
             id: call.id,
             name: call.name,
-            state: 'error',
-            output: JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }),
-            summary: `${call.name} MCP error`,
+            state: result.status === 'succeeded' ? 'success' : 'error',
+            output: JSON.stringify(result.output ?? { ok: false, error: result.error?.message }),
+            summary: `${call.name} via unified tool runtime`,
           });
+          continue;
         }
+        baseCalls.push(call);
       }
       if (baseCalls.length) {
         results.push(...await executeHostToolCalls(

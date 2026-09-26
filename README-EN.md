@@ -49,7 +49,7 @@ gateway child ------ HTTP / SSE -------^   (Telegram / Feishu / remote relay)
 | `packages/tools` | Tool contracts and risk metadata |
 | `packages/storage`, `packages/ui-kit` | Reserved placeholders |
 
-See [docs/design/architecture.md](docs/design/architecture.md) for the current canonical architecture.
+See [docs/architecture/architecture.md](docs/architecture/architecture.md) for the current canonical architecture.
 
 ## Quick start
 
@@ -102,7 +102,7 @@ Workmate currently supports four practical runtime shapes:
 | npm / CLI | `workmate start` | Supported | Same runtime shape as the web launcher |
 | Docker | `deploy/docker/workmate/` | Build-supported | Images exist and are documented; parity is still evolving |
 
-The detailed parity matrix lives in [docs/runtime-modes.md](docs/runtime-modes.md).
+The detailed parity matrix lives in [docs/guides/runtime-modes.md](docs/guides/runtime-modes.md).
 
 ## Architecture reality
 
@@ -116,11 +116,11 @@ These points matter most if you are evaluating the current implementation:
 
 Relevant docs:
 
-- [docs/design/execution-backend.md](docs/design/execution-backend.md)
-- [docs/design/dsh-sidecar.md](docs/design/dsh-sidecar.md)
-- [docs/design/agentscope-abi.md](docs/design/agentscope-abi.md)
-- [docs/design/embedding-local-sidecar-architecture.md](docs/design/embedding-local-sidecar-architecture.md)
-- [docs/design/embedding-local-sidecar-implementation-plan.md](docs/design/embedding-local-sidecar-implementation-plan.md)
+- [docs/architecture/execution-backend.md](docs/architecture/execution-backend.md)
+- [docs/architecture/dsh-sidecar.md](docs/architecture/dsh-sidecar.md)
+- [docs/architecture/agentscope-abi.md](docs/architecture/agentscope-abi.md)
+- [docs/architecture/embedding-local-sidecar-architecture.md](docs/architecture/embedding-local-sidecar-architecture.md)
+- [docs/architecture/embedding-local-sidecar-implementation-plan.md](docs/architecture/embedding-local-sidecar-implementation-plan.md)
 
 ## Release
 
@@ -139,14 +139,20 @@ Intel macOS and Linux packaging remain disabled in CI for now; see comments in `
 
 | Topic | Entry |
 | --- | --- |
-| Canonical architecture | [docs/design/architecture.md](docs/design/architecture.md) |
-| Design index and status | [docs/design/README.md](docs/design/README.md) |
-| Runtime shapes | [docs/runtime-modes.md](docs/runtime-modes.md) |
-| Execution backend abstraction | [docs/design/execution-backend.md](docs/design/execution-backend.md) |
-| Concurrency runtime | [docs/design/concurrency-runtime.md](docs/design/concurrency-runtime.md) |
-| Concurrency verification | [docs/design/concurrency-verification.md](docs/design/concurrency-verification.md) |
-| Gateway milestones | [M0](docs/design/gateway-m0.md) · [M0 acceptance](docs/design/gateway-m0-acceptance.md) · [M1](docs/design/gateway-m1.md) · [M2](docs/design/gateway-m2.md) |
-| Early historical specs | `docs/sdd/*` |
+| Documentation center | [docs/README.md](docs/README.md) |
+| Product and requirements | [docs/product/README.md](docs/product/README.md) |
+| Project planning | [docs/planning/README.md](docs/planning/README.md) |
+| Testing and release acceptance | [docs/quality/README.md](docs/quality/README.md) |
+| Platform benchmarks | [docs/benchmarks/README.md](docs/benchmarks/README.md) |
+| Canonical architecture | [docs/architecture/architecture.md](docs/architecture/architecture.md) |
+| Architecture center | [docs/architecture/README.md](docs/architecture/README.md) |
+| Architecture decisions | [docs/architecture/adr/README.md](docs/architecture/adr/README.md) |
+| Runtime shapes | [docs/guides/runtime-modes.md](docs/guides/runtime-modes.md) |
+| Execution backend abstraction | [docs/architecture/execution-backend.md](docs/architecture/execution-backend.md) |
+| Concurrency runtime | [docs/architecture/concurrency-runtime.md](docs/architecture/concurrency-runtime.md) |
+| Concurrency verification | [docs/architecture/concurrency-verification.md](docs/architecture/concurrency-verification.md) |
+| Gateway milestones | [M0](docs/architecture/gateway-m0.md) · [M0 acceptance](docs/architecture/gateway-m0-acceptance.md) · [M1](docs/architecture/gateway-m1.md) · [M2](docs/architecture/gateway-m2.md) |
+| Early historical specs | [docs/archive/legacy-global-sdd/](docs/archive/legacy-global-sdd/README.md) |
 
 ## License
 

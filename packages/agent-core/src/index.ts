@@ -12,10 +12,14 @@ export * from './context-sanitize.js';
 export * from './context-compaction.js';
 export * from './search-runtime.js';
 export * from './knowledge-runtime.js';
+export * from './ontology-runtime.js';
 export * from './experience/index.js';
 export * from './pi-model.js';
+export * from './image-input.js';
 export * from './pi-tools.js';
 export * from './capability-kernel.js';
+export * from './model-capability-runtime.js';
+export * from './unified-tool-runtime.js';
 export * from './pi-capability-adapter.js';
 export * from './preview-server.js';
 export * from './python-runtime.js';
@@ -80,3 +84,4 @@ export async function summarizeSessionMemory(input: {
 }): Promise<string | null> {
   return summarizeSessionMemoryImpl(input);
 }
+export { storeAudioInput } from './audio-input.js';

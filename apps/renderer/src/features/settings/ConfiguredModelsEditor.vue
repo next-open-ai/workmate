@@ -1,14 +1,23 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { suggestedSpeechVoices } from '@workmate/contracts';
 import { useI18n } from '../../app/i18n';
 import {
+  imageGenerationProtocols,
+  classifyCapabilityFailure,
+  effectiveProviderBaseUrl,
+  inferImageGenerationProtocol,
   modelCapabilities,
+  modelLikelySupportsCapability,
+  modelHealthIsStale,
   providerCanBuiltinWebSearch,
   providerInstanceReady,
   providerSuggestedByCapability,
   providerSupportsOpenAiModelList,
   uniqueModels,
   type ConfiguredModel,
+  type ImageGenerationProtocol,
+  type CapabilityBinding,
   type ModelCapability,
   type ProviderInstance,
 } from '../../app/model-config';
@@ -20,12 +29,15 @@ const props = defineProps<{
   models: ConfiguredModel[];
   activeChatModelId: string | null;
   activeEmbeddingModelId: string | null;
+  capabilityBindings: CapabilityBinding[];
 }>();
 
 const emit = defineEmits<{
   'update:models': [value: ConfiguredModel[]];
   'update:activeChatModelId': [value: string | null];
   'update:activeEmbeddingModelId': [value: string | null];
+  'update:capabilityBindings': [value: CapabilityBinding[]];
+  'configure-provider': [providerId: string];
   dirty: [];
 }>();
 
@@ -35,13 +47,18 @@ const notify = useNotify();
 const draftProviderId = ref('');
 const draftCapability = ref<ModelCapability>('chat');
 const draftModelId = ref('');
+const draftImageProtocol = ref<ImageGenerationProtocol | ''>('');
 const pickerOpen = ref(false);
 const remoteModels = ref<string[]>([]);
 const remoteLoading = ref(false);
 const remoteError = ref('');
 const search = ref('');
+const showAllRemoteModels = ref(false);
 const testingEmbeddingId = ref('');
 const embeddingTestMessage = ref<Record<string, { ok: boolean; text: string }>>({});
+function boundModelId(capability: ModelCapability) {
+  return props.capabilityBindings.find((item) => item.capability === capability && item.enabled)?.modelId ?? null;
+}
 
 const instanceById = computed(() => Object.fromEntries(props.instances.map((item) => [item.id, item])));
 const readyInstances = computed(() => props.instances.filter((item) => providerInstanceReady(item)));
@@ -53,14 +70,25 @@ const visibleModels = computed(() =>
 );
 
 const draftInstance = computed(() => readyInstances.value.find((item) => item.id === draftProviderId.value) ?? null);
+const draftCapabilities = computed<ModelCapability[]>(() => {
+  const type = draftInstance.value?.type;
+  return type === 'volcengine' || type === 'iflytek' ? ['asr', 'tts'] : modelCapabilities;
+});
 
-const suggestions = computed(() => {
+const recommendedModels = computed(() => {
   const instance = draftInstance.value;
   if (!instance) return [] as string[];
   const catalog = providerSuggestedByCapability[instance.type]?.[draftCapability.value] ?? [];
-  const remote = draftCapability.value === 'chat' ? remoteModels.value : [];
   const q = search.value.trim().toLowerCase();
-  return uniqueModels([...remote, ...catalog]).filter((item) => !q || item.toLowerCase().includes(q));
+  return uniqueModels(catalog).filter((item) => !q || item.toLowerCase().includes(q));
+});
+const catalogModels = computed(() => {
+  const recommended = new Set(providerSuggestedByCapability[draftInstance.value?.type ?? 'openai-compatible']?.[draftCapability.value] ?? []);
+  const q = search.value.trim().toLowerCase();
+  return uniqueModels(remoteModels.value)
+    .filter((item) => !recommended.has(item))
+    .filter((item) => showAllRemoteModels.value || modelLikelySupportsCapability(item, draftCapability.value))
+    .filter((item) => !q || item.toLowerCase().includes(q));
 });
 
 watch(
@@ -72,6 +100,13 @@ watch(
   },
   { immediate: true },
 );
+
+watch(draftProviderId, () => {
+  if (!draftCapabilities.value.includes(draftCapability.value)) draftCapability.value = draftCapabilities.value[0] ?? 'chat';
+  draftImageProtocol.value = '';
+  showAllRemoteModels.value = false;
+});
+watch(draftCapability, () => { draftImageProtocol.value = ''; showAllRemoteModels.value = false; });
 
 function emitModels(
   next: ConfiguredModel[],
@@ -86,6 +121,10 @@ function emitModels(
 
 function capabilityLabel(capability: ModelCapability) {
   return t(`settings.capability.${capability}`);
+}
+
+function imageProtocolLabel(protocol: ImageGenerationProtocol) {
+  return t(`settings.imageProtocol.${protocol}`);
 }
 
 function addModel(modelId: string, makeDefault = true) {
@@ -104,6 +143,7 @@ function addModel(modelId: string, makeDefault = true) {
     providerInstanceId: instance.id,
     capability: draftCapability.value,
     modelId: trimmed,
+    imageProtocol: draftCapability.value === 'image' && draftImageProtocol.value ? draftImageProtocol.value : undefined,
     supportsBuiltinWebSearch: draftCapability.value === 'chat' && instance.type === 'qwen' ? true : undefined,
   };
   const next = [...props.models, entry];
@@ -123,10 +163,13 @@ function removeModel(id: string) {
     ? next.find((item) => item.capability === 'embedding')?.id ?? null
     : props.activeEmbeddingModelId;
   emitModels(next, activeChatId, activeEmbeddingId);
+  if (props.capabilityBindings.some((item) => item.modelId === id)) {
+    emit('update:capabilityBindings', props.capabilityBindings.filter((item) => item.modelId !== id));
+  }
 }
 
 function patchModel(id: string, patchValue: Partial<ConfiguredModel>) {
-  emitModels(props.models.map((item) => (item.id === id ? { ...item, ...patchValue } : item)));
+  emitModels(props.models.map((item) => (item.id === id ? { ...item, health: undefined, ...patchValue } : item)));
 }
 
 function patchEmbeddingMeta(
@@ -153,6 +196,16 @@ function setDefaultChat(id: string) {
 
 function setDefaultEmbedding(id: string) {
   emit('update:activeEmbeddingModelId', id);
+  const next = props.capabilityBindings.filter((item) => item.capability !== 'embedding');
+  next.push({ capability: 'embedding', modelId: id, enabled: true, updatedAt: new Date().toISOString() });
+  emit('update:capabilityBindings', next);
+  emit('dirty');
+}
+
+function setDefaultCapability(capability: ModelCapability, id: string) {
+  const next = props.capabilityBindings.filter((item) => item.capability !== capability);
+  next.push({ capability, modelId: id, enabled: true, updatedAt: new Date().toISOString() });
+  emit('update:capabilityBindings', next);
   emit('dirty');
 }
 
@@ -168,6 +221,10 @@ function toggleBuiltinWebSearch(model: ConfiguredModel, enabled: boolean) {
   );
 }
 
+function toggleVision(model: ConfiguredModel, enabled: boolean) {
+  emitModels(props.models.map((item) => item.id === model.id ? { ...item, supportsVision: enabled } : item));
+}
+
 function modelSupportsBuiltinToggle(model: ConfiguredModel) {
   const instance = instanceById.value[model.providerInstanceId];
   return model.capability === 'chat' && Boolean(instance && providerCanBuiltinWebSearch(instance.type));
@@ -181,7 +238,7 @@ async function testEmbeddingModel(model: ConfiguredModel) {
   try {
     const result = await testEmbeddingConnection({
       type: instance.type,
-      baseUrl: instance.baseUrl,
+      baseUrl: effectiveProviderBaseUrl(instance),
       apiKey: instance.apiKey,
       model: model.modelId,
     });
@@ -190,7 +247,10 @@ async function testEmbeddingModel(model: ConfiguredModel) {
       ...(model.meta ?? {}),
       ...(dimension > 0 ? { dimension } : {}),
     };
-    patchModel(model.id, { meta: Object.keys(nextMeta).length ? nextMeta : undefined });
+    patchModel(model.id, {
+      meta: Object.keys(nextMeta).length ? nextMeta : undefined,
+      health: { status: 'available', checkedAt: new Date().toISOString(), summary: `${result.message} [${result.status}]` },
+    });
     embeddingTestMessage.value = {
       ...embeddingTestMessage.value,
       [model.id]: { ok: true, text: `${result.message} [${result.status}]` },
@@ -198,6 +258,7 @@ async function testEmbeddingModel(model: ConfiguredModel) {
     notify.success('notify.providerTestOk', result.message);
   } catch (cause) {
     const text = notify.errorMessage(cause);
+    patchModel(model.id, { health: { status: classifyCapabilityFailure(text), checkedAt: new Date().toISOString(), summary: text.slice(0, 500) } });
     embeddingTestMessage.value = { ...embeddingTestMessage.value, [model.id]: { ok: false, text } };
     notify.error(cause, 'notify.providerTestFailed');
   } finally {
@@ -213,6 +274,18 @@ function eventInputValue(event: Event): string {
   return String((event.target as HTMLInputElement | null)?.value ?? '');
 }
 
+function patchImageProtocol(model: ConfiguredModel, event: Event) {
+  const value = eventInputValue(event) as ImageGenerationProtocol | '';
+  if (!value || imageGenerationProtocols.includes(value)) patchModel(model.id, { imageProtocol: value || undefined });
+}
+
+function qwenImageWorkspaceMissing(model: ConfiguredModel) {
+  if (model.capability !== 'image' || !/^qwen-image-3(?:\.|-|$)/i.test(model.modelId)) return false;
+  const instance = instanceById.value[model.providerInstanceId];
+  if (!instance || instance.type !== 'qwen' || instance.workspaceId?.trim()) return false;
+  try { return new URL(instance.baseUrl).hostname.includes('dashscope'); } catch { return false; }
+}
+
 async function fetchRemoteModels() {
   const instance = draftInstance.value;
   if (!instance) return;
@@ -222,6 +295,7 @@ async function fetchRemoteModels() {
     remoteModels.value = await listProviderModels({
       type: instance.type,
       baseUrl: instance.baseUrl,
+      workspaceId: instance.workspaceId,
       apiKey: instance.apiKey,
     });
   } catch (cause) {
@@ -237,6 +311,7 @@ async function openPicker() {
   search.value = '';
   remoteError.value = '';
   remoteModels.value = [];
+  showAllRemoteModels.value = false;
   if (draftInstance.value && providerSupportsOpenAiModelList(draftInstance.value.type)) {
     await fetchRemoteModels();
   }
@@ -245,6 +320,31 @@ async function openPicker() {
 function modelRowLabel(model: ConfiguredModel) {
   const instance = instanceById.value[model.providerInstanceId];
   return `${instance?.name ?? '未知连接'} · ${model.modelId}`;
+}
+
+function modelHealthLabel(model: ConfiguredModel) {
+  if (modelHealthIsStale(model)) return t('settings.modelHealth.stale');
+  return t(`settings.modelHealth.${model.health?.status ?? 'unverified'}`);
+}
+
+function modelHealthClass(model: ConfiguredModel) {
+  if (modelHealthIsStale(model)) return 'text-amber-600';
+  if (model.health?.status === 'available') return 'text-emerald-600';
+  if (model.health?.status === 'temporarily_unavailable') return 'text-amber-600';
+  if (model.health) return 'text-rose-600';
+  return 'text-[var(--muted)]';
+}
+
+function modelHealthHelp(model: ConfiguredModel) {
+  if (modelHealthIsStale(model)) return t('settings.modelHealthHelp.stale');
+  if (model.health?.status === 'configuration_error') return t('settings.modelHealthHelp.configuration_error');
+  if (model.health?.status === 'permission_error') return t('settings.modelHealthHelp.permission_error');
+  if (model.health?.status === 'temporarily_unavailable') return t('settings.modelHealthHelp.temporarily_unavailable');
+  return '';
+}
+
+function clearModelHealth(model: ConfiguredModel) {
+  patchModel(model.id, { health: undefined });
 }
 </script>
 
@@ -281,6 +381,14 @@ function modelRowLabel(model: ConfiguredModel) {
           <div class="min-w-0">
             <p class="truncate text-sm font-medium">{{ modelRowLabel(model) }}</p>
             <p class="truncate text-[11px] text-[var(--muted)]">{{ instanceById[model.providerInstanceId]?.type }}</p>
+            <p :class="['mt-0.5 truncate text-[10px] font-semibold', modelHealthClass(model)]" :title="model.health?.summary">
+              {{ modelHealthLabel(model) }}<template v-if="model.health?.checkedAt"> · {{ new Date(model.health.checkedAt).toLocaleString() }}</template>
+            </p>
+            <p v-if="modelHealthHelp(model)" class="mt-0.5 max-w-xl text-[10px] leading-relaxed text-[var(--muted)]" :title="model.health?.summary">{{ modelHealthHelp(model) }}</p>
+            <button v-if="model.health" class="mt-1 text-[10px] font-semibold text-[var(--accent)] hover:underline" type="button" @click="clearModelHealth(model)">{{ t('settings.modelHealthClear') }}</button>
+            <label v-if="model.capability === 'chat'" class="mt-1 flex items-center gap-1.5 text-xs text-[var(--muted)]" title="仅当此模型确实支持图片输入时开启；当前仅支持 Pi 单员工对话，不会替换主模型。">
+              <input type="checkbox" :checked="Boolean(model.supportsVision)" @change="toggleVision(model, eventChecked($event))" />支持图片理解
+            </label>
           </div>
           <span class="rounded-full bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] font-bold text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
           <label v-if="modelSupportsBuiltinToggle(model)" class="flex cursor-pointer items-center gap-1.5 text-xs" :title="t('settings.builtinSearchHelp')">
@@ -300,10 +408,13 @@ function modelRowLabel(model: ConfiguredModel) {
             <input :checked="activeEmbeddingModelId === model.id" name="default-embedding-model" type="radio" @change="setDefaultEmbedding(model.id)" />
             <span class="text-[var(--muted)]">{{ t('settings.activeEmbeddingModel') }}</span>
           </label>
-          <span v-else class="text-[11px] text-[var(--muted)]">—</span>
+          <label v-else class="flex cursor-pointer items-center gap-1.5 text-xs">
+            <input :checked="boundModelId(model.capability) === model.id" :name="`default-${model.capability}-model`" type="radio" @change="setDefaultCapability(model.capability, model.id)" />
+            <span class="text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
+          </label>
           <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
         </div>
-
+        <p v-if="model.capability === 'vision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">用于主模型不能看图时的定向识别；请选择确实支持图片输入的模型，设为默认后在员工应用模型能力中开启“图片理解”。不会替换主模型。</p>
         <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-4">
           <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
             <span>Dimension</span>
@@ -357,12 +468,55 @@ function modelRowLabel(model: ConfiguredModel) {
             </p>
           </div>
         </div>
+        <div v-else-if="model.capability === 'image'" class="space-y-2 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3">
+          <div v-if="qwenImageWorkspaceMissing(model)" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <span>{{ t('settings.qwenImageWorkspaceRequired') }}</span>
+            <button class="rounded-md border border-amber-400 bg-white px-2.5 py-1.5 font-semibold" type="button" @click="emit('configure-provider', model.providerInstanceId)">
+              {{ t('settings.configureProvider') }}
+            </button>
+          </div>
+          <details>
+            <summary class="cursor-pointer text-[11px] font-semibold text-[var(--muted)]">
+              {{ t('settings.imageInvocationMode') }}：{{ model.imageProtocol ? imageProtocolLabel(model.imageProtocol) : t('settings.imageProtocolAuto') }}
+            </summary>
+            <label class="mt-2 grid gap-1.5 text-[11px] font-semibold text-[var(--muted)] sm:grid-cols-[minmax(0,1fr)_2fr] sm:items-center">
+              <span>{{ t('settings.imageProtocol') }}</span>
+              <select
+                class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs"
+                :value="model.imageProtocol ?? ''"
+                @change="patchImageProtocol(model, $event)"
+              >
+                <option value="">{{ t('settings.imageProtocolAuto') }}</option>
+                <option v-for="protocol in imageGenerationProtocols" :key="protocol" :value="protocol">{{ imageProtocolLabel(protocol) }}</option>
+              </select>
+            </label>
+            <p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+              {{ t('settings.imageProtocolResolved') }}：{{ imageProtocolLabel(inferImageGenerationProtocol(instanceById[model.providerInstanceId]?.type ?? 'openai-compatible', model.modelId)) }}。{{ t('settings.imageProtocolAdvancedHelp') }}
+            </p>
+          </details>
+        </div>
+        <div v-else-if="model.capability === 'tts'" class="border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3">
+          <label class="grid gap-1.5 text-[11px] font-semibold text-[var(--muted)] sm:grid-cols-[minmax(0,1fr)_2fr] sm:items-center">
+            <span>{{ t('settings.defaultVoice') }}</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
+              :placeholder="suggestedSpeechVoices(instanceById[model.providerInstanceId]?.type ?? '', model.modelId)[0] || t('settings.defaultVoicePlaceholder')"
+              :list="`speech-voices-${model.id}`"
+              :value="model.voice ?? ''"
+              @input="patchModel(model.id, { voice: eventInputValue($event).trim() || undefined })"
+            />
+          </label>
+          <datalist :id="`speech-voices-${model.id}`">
+            <option v-for="voice in suggestedSpeechVoices(instanceById[model.providerInstanceId]?.type ?? '', model.modelId)" :key="voice" :value="voice" />
+          </datalist>
+          <p class="mt-1.5 text-[11px] leading-relaxed text-[var(--muted)]">{{ t('settings.defaultVoiceHelp') }}</p>
+        </div>
       </div>
     </div>
     <p v-if="visibleModels.length && !activeEmbeddingModelId" class="mt-2 text-[11px] text-[var(--muted)]">
       {{ t('settings.activeEmbeddingModelHint') }}
     </p>
-    <p v-else class="text-xs text-[var(--muted)]">{{ t('settings.configuredModelsEmpty') }}</p>
+    <p v-if="!visibleModels.length" class="text-xs text-[var(--muted)]">{{ t('settings.configuredModelsEmpty') }}</p>
 
     <div v-if="pickerOpen" class="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4" @click.self="pickerOpen = false">
       <article class="flex max-h-[min(85vh,680px)] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl">
@@ -386,9 +540,20 @@ function modelRowLabel(model: ConfiguredModel) {
           <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
             <span>{{ t('settings.pickCapability') }}</span>
             <select v-model="draftCapability" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm font-normal">
-              <option v-for="capability in modelCapabilities" :key="capability" :value="capability">{{ capabilityLabel(capability) }}</option>
+              <option v-for="capability in draftCapabilities" :key="capability" :value="capability">{{ capabilityLabel(capability) }}</option>
             </select>
           </label>
+          <details v-if="draftCapability === 'image'" class="text-xs text-[var(--muted)]">
+            <summary class="cursor-pointer font-semibold">{{ t('settings.advancedConnection') }}</summary>
+            <label class="mt-2 grid gap-1.5 font-semibold">
+              <span>{{ t('settings.imageProtocol') }}</span>
+              <select v-model="draftImageProtocol" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm font-normal">
+                <option value="">{{ t('settings.imageProtocolAuto') }}</option>
+                <option v-for="protocol in imageGenerationProtocols" :key="protocol" :value="protocol">{{ imageProtocolLabel(protocol) }}</option>
+              </select>
+              <span class="font-normal leading-relaxed">{{ t('settings.imageProtocolAdvancedHelp') }}</span>
+            </label>
+          </details>
           <div class="flex flex-wrap items-center gap-2">
             <input
               v-model="search"
@@ -409,20 +574,42 @@ function modelRowLabel(model: ConfiguredModel) {
           <p v-if="remoteError" class="text-xs text-rose-600">{{ remoteError }}</p>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-3">
-          <ul v-if="suggestions.length" class="space-y-1">
-            <li v-for="name in suggestions" :key="name">
+        <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-3">
+          <section v-if="recommendedModels.length">
+            <p class="mb-2 text-[11px] font-bold uppercase tracking-[.06em] text-[var(--muted)]">{{ t('settings.recommendedModels') }}</p>
+            <ul class="space-y-1">
+            <li v-for="name in recommendedModels" :key="`recommended:${name}`">
               <button
                 class="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-sm hover:bg-[var(--surface-muted)]"
                 type="button"
                 @click="addModel(name, draftCapability === 'chat')"
               >
                 <span class="truncate font-medium">{{ name }}</span>
-                <span class="shrink-0 text-[11px] text-[var(--accent)]">{{ t('settings.chatModelAdd') }}</span>
+                <span class="shrink-0 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">{{ t('settings.recommended') }}</span>
               </button>
             </li>
-          </ul>
-          <p v-else class="py-6 text-center text-xs text-[var(--muted)]">{{ t('settings.chatModelSearchEmpty') }}</p>
+            </ul>
+          </section>
+          <section v-if="remoteModels.length">
+            <div class="mb-2 flex items-center justify-between gap-3">
+              <p class="text-[11px] font-bold uppercase tracking-[.06em] text-[var(--muted)]">{{ t('settings.providerModelCatalog') }}</p>
+              <label class="flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--muted)]">
+                <input v-model="showAllRemoteModels" type="checkbox" />
+                <span>{{ t('settings.showAllModels') }}</span>
+              </label>
+            </div>
+            <p v-if="!showAllRemoteModels" class="mb-2 text-[11px] text-[var(--muted)]">{{ t('settings.catalogFilteredHelp') }}</p>
+            <ul v-if="catalogModels.length" class="space-y-1">
+              <li v-for="name in catalogModels" :key="`catalog:${name}`">
+                <button class="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-left text-sm hover:bg-[var(--surface-muted)]" type="button" @click="addModel(name, draftCapability === 'chat')">
+                  <span class="truncate font-medium">{{ name }}</span>
+                  <span class="shrink-0 text-[11px] text-[var(--accent)]">{{ t('settings.chatModelAdd') }}</span>
+                </button>
+              </li>
+            </ul>
+            <p v-else class="py-4 text-center text-xs text-[var(--muted)]">{{ t('settings.filteredCatalogEmpty') }}</p>
+          </section>
+          <p v-if="!recommendedModels.length && !catalogModels.length" class="py-6 text-center text-xs text-[var(--muted)]">{{ t('settings.chatModelSearchEmpty') }}</p>
         </div>
 
         <footer class="border-t border-[var(--border)] px-5 py-4">

@@ -9,6 +9,8 @@ import {
   KnowledgeJobStatusRequestSchema,
   KnowledgeManageRequestSchema,
   KnowledgeSearchRequestSchema,
+  OntologyGraphRequestSchema,
+  OntologyQueryRequestSchema,
 } from '@workmate/contracts';
 import {
   createBailianKnowledgeBase,
@@ -23,6 +25,10 @@ import {
   listKnowledgeChunks,
   listKnowledgeDocuments,
   searchKnowledgeBase,
+  searchKnowledgeWithOntology,
+  planOntologyQuery,
+  writeOntologyGraph,
+  readOntologyGraph,
   updateBailianKnowledgeBase,
   updateKnowledgeBaseMeta,
 } from '@workmate/agent-core';
@@ -60,6 +66,37 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : 'Search failed.' });
     }
+  });
+
+  /** Phase-1 ontology-aware search: raw vector recall is always retained. */
+  app.post('/knowledge/hybrid-search', async (request, reply) => {
+    const parsed = KnowledgeSearchRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid hybrid search request.', issues: parsed.error.issues });
+    try {
+      return { ok: true, ...(await searchKnowledgeWithOntology(parsed.data.knowledgeBase, parsed.data.query, parsed.data.topK, parsed.data.model)) };
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : 'Hybrid search failed.' });
+    }
+  });
+
+  app.post('/knowledge/ontology/replace', async (request, reply) => {
+    const parsed = OntologyGraphRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology graph.', issues: parsed.error.issues });
+    try { return writeOntologyGraph(parsed.data.knowledgeBase, parsed.data.graph); }
+    catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ontology write failed.' }); }
+  });
+
+  app.post('/knowledge/ontology/query', async (request, reply) => {
+    const parsed = OntologyQueryRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology query.', issues: parsed.error.issues });
+    try { return { ok: true, plan: planOntologyQuery(parsed.data.knowledgeBase, parsed.data.query, parsed.data.maxHops) }; }
+    catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ontology query failed.' }); }
+  });
+
+  app.post('/knowledge/ontology/read', async (request, reply) => {
+    const parsed = OntologyQueryRequestSchema.pick({ knowledgeBase: true }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology read request.', issues: parsed.error.issues });
+    return { ok: true, graph: readOntologyGraph(parsed.data.knowledgeBase) };
   });
 
   app.post('/knowledge/bailian/pipelines', async (request, reply) => {

@@ -27,6 +27,7 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  attachments?: import('@workmate/contracts').ChatImageAttachment[];
   createdAt: number;
   /** Turn id — the user message that started the exchange. */
   turnId?: string;
@@ -89,6 +90,8 @@ export interface ChatSession {
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'waiting-approval';
 
 export interface RunActivity {
+  invocationId?: string;
+  progress?: number;
   toolName: string;
   summary: string;
   status: 'running' | 'completed' | 'failed';
@@ -139,6 +142,18 @@ export interface RunUsageStep {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
   totalTokens: number;
+  model?: RunModelInfo;
+  capability?: import('@workmate/contracts').ModelCapability;
+}
+
+export interface RunUsageModelBucket extends RunModelInfo {
+  capability?: import('@workmate/contracts').ModelCapability;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
 }
 
 /** Aggregated token usage for one execution record. */
@@ -151,6 +166,8 @@ export interface RunUsage {
   totalTokens: number;
   /** Bounded per-step breakdown (newest kept when capped). */
   steps: RunUsageStep[];
+  /** Durable per-model totals; keeps attribution accurate when old steps are trimmed. */
+  byModel?: RunUsageModelBucket[];
 }
 
 export interface RunRecord {

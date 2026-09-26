@@ -8,6 +8,8 @@
  * convention as services/api.ts.
  */
 
+import type { ChatImageAttachment } from '@workmate/contracts';
+
 const apiBase = () =>
   window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
 
@@ -49,6 +51,8 @@ export interface ServerRunApproval {
 }
 
 export interface ServerRunActivity {
+  invocationId?: string;
+  progress?: number;
   toolName: string;
   summary: string;
   status: 'running' | 'completed' | 'failed';
@@ -107,6 +111,13 @@ export interface ServerRunRecord {
       cacheWriteTokens?: number;
       reasoningTokens?: number;
       totalTokens: number;
+      model?: { provider: string; chatModel: string; baseUrl?: string; providerLabel?: string };
+      capability?: import('@workmate/contracts').ModelCapability;
+    }>;
+    byModel?: Array<{
+      provider: string; chatModel: string; baseUrl?: string; providerLabel?: string;
+      capability?: import('@workmate/contracts').ModelCapability;
+      inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; reasoningTokens: number; totalTokens: number;
     }>;
   };
   eventLog?: Array<{
@@ -136,6 +147,7 @@ export interface ServerUsageStats {
     chatModel: string;
     baseUrl?: string;
     providerLabel?: string;
+    capability?: import('@workmate/contracts').ModelCapability;
   }>;
   byProject: Array<ServerUsageBucket & { projectId: string; name: string }>;
   byChat: Array<ServerUsageBucket & { sessionId: string; title: string }>;
@@ -437,6 +449,7 @@ export async function resolveTaskApproval(input: {
  * ------------------------------------------------------------------ */
 
 export interface ServerChatMessage {
+  attachments?: ChatImageAttachment[];
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -498,8 +511,27 @@ export async function deleteChatSession(id: string): Promise<void> {
  * Send a chat message. `context` is optional: the server assembles the run
  * context for the session's employee (domain KV + keyring) when omitted.
  */
-export async function sendChatMessage(id: string, input: { content: string; employeeId?: string; context?: Record<string, unknown> }): Promise<{ runId: string; turnId: string; attemptNo: number }> {
+export async function sendChatMessage(id: string, input: { content: string; attachments?: ChatImageAttachment[]; employeeId?: string; context?: Record<string, unknown> }): Promise<{ runId: string; turnId: string; attemptNo: number }> {
   return request(`/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function uploadChatImage(sessionId: string, file: File): Promise<ChatImageAttachment> {
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('只支持 PNG、JPEG、WebP 图片。');
+  if (!file.size || file.size > 10 * 1024 * 1024) throw new Error('每张图片须小于等于 10 MB。');
+  const dataBase64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('无法读取图片。'));
+    reader.readAsDataURL(file);
+  });
+  const result = await request<{ attachment: ChatImageAttachment }>(`/sessions/${encodeURIComponent(sessionId)}/images`, { method: 'POST', body: JSON.stringify({ name: file.name, dataBase64 }) });
+  return result.attachment;
+}
+
+export async function loadChatImageUrl(sessionId: string, imageId: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${apiBase()}/api/orch/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(imageId)}`, { signal });
+  if (!response.ok) throw new Error('图片不可用，请重新上传。');
+  return URL.createObjectURL(await response.blob());
 }
 
 export async function cancelChatRun(id: string): Promise<boolean> {

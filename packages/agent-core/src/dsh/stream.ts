@@ -9,6 +9,8 @@ import { writeWorkmateDshCordis } from './cordis-compose.js';
 import { materializeWorkmateSkillsForDsh } from './skills-materialize.js';
 import { warmMcpConnections, type McpWarmResult } from '../mcp-runtime.js';
 import { openDshMcpBridges } from '../mcp-dsh-bridge.js';
+import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
+import { openUnifiedToolMcpBridge } from '../unified-tool-mcp-bridge.js';
 import { DshCapabilityAdapter } from '../dsh-capability-adapter.js';
 import {
   resolveWorkspaceMode,
@@ -143,6 +145,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
   let client: DshJsonRpcClient | null = null;
   let warm: McpWarmResult | null = null;
   let bridges: Awaited<ReturnType<typeof openDshMcpBridges>> | null = null;
+  let applicationModelBridge: Awaited<ReturnType<typeof openUnifiedToolMcpBridge>> | null = null;
   const runStartedAtMs = Date.now();
   const maxSteps = Math.min(64, Math.max(50, Math.round(Number(input.maxSteps) || 50)));
   try {
@@ -157,6 +160,10 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
       workspaceAccess: input.workspaceAccess ?? 'write',
       workspaceMode: projectBound ? 'project' : 'conversation',
     });
+    const applicationModels = createModelCapabilityToolSession({ configs: input.modelCapabilities, workspaceRoot: cwd });
+    if (applicationModels.descriptors.length) {
+      applicationModelBridge = await openUnifiedToolMcpBridge({ runId, session: applicationModels, name: 'application-models' });
+    }
     const projectFilesBefore = projectBound ? await snapshotWorkspaceFiles(cwd) : null;
     const route = mapWorkmateModelToDshRoute(input.model);
     const userText = lastUserText(input);
@@ -215,6 +222,10 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         : mcpEnabled.map((item) => item.name).slice(0, 12),
       toolLines: warm?.toolLines ?? [],
     };
+    if (applicationModelBridge) {
+      mcpCatalog.labels.push('application-models');
+      mcpCatalog.toolLines.push(...applicationModels.descriptors.map((item) => `- application-models: ${item.name}`));
+    }
 
     const warmedOk = mcpEnabled.filter((conn) => {
       if (!warm) return true;
@@ -224,7 +235,10 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
     if (warmedOk.length) {
       bridges = await openDshMcpBridges(warmedOk);
     }
-    const mcpForCordis = bridges?.cordisConnections ?? warmedOk;
+    const mcpForCordis: McpConnectionRuntime[] = [
+      ...(bridges?.cordisConnections ?? warmedOk),
+      ...(applicationModelBridge ? [applicationModelBridge.connection] : []),
+    ];
 
     const skillsRoot = materializeWorkmateSkillsForDsh(cwd, input.skills);
     const customCordis = process.env.WORKMATE_DSH_CORDIS?.trim();
@@ -297,6 +311,10 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
         return;
       }
     }
+    if (applicationModelBridge && !(await applicationModelBridge.waitUntilListed(90_000))) {
+      yield { type: 'run.failed', runId, message: '编码引擎已启动，但应用模型工具未在时限内挂载。' };
+      return;
+    }
 
     if (mcpCatalog.labels.length) {
       yield {
@@ -345,6 +363,21 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
           }
           bump();
           continue;
+        }
+        if (event.type === 'tool.started' || event.type === 'tool.completed' || event.type === 'tool.failed') {
+          const key = (Object.keys(MODEL_CAPABILITY_BY_TOOL) as Array<keyof typeof MODEL_CAPABILITY_BY_TOOL>)
+            .find((name) => event.toolName.endsWith(name));
+          const capability = key ? MODEL_CAPABILITY_BY_TOOL[key] : undefined;
+          const modelId = capability ? input.modelCapabilities?.find((item) => item.capability === capability)?.modelId : undefined;
+          if (capability && modelId) {
+            queue.push(event.type === 'tool.started'
+              ? { type: 'capability.started', runId, invocationId: event.invocationId, capability, modelId, summary: event.summary }
+              : event.type === 'tool.completed'
+                  ? { type: 'capability.completed', runId, invocationId: event.invocationId, capability, modelId, summary: event.summary, ok: event.ok }
+                  : { type: 'capability.failed', runId, invocationId: event.invocationId, capability, modelId, summary: event.summary });
+            bump();
+            continue;
+          }
         }
         if (event.type === 'tool.started'
           && event.toolName !== 'mcp.warm'
@@ -443,6 +476,7 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
     yield { type: 'run.failed', runId, message: `${message}${mcpHint}` };
   } finally {
     await client?.shutdown().catch(() => undefined);
+    await applicationModelBridge?.close().catch(() => undefined);
     await bridges?.close().catch(() => undefined);
     warm?.release();
   }

@@ -55,6 +55,35 @@ export const AgentSkillRuntimeSchema = z.object({
 });
 export type AgentSkillRuntime = z.infer<typeof AgentSkillRuntimeSchema>;
 
+export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts']);
+export type ModelCapability = z.infer<typeof ModelCapabilitySchema>;
+export const ImageGenerationProtocolSchema = z.enum([
+  'openai-images',
+  'dashscope-multimodal',
+  'dashscope-image-async',
+]);
+export type ImageGenerationProtocol = z.infer<typeof ImageGenerationProtocolSchema>;
+
+export const UnifiedToolCategorySchema = z.enum(['platform', 'mcp', 'model-capability']);
+export type UnifiedToolCategory = z.infer<typeof UnifiedToolCategorySchema>;
+export const UnifiedToolDescriptorSchema = z.object({
+  id: z.string().min(1).max(120), name: z.string().min(1).max(120), description: z.string().max(4_000),
+  inputSchema: z.unknown(), category: UnifiedToolCategorySchema, capability: ModelCapabilitySchema.optional(),
+});
+export type UnifiedToolDescriptor = z.infer<typeof UnifiedToolDescriptorSchema>;
+export const UnifiedToolInvocationSchema = z.object({
+  version: z.literal(1), invocationId: z.string().min(1).max(160), runId: z.string().min(1).max(120),
+  toolId: z.string().min(1).max(120), input: z.record(z.unknown()).default({}), deadlineAt: z.string().datetime().optional(),
+});
+export type UnifiedToolInvocation = z.infer<typeof UnifiedToolInvocationSchema>;
+export const UnifiedToolResultSchema = z.object({
+  version: z.literal(1), invocationId: z.string().min(1).max(160), toolId: z.string().min(1).max(120),
+  status: z.enum(['succeeded', 'failed', 'cancelled', 'timed-out']), output: z.unknown().optional(),
+  error: z.object({ code: z.string().min(1).max(120), message: z.string().max(2_000) }).optional(),
+  startedAt: z.string().datetime(), completedAt: z.string().datetime(),
+});
+export type UnifiedToolResult = z.infer<typeof UnifiedToolResultSchema>;
+
 /** Normalized token counters for one LLM call or one run aggregate. */
 export const TokenUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
@@ -84,9 +113,14 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('reasoning.delta'), runId: z.string(), text: z.string() }),
   z.object({ type: z.literal('message.delta'), runId: z.string(), text: z.string() }),
-  z.object({ type: z.literal('tool.started'), runId: z.string(), toolName: z.string(), summary: z.string() }),
-  z.object({ type: z.literal('tool.completed'), runId: z.string(), toolName: z.string(), summary: z.string(), ok: z.boolean() }),
-  z.object({ type: z.literal('tool.failed'), runId: z.string(), toolName: z.string(), summary: z.string() }),
+  z.object({ type: z.literal('tool.started'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string() }),
+  z.object({ type: z.literal('tool.progress'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), progress: z.number().min(0).max(100).optional() }),
+  z.object({ type: z.literal('tool.completed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), ok: z.boolean() }),
+  z.object({ type: z.literal('tool.failed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string() }),
+  z.object({ type: z.literal('capability.started'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string() }),
+  z.object({ type: z.literal('capability.progress'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string(), progress: z.number().min(0).max(100).optional() }),
+  z.object({ type: z.literal('capability.completed'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string(), ok: z.boolean() }),
+  z.object({ type: z.literal('capability.failed'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string() }),
   z.object({ type: z.literal('artifact.created'), runId: z.string(), path: z.string().min(1).max(240) }),
   z.object({
     type: z.literal('project.file.published'),
@@ -103,6 +137,8 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     runId: z.string(),
     usage: TokenUsageSchema,
     model: RunModelRefSchema.optional(),
+    /** Application capability when this usage came from a specialist model. */
+    capability: ModelCapabilitySchema.optional(),
     /** 0-based LLM step within the run when known. */
     stepIndex: z.number().int().nonnegative().optional(),
   }),
@@ -118,7 +154,88 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
 
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
-export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible']);
+export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'volcengine', 'iflytek', 'ollama', 'openai-compatible']);
+export const AUDIO_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+export const AUDIO_UPLOAD_EXTENSIONS = ['aac', 'flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'ogg', 'opus', 'wav', 'webm'] as const;
+export const AudioUploadSchema = z.object({
+  name: z.string().min(1).max(240),
+  base64: z.string().min(4).max(Math.ceil(AUDIO_UPLOAD_MAX_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+});
+export const CapabilityBindingSchema = z.object({
+  capability: ModelCapabilitySchema,
+  modelId: z.string().min(1),
+  enabled: z.boolean().default(true),
+  updatedAt: z.string().datetime(),
+});
+export type CapabilityBinding = z.infer<typeof CapabilityBindingSchema>;
+
+export const AgentCapabilityModeSchema = z.enum(['disabled', 'auto', 'preferred']);
+export type AgentCapabilityMode = z.infer<typeof AgentCapabilityModeSchema>;
+export const AgentCapabilityAssignmentSchema = z.object({
+  agentId: z.string().min(1),
+  capability: ModelCapabilitySchema,
+  mode: AgentCapabilityModeSchema.default('disabled'),
+  updatedAt: z.string().datetime(),
+});
+export type AgentCapabilityAssignment = z.infer<typeof AgentCapabilityAssignmentSchema>;
+
+export const QuantumExecutionModeSchema = z.enum(['secure-sandbox', 'workspace-isolation', 'disabled']);
+export type QuantumExecutionMode = z.infer<typeof QuantumExecutionModeSchema>;
+export const QuantumIsolationLevelSchema = z.enum(['oci', 'microvm', 'workspace-only', 'none']);
+export type QuantumIsolationLevel = z.infer<typeof QuantumIsolationLevelSchema>;
+
+/** Resolved, authorized specialist model made available to one Agent run. */
+export const ModelCapabilityRuntimeSchema = z.object({
+  id: z.string().min(1),
+  capability: ModelCapabilitySchema,
+  provider: ProviderIdSchema,
+  providerLabel: z.string().max(120).optional(),
+  baseUrl: z.string().url(),
+  apiKey: z.string(),
+  appId: z.string().max(160).optional(),
+  apiSecret: z.string().max(500).optional(),
+  modelId: z.string().min(1),
+  /** Optional system or pre-authorized cloned voice identifier for TTS. */
+  voice: z.string().max(240).optional(),
+  /** Required for image capabilities after settings resolution; omitted by legacy callers. */
+  imageProtocol: ImageGenerationProtocolSchema.optional(),
+  mode: AgentCapabilityModeSchema,
+});
+export type ModelCapabilityRuntime = z.infer<typeof ModelCapabilityRuntimeSchema>;
+
+/** Curated suggestions, not an exhaustive allowlist. Keep custom/clone voices valid. */
+export function suggestedSpeechVoices(provider: string, modelId: string): string[] {
+  if (provider !== 'qwen') return provider === 'iflytek' ? ['xiaoyan'] : [];
+  const model = modelId.trim().toLowerCase();
+  if (model === 'qwen-audio-3.1-tts-flash') return ['longanhuan_v3.1', 'longanlingxin_v3.1', 'xunanchuan_v3.1'];
+  if (model === 'qwen-audio-3.0-tts-flash') return ['longanhuan_v3.6'];
+  if (model === 'qwen-audio-3.0-tts-plus') return ['longanlingxin', 'longanlufeng'];
+  if (model === 'cosyvoice-v3-flash' || model === 'cosyvoice-v3-plus') return ['longanyang', 'longanhuan'];
+  if (model === 'cosyvoice-v2') return ['longxiaochun_v2', 'longxiaocheng_v2'];
+  if (model === 'cosyvoice-v1') return ['longxiaochun'];
+  return [];
+}
+
+const QWEN_SHARED_HOST_REGIONS: Record<string, string> = {
+  'dashscope.aliyuncs.com': 'cn-beijing',
+  'dashscope-intl.aliyuncs.com': 'ap-southeast-1',
+  'dashscope-us.aliyuncs.com': 'us-east-1',
+  'cn-hongkong.dashscope.aliyuncs.com': 'cn-hongkong',
+};
+
+/** Resolve a Bailian workspace host while keeping region implicit in the shared API host. */
+export function resolveProviderBaseUrl(input: { provider: string; baseUrl: string; workspaceId?: string }): string {
+  const baseUrl = input.baseUrl.trim();
+  const workspaceId = String(input.workspaceId || '').trim();
+  if (input.provider !== 'qwen' || !workspaceId || !baseUrl) return baseUrl;
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { return baseUrl; }
+  if (url.hostname.endsWith('.maas.aliyuncs.com')) return baseUrl;
+  const region = QWEN_SHARED_HOST_REGIONS[url.hostname];
+  if (!region) return baseUrl;
+  url.hostname = `${workspaceId}.${region}.maas.aliyuncs.com`;
+  return url.toString().replace(/\/$/, '');
+}
 export const EmbeddingMetaSchema = z.object({
   dimension: z.number().int().positive().max(65_536).optional(),
   normalize: z.boolean().optional(),
@@ -133,6 +250,7 @@ export const ModelConfigSchema = z.object({
   /** Human label of the provider connection / channel (never a secret). */
   providerLabel: z.string().max(120).optional(),
   disableThinking: z.boolean().optional(),
+  supportsVision: z.boolean().optional(),
   /**
    * When true, DashScope-compatible chat requests inject `enable_search: true`
    * (Bailian / Qwen built-in web search). Not an external search provider tool.
@@ -262,6 +380,45 @@ export const KnowledgeSearchRequestSchema = z.object({
 });
 export type KnowledgeSearchRequest = z.infer<typeof KnowledgeSearchRequestSchema>;
 
+/** Phase-1 business ontology / graph primitives. */
+export const OntologyNodeSchema = z.object({
+  id: z.string().min(1).max(240),
+  type: z.string().min(1).max(80),
+  name: z.string().min(1).max(240),
+  aliases: z.array(z.string().min(1).max(240)).max(32).default([]),
+  properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  source: z.string().max(500).optional(),
+  status: z.enum(['draft', 'published', 'archived']).default('published'),
+});
+export type OntologyNode = z.infer<typeof OntologyNodeSchema>;
+export const OntologyEdgeSchema = z.object({
+  id: z.string().min(1).max(240),
+  subjectId: z.string().min(1).max(240),
+  predicate: z.string().min(1).max(120),
+  objectId: z.string().min(1).max(240),
+  properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  source: z.string().max(500).optional(),
+  status: z.enum(['draft', 'published', 'archived']).default('published'),
+});
+export type OntologyEdge = z.infer<typeof OntologyEdgeSchema>;
+export const OntologyGraphSchema = z.object({
+  version: z.number().int().positive().default(1),
+  nodes: z.array(OntologyNodeSchema).max(100_000).default([]),
+  edges: z.array(OntologyEdgeSchema).max(200_000).default([]),
+});
+export type OntologyGraph = z.infer<typeof OntologyGraphSchema>;
+export const OntologyGraphRequestSchema = z.object({
+  knowledgeBase: KnowledgeBaseRuntimeSchema,
+  graph: OntologyGraphSchema,
+});
+export type OntologyGraphRequest = z.infer<typeof OntologyGraphRequestSchema>;
+export const OntologyQueryRequestSchema = z.object({
+  knowledgeBase: KnowledgeBaseRuntimeSchema,
+  query: z.string().min(2).max(800),
+  maxHops: z.number().int().min(0).max(2).default(1),
+});
+export type OntologyQueryRequest = z.infer<typeof OntologyQueryRequestSchema>;
+
 export const BailianCreateKnowledgeRequestSchema = z.object({
   accessKeyId: z.string().min(1).max(120),
   accessKeySecret: z.string().min(1).max(120),
@@ -308,14 +465,31 @@ export const KnowledgeJobStatusRequestSchema = KnowledgeManageRequestSchema.exte
   jobId: z.string().min(1).max(240),
 });
 export type KnowledgeJobStatusRequest = z.infer<typeof KnowledgeJobStatusRequestSchema>;
+export const ChatImageAttachmentSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(180),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  size: z.number().int().positive().max(10 * 1024 * 1024),
+});
+export type ChatImageAttachment = z.infer<typeof ChatImageAttachmentSchema>;
+export const ChatImagesSchema = z.array(ChatImageAttachmentSchema).max(4);
+export const ChatModelMessageSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1),
+  attachments: ChatImagesSchema.optional(),
+}).refine((message) => message.role === 'user' || !message.attachments?.length, { message: 'Only user messages can attach images.' });
+export type ChatModelMessage = z.infer<typeof ChatModelMessageSchema>;
+
 export const ChatRequestSchema = z.object({
   profile: AgentProfileSchema,
-  messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().min(1) })).min(1),
+  messages: z.array(ChatModelMessageSchema).min(1),
   model: ModelConfigSchema,
   skills: z.array(AgentSkillRuntimeSchema).max(24).default([]),
   searchProviders: z.array(SearchProviderRuntimeSchema).max(6).default([]),
   mcpConnections: z.array(McpConnectionRuntimeSchema).max(12).default([]),
   knowledgeBases: z.array(KnowledgeBaseRuntimeSchema).max(12).default([]),
+  /** Authorized specialist models. Disabled assignments are omitted before prompt construction. */
+  modelCapabilities: z.array(ModelCapabilityRuntimeSchema).max(12).optional(),
   /**
    * Stable run id shared by orchestrator records and the on-disk run workspace
    * (`~/.workmate/workspaces/<runId>`). When omitted, agent-core generates one.

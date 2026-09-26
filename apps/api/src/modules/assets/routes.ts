@@ -103,7 +103,22 @@ function assetMimeType(name: string) {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.avif': 'image/avif',
     '.svg': 'image/svg+xml',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/x-m4v',
     '.zip': 'application/zip',
   } as Record<string, string>)[extension] || 'application/octet-stream';
 }
@@ -446,6 +461,17 @@ async function assetContent(assetId: string) {
   return { row, target };
 }
 
+function parseByteRange(header: string | undefined, size: number): { start: number; end: number } | null {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match || (!match[1] && !match[2]) || size <= 0) return null;
+  const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+  let end = match[2] && match[1] ? Number(match[2]) : size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || end < start) return null;
+  end = Math.min(end, size - 1);
+  return { start, end };
+}
+
 /**
  * Resolve the latest archived SITE bundle directory for a chat session.
  * Preview maps this path directly — no workspace hydrate/copy.
@@ -615,6 +641,19 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
       if (!canReadOwnedResource(row, auth)) throw new Error('Asset not found.');
       reply.header('content-type', row.mimeType || 'application/octet-stream');
       reply.header('content-disposition', String(query.download || '') === '1' ? `attachment; filename="${encodeURIComponent(row.name)}"` : `inline; filename="${encodeURIComponent(row.name)}"`);
+      reply.header('accept-ranges', 'bytes');
+      reply.header('cache-control', 'private, max-age=3600');
+      const size = fs.statSync(target).size;
+      const requestedRange = request.headers.range;
+      const range = parseByteRange(requestedRange, size);
+      if (requestedRange && !range) return reply.code(416).header('content-range', `bytes */${size}`).send();
+      if (range) {
+        reply.code(206);
+        reply.header('content-range', `bytes ${range.start}-${range.end}/${size}`);
+        reply.header('content-length', String(range.end - range.start + 1));
+        return reply.send(fs.createReadStream(target, range));
+      }
+      reply.header('content-length', String(size));
       return reply.send(fs.createReadStream(target));
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });

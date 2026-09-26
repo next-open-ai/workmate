@@ -1,7 +1,8 @@
 import path from 'node:path';
 import os from 'node:os';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import { getSharedAgentscopeRuntimeStats } from '@workmate/agent-core';
+import { getSharedAgentscopeRuntimeStats, saveChatImage, readChatImage, ImageInputError } from '@workmate/agent-core';
+import { ChatImagesSchema } from '@workmate/contracts';
 import { JsonFileStore, Orchestrator, createScriptedRunner, type AgentRunner, type OrcEvent } from '@workmate/orchestrator';
 import type { ChatRunContext, ConfirmProjectInput, CreateProjectDraftInput, ProjectTask, ResolveProjectApprovalInput, UpdateProjectAccessInput } from '@workmate/orchestrator';
 import { requireAuth } from '../auth/service.js';
@@ -167,7 +168,9 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     return { keys, prefix };
   });
 
-  app.put('/kv', async (request, reply) => {
+  // Long conversation mirrors can exceed Fastify's 1 MiB default. Media
+  // bytes live outside KV; this bounded allowance is for text and metadata.
+  app.put('/kv', { bodyLimit: 8 * 1024 * 1024 }, async (request, reply) => {
     const auth = requireAuth(request);
     try {
       requireSystemAdmin(auth);
@@ -248,19 +251,48 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
+  app.post('/sessions/:sessionId/images', { bodyLimit: 15 * 1024 * 1024 }, async (request, reply) => {
+    const auth = requireAuth(request);
+    const sessionId = String((request.params as Record<string, string>).sessionId);
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return reply.code(404).send({ message: 'Chat session not found.' });
+    try {
+      const body = request.body as { name: string; dataBase64: string };
+      return { attachment: await saveChatImage(sessionId, body) };
+    } catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : '图片上传失败。' }); }
+  });
+
+  app.get('/sessions/:sessionId/images/:imageId', async (request, reply) => {
+    const auth = requireAuth(request);
+    const { sessionId, imageId } = request.params as Record<string, string>;
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canReadOwnedResource(session, auth, { allowLegacyUnowned: true })) return reply.code(404).send({ message: 'Chat session not found.' });
+    try {
+      const { attachment, bytes } = await readChatImage(sessionId, imageId);
+      return reply.header('Cache-Control', 'private, no-store').header('X-Content-Type-Options', 'nosniff').type(attachment.mimeType).send(bytes);
+    } catch { return reply.code(404).send({ message: '图片不可用，请重新上传。' }); }
+  });
+
   app.post('/sessions/:sessionId/messages', async (request, reply) => {
     const auth = requireAuth(request);
     const sessionId = String((request.params as Record<string, string>).sessionId);
     const session = await orch.chat.getChatSession(sessionId);
     if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
-    const body = (request.body ?? {}) as { content?: string; employeeId?: string; context?: ChatRunContext };
+    const body = (request.body ?? {}) as { content?: string; employeeId?: string; context?: ChatRunContext; attachments?: unknown };
     if (!body.content) return fail(reply, new Error('content is required.'));
-    const result = await orch.chat.sendUserMessage(sessionId, {
-      content: body.content,
-      employeeId: body.employeeId,
-      context: body.context,
-    });
-    return result;
+    const images = ChatImagesSchema.safeParse(body.attachments ?? []);
+    if (!images.success) return reply.code(400).send({ message: '图片附件无效，每次最多 4 张。' });
+    try {
+      return await orch.chat.sendUserMessage(sessionId, {
+        content: body.content,
+        attachments: images.data,
+        employeeId: body.employeeId,
+        context: body.context,
+      });
+    } catch (error) {
+      if (error instanceof ImageInputError) return reply.code(400).send({ code: error.code, message: error.message });
+      throw error;
+    }
   });
 
   app.post('/sessions/:sessionId/cancel', async (request, reply) => {

@@ -5,9 +5,12 @@ import {
   createProviderInstance,
   defaultBaseUrl,
   defaultProviderName,
+  effectiveProviderBaseUrl,
   providerIds,
   providerInstanceReady,
   providerNeedsApiKey,
+  summarizeProviderModelHealth,
+  type ConfiguredModel,
   type ProviderId,
   type ProviderInstance,
 } from '../../app/model-config';
@@ -17,11 +20,14 @@ import { testProviderConnection } from '../../services/api.js';
 
 const props = defineProps<{
   instances: ProviderInstance[];
+  models: ConfiguredModel[];
 }>();
 
 const emit = defineEmits<{
   'update:instances': [value: ProviderInstance[]];
   dirty: [];
+  'auto-configure': [instance: ProviderInstance];
+  'review-models': [];
 }>();
 
 const { t } = useI18n();
@@ -33,11 +39,16 @@ const addDraft = ref<ProviderInstance | null>(null);
 const addError = ref('');
 const testingId = ref('');
 const testMessage = ref<Record<string, { ok: boolean; text: string }>>({});
+const autoSetup = ref(true);
 
 const editing = computed(() => props.instances.find((item) => item.id === editingId.value) ?? null);
 const visibleInstances = computed(() => props.instances.filter((item) =>
   providerInstanceReady(item) || item.id === editingId.value,
 ));
+
+function providerHealth(instanceId: string) {
+  return summarizeProviderModelHealth(props.models, instanceId);
+}
 
 watch(() => props.instances, (rows) => {
   if (editingId.value && !rows.some((item) => item.id === editingId.value)) editingId.value = null;
@@ -84,7 +95,8 @@ function addInstance() {
     return;
   }
   emitInstances([...props.instances, next]);
-  editingId.value = next.id;
+  if (autoSetup.value) emit('auto-configure', next);
+  editingId.value = autoSetup.value ? null : next.id;
   closeAddDialog();
 }
 
@@ -102,6 +114,9 @@ function switchInstanceType(instance: ProviderInstance, nextType: ProviderId) {
     name: !instance.name.trim() || instance.name === currentDefaultName ? nextDefaultName : instance.name,
     baseUrl: inheritedBase,
     apiKey: nextType === 'ollama' ? '' : instance.apiKey,
+    workspaceId: nextType === 'qwen' ? instance.workspaceId : '',
+    appId: nextType === 'volcengine' || nextType === 'iflytek' ? instance.appId : '',
+    apiSecret: nextType === 'iflytek' ? instance.apiSecret : '',
   });
 }
 
@@ -120,7 +135,7 @@ function eventChecked(event: Event): boolean {
 }
 
 function removeInstance(id: string) {
-  if (!window.confirm('删除该 Provider 连接？关联的已配置模型也会在保存时一并清理。')) return;
+  if (!window.confirm(t('settings.providerRemoveConfirm'))) return;
   emitInstances(props.instances.filter((item) => item.id !== id));
   if (editingId.value === id) editingId.value = null;
 }
@@ -132,6 +147,7 @@ async function testInstance(instance: ProviderInstance) {
     const result = await testProviderConnection({
       type: instance.type,
       baseUrl: instance.baseUrl,
+      workspaceId: instance.workspaceId,
       apiKey: instance.apiKey,
     });
     testMessage.value = { ...testMessage.value, [instance.id]: { ok: true, text: result.message } };
@@ -181,9 +197,27 @@ async function testInstance(instance: ProviderInstance) {
                 {{ providerInstanceReady(instance) ? t('settings.providerReady') : t('settings.providerIncomplete') }}
               </span>
             </div>
-            <p class="mt-1 truncate font-mono text-[11px] text-[var(--muted)]">{{ instance.baseUrl || defaultBaseUrl[instance.type] || '—' }}</p>
+            <p class="mt-1 truncate font-mono text-[11px] text-[var(--muted)]">{{ effectiveProviderBaseUrl(instance) || defaultBaseUrl[instance.type] || '—' }}</p>
+            <button
+              v-if="providerHealth(instance.id).total"
+              class="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-semibold"
+              type="button"
+              @click="emit('review-models')"
+            >
+              <span class="text-[var(--muted)]">{{ t('settings.providerModelHealth') }}</span>
+              <span v-if="providerHealth(instance.id).available" class="rounded-full bg-emerald-500/12 px-2 py-0.5 text-emerald-700">{{ t('settings.providerHealthAvailable', { count: providerHealth(instance.id).available }) }}</span>
+              <span v-if="providerHealth(instance.id).issues" class="rounded-full bg-rose-500/12 px-2 py-0.5 text-rose-700">{{ t('settings.providerHealthIssues', { count: providerHealth(instance.id).issues }) }}</span>
+              <span v-if="providerHealth(instance.id).stale" class="rounded-full bg-amber-500/12 px-2 py-0.5 text-amber-700">{{ t('settings.providerHealthStale', { count: providerHealth(instance.id).stale }) }}</span>
+              <span v-if="providerHealth(instance.id).unverified" class="rounded-full bg-slate-500/10 px-2 py-0.5 text-[var(--muted)]">{{ t('settings.providerHealthUnverified', { count: providerHealth(instance.id).unverified }) }}</span>
+              <span class="text-[var(--accent)]">{{ t('settings.providerHealthReview') }}</span>
+            </button>
           </div>
           <div class="flex shrink-0 flex-wrap gap-2">
+            <button
+              class="rounded-lg border border-[var(--accent)]/35 bg-[var(--accent-soft)] px-2.5 py-1.5 text-xs font-semibold text-[var(--accent)] hover:border-[var(--accent)]"
+              type="button"
+              @click="emit('auto-configure', instance)"
+            >{{ t('settings.providerAutoConfigure') }}</button>
             <button
               class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent)] disabled:opacity-50"
               type="button"
@@ -214,7 +248,7 @@ async function testInstance(instance: ProviderInstance) {
 
         <div v-if="editing?.id === instance.id" class="mt-4 grid gap-3 border-t border-[var(--border)] pt-4">
           <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
-            <span>供应商类型</span>
+            <span>{{ t('settings.providerType') }}</span>
             <select
               class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
               :value="instance.type"
@@ -222,7 +256,7 @@ async function testInstance(instance: ProviderInstance) {
             >
               <option v-for="id in providerIds" :key="id" :value="id">{{ t(`provider.${id}`) }}</option>
             </select>
-            <span class="text-[11px] font-normal text-[var(--muted)]">切换供应商后，默认地址与必填项会自动联动；你手动改过的自定义地址会尽量保留。</span>
+            <span class="text-[11px] font-normal text-[var(--muted)]">{{ t('settings.providerTypeHelp') }}</span>
           </label>
           <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
             <span>{{ t('settings.providerName') }}</span>
@@ -233,7 +267,20 @@ async function testInstance(instance: ProviderInstance) {
               @input="patch(instance.id, { name: eventValue($event) })"
             />
           </label>
-          <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+          <label v-if="instance.type === 'qwen'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+            <span>{{ t('settings.workspaceId') }}</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
+              type="text"
+              :value="instance.workspaceId || ''"
+              :placeholder="t('settings.workspaceIdHint')"
+              @input="patch(instance.id, { workspaceId: eventValue($event).trim() })"
+            />
+            <span class="text-[11px] font-normal leading-relaxed text-[var(--muted)]">{{ t('settings.workspaceIdHelp') }}</span>
+          </label>
+          <details :open="instance.type !== 'qwen'" class="grid gap-1.5 text-xs text-[var(--muted)]">
+            <summary v-if="instance.type === 'qwen'" class="cursor-pointer font-semibold">{{ t('settings.advancedConnection') }}</summary>
+            <label class="mt-2 grid gap-1.5 font-semibold">
             <span>{{ t('settings.baseUrl') }}</span>
             <input
               class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
@@ -242,7 +289,9 @@ async function testInstance(instance: ProviderInstance) {
               :value="instance.baseUrl"
               @input="patch(instance.id, { baseUrl: eventValue($event) })"
             />
-          </label>
+            <span v-if="instance.type === 'qwen'" class="text-[11px] font-normal leading-relaxed">{{ t('settings.qwenBaseUrlHelp') }}</span>
+            </label>
+          </details>
           <label v-if="instance.type !== 'ollama'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
             <span>{{ t('settings.apiKey') }}</span>
             <input
@@ -254,7 +303,16 @@ async function testInstance(instance: ProviderInstance) {
               @input="patch(instance.id, { apiKey: eventValue($event) })"
             />
           </label>
-          <p v-else class="text-xs text-[var(--muted)]">{{ t('settings.ollamaKeyHint') }}</p>
+          <label v-if="instance.type === 'volcengine' || instance.type === 'iflytek'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+            <span>{{ t('settings.appId') }}</span>
+            <input class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal" :value="instance.appId || ''" @input="patch(instance.id, { appId: eventValue($event).trim() })" />
+          </label>
+          <label v-if="instance.type === 'iflytek'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+            <span>{{ t('settings.apiSecret') }}</span>
+            <input class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal" type="password" autocomplete="off" :value="instance.apiSecret || ''" @input="patch(instance.id, { apiSecret: eventValue($event) })" />
+            <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.speechCredentialHelp') }}</span>
+          </label>
+          <p v-if="instance.type === 'ollama'" class="text-xs text-[var(--muted)]">{{ t('settings.ollamaKeyHint') }}</p>
           <label class="flex cursor-pointer items-start gap-3 text-xs">
             <input
               class="mt-0.5"
@@ -293,15 +351,40 @@ async function testInstance(instance: ProviderInstance) {
               <span>{{ t('settings.providerName') }}</span>
               <input v-model="addDraft.name" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" required />
             </label>
-            <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+            <label v-if="addDraft.type === 'qwen'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t('settings.workspaceId') }}</span>
+              <input v-model.trim="addDraft.workspaceId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('settings.workspaceIdHint')" />
+              <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.workspaceIdHelp') }}</span>
+            </label>
+            <details :open="addDraft.type !== 'qwen'" class="grid gap-1.5 text-xs text-[var(--muted)]">
+              <summary v-if="addDraft.type === 'qwen'" class="cursor-pointer font-semibold">{{ t('settings.advancedConnection') }}</summary>
+              <label class="mt-2 grid gap-1.5 font-semibold">
               <span>{{ t('settings.baseUrl') }}</span>
               <input v-model="addDraft.baseUrl" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-mono text-sm font-normal" :placeholder="defaultBaseUrl[addDraft.type] || 'https://api.example.com/v1'" required />
-            </label>
+              <span v-if="addDraft.type === 'qwen'" class="text-[11px] font-normal leading-relaxed">{{ t('settings.qwenBaseUrlHelp') }}</span>
+              </label>
+            </details>
             <label v-if="addDraft.type !== 'ollama'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
               <span>{{ t('settings.apiKey') }}<small v-if="!providerNeedsApiKey(addDraft.type)" class="ml-1 font-normal">({{ t('settings.optional') }})</small></span>
               <input v-model="addDraft.apiKey" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" type="password" autocomplete="off" placeholder="sk-…" :required="providerNeedsApiKey(addDraft.type)" />
             </label>
-            <p v-else class="text-xs text-[var(--muted)]">{{ t('settings.ollamaKeyHint') }}</p>
+            <label v-if="addDraft.type === 'volcengine' || addDraft.type === 'iflytek'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t('settings.appId') }}</span>
+              <input v-model.trim="addDraft.appId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" required />
+            </label>
+            <label v-if="addDraft.type === 'iflytek'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t('settings.apiSecret') }}</span>
+              <input v-model="addDraft.apiSecret" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" type="password" autocomplete="off" required />
+              <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.speechCredentialHelp') }}</span>
+            </label>
+            <p v-if="addDraft.type === 'ollama'" class="text-xs text-[var(--muted)]">{{ t('settings.ollamaKeyHint') }}</p>
+            <label class="flex items-start gap-3 rounded-xl border border-[var(--accent)]/20 bg-[var(--accent-soft)]/50 p-3 text-xs">
+              <input v-model="autoSetup" class="mt-0.5" type="checkbox" />
+              <span>
+                <strong class="block text-[var(--text)]">{{ t('settings.providerAutoSetupTitle') }}</strong>
+                <span class="mt-1 block leading-relaxed text-[var(--muted)]">{{ t('settings.providerAutoSetupHelp') }}</span>
+              </span>
+            </label>
           </div>
 
           <p v-if="addError" class="mt-4 text-xs font-semibold text-rose-600">{{ addError }}</p>

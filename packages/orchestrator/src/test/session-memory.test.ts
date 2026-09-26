@@ -26,6 +26,19 @@ function sessionWith(messages: ChatSession['messages'], memory?: ChatSession['me
   };
 }
 
+test('VIS-T2 original images survive summary watermark with bounded latest-four window', () => {
+  const messages: ChatSession['messages'] = Array.from({ length: 6 }, (_, index) => ({
+    id: `m${index}`, role: 'user', content: `图${index}`, createdAt: index,
+    attachments: [{ id: `00000000-0000-4000-8000-00000000000${index}`, name: `${index}.png`, mimeType: 'image/png', size: 68 }],
+  }));
+  messages.push({ id: 'followup', role: 'user', content: '再看看原图', createdAt: 7 });
+  const session = sessionWith(messages, { summary: '之前讨论图片', coveredUntilId: 'm5', updatedAt: 1, dirty: false });
+  const result = buildSessionModelMessages(session);
+  assert.deepEqual(result.flatMap((message) => message.attachments ?? []).map((image) => image.name), ['2.png', '3.png', '4.png', '5.png']);
+  assert.equal(result.at(-1)?.content, '再看看原图');
+  assert.equal(JSON.stringify(session.messages), JSON.stringify(messages));
+});
+
 test('uncoveredMessages slices after watermark', () => {
   const messages = [
     { id: 'm1', role: 'user' as const, content: 'a', createdAt: 1 },

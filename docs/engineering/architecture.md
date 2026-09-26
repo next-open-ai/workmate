@@ -1,6 +1,6 @@
 # 架构与模块边界（工程摘要）
 
-> 完整权威说明：[../design/architecture.md](../design/architecture.md)
+> 完整权威说明：[../architecture/architecture.md](../architecture/architecture.md)
 
 ## 1. 总原则
 
@@ -46,9 +46,22 @@ gateway → channel →（不直接碰 orchestrator 内核细节）
 
 避免：在 renderer 做编排真相源；在多处复制工具权限判定。
 
-## 4. 变更检查清单
+## 4. 所有权与变更入口
+
+| 变更对象 | 所有者/事实源 | 禁止做法 |
+| --- | --- | --- |
+| 跨包 Schema、事件和 API DTO | `packages/contracts` | 在各 app 复制类型 |
+| 会话、项目、审批和 Run 状态 | `packages/orchestrator` | 由 Renderer 或 Gateway 自建状态机 |
+| 模型、Agent Loop 和执行后端 | `packages/agent-core` | 在 API、UI 或 Tool 中直调模型 SDK |
+| 工具契约与风险标签 | `packages/tools` | 在 UI 文案中定义权限语义 |
+| 通道协议 | `packages/channel` | 将 Telegram/飞书字段泄漏到核心领域 |
+| 领域数据写入 | `apps/api` | Desktop、Gateway 或 Sidecar 并发写 domain KV |
+
+## 5. 变更检查清单
 
 - [ ] 新代码落在正确包；未引入反向依赖
 - [ ] 契约变更同步 `@workmate/contracts` 与调用方
 - [ ] 密钥未进入 domain KV 或日志
 - [ ] 配套回归（见 [testing.md](./testing.md)）
+- [ ] 跨进程调用定义了超时、取消、错误和版本兼容语义
+- [ ] 新的外部依赖有边界适配层，不向领域模型泄漏供应商类型

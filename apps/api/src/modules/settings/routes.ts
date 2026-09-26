@@ -64,10 +64,12 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
     type: String(provider.type || ''),
     name: String(provider.name || ''),
     baseUrl: String(provider.baseUrl || ''),
+    ...(provider.workspaceId ? { workspaceId: String(provider.workspaceId) } : {}),
+    ...(provider.appId ? { appId: String(provider.appId) } : {}),
     disableThinking: Boolean(provider.disableThinking),
   }));
   const providerSecrets = Object.fromEntries(arrayOfRecords(raw.providerInstances)
-    .map((provider) => [String(provider.id || ''), { apiKey: String(provider.apiKey || '') }])
+    .map((provider) => [String(provider.id || ''), { apiKey: String(provider.apiKey || ''), apiSecret: String(provider.apiSecret || '') }])
     .filter(([id]) => Boolean(id)));
   if (providerInstances.length) {
     return {
@@ -79,7 +81,9 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
           providerInstanceId: String(model.providerInstanceId || ''),
           capability: String(model.capability || ''),
           modelId: String(model.modelId || ''),
+          ...(model.voice ? { voice: String(model.voice) } : {}),
           ...(model.label ? { label: String(model.label) } : {}),
+          ...(model.imageProtocol ? { imageProtocol: String(model.imageProtocol) } : {}),
           ...(model.meta && typeof model.meta === 'object'
             ? {
                 meta: {
@@ -90,13 +94,25 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
                 },
               }
             : {}),
+          supportsVision: model.capability === 'chat' && Boolean(model.supportsVision),
           ...(Object.prototype.hasOwnProperty.call(model, 'supportsBuiltinWebSearch')
             ? { supportsBuiltinWebSearch: Boolean(model.supportsBuiltinWebSearch) }
+            : {}),
+          ...(model.health && typeof model.health === 'object'
+            ? {
+                health: {
+                  status: String(asRecord(model.health).status || ''),
+                  checkedAt: String(asRecord(model.health).checkedAt || ''),
+                  summary: String(asRecord(model.health).summary || '').slice(0, 500),
+                },
+              }
             : {}),
         })),
         activeChatModelId: raw.activeChatModelId ? String(raw.activeChatModelId) : null,
         activeEmbeddingModelId: raw.activeEmbeddingModelId ? String(raw.activeEmbeddingModelId) : null,
         employeeDefaultModelIds: asRecord(raw.employeeDefaultModelIds),
+        capabilityBindings: arrayOfRecords(raw.capabilityBindings),
+        agentCapabilityAssignments: arrayOfRecords(raw.agentCapabilityAssignments),
       },
       secrets: { providerInstances: providerSecrets },
     };
@@ -138,11 +154,14 @@ function mergeModelSettings(value: unknown) {
       providerInstances: arrayOfRecords(meta.providerInstances).map((provider) => ({
         ...provider,
         apiKey: String(asRecord(providerSecrets[String(provider.id || '')]).apiKey || ''),
+        apiSecret: String(asRecord(providerSecrets[String(provider.id || '')]).apiSecret || ''),
       })),
       models: Array.isArray(meta.models) ? meta.models : [],
       activeChatModelId: meta.activeChatModelId ? String(meta.activeChatModelId) : null,
       activeEmbeddingModelId: meta.activeEmbeddingModelId ? String(meta.activeEmbeddingModelId) : null,
       employeeDefaultModelIds: asRecord(meta.employeeDefaultModelIds),
+      capabilityBindings: Array.isArray(meta.capabilityBindings) ? meta.capabilityBindings : [],
+      agentCapabilityAssignments: Array.isArray(meta.agentCapabilityAssignments) ? meta.agentCapabilityAssignments : [],
     };
   }
   const providerSecrets = asRecord(secrets.providers);

@@ -113,6 +113,7 @@ export function mapDshSessionEvent(
       out.push({
         type: 'tool.started',
         runId,
+        ...(callId ? { invocationId: callId } : {}),
         toolName: name,
         summary: args ? `${name}(${args})` : name,
       });
@@ -132,9 +133,9 @@ export function mapDshSessionEvent(
         ? String((isRecord(data.error) && data.error.name) || `${name} failed`)
         : `${name} completed`;
       if (failed) {
-        out.push({ type: 'tool.failed', runId, toolName: name, summary });
+        out.push({ type: 'tool.failed', runId, ...(callId ? { invocationId: callId } : {}), toolName: name, summary });
       } else {
-        out.push({ type: 'tool.completed', runId, toolName: name, summary, ok: true });
+        out.push({ type: 'tool.completed', runId, ...(callId ? { invocationId: callId } : {}), toolName: name, summary, ok: true });
       }
       if (callId) ctx.toolNamesByCallId.delete(callId);
       break;

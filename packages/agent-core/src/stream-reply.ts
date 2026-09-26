@@ -10,6 +10,7 @@ import {
 } from './execution-backend.js';
 import { loadExecutionRoutingConfig } from './execution-routing-config.js';
 import { attachBuiltinSkillPackages } from './builtin-skill-packages.js';
+import { assertVisionSupported } from './image-input.js';
 
 export { DEFAULT_RUN_TIMEOUT_MS };
 export {
@@ -56,6 +57,7 @@ export async function* streamAgentReply(
     preferCoding: resolve?.preferCoding,
     preferProcessIsolation: resolve?.preferProcessIsolation,
   });
+  assertVisionSupported(input.messages, input.model.supportsVision, backend.id, input.modelCapabilities);
   console.info('[workmate] execution backend selected', {
     engine: backend.id,
     requestEngine: preparedInput.engine ?? null,

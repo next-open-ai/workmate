@@ -329,7 +329,38 @@ export interface RuntimeSkill {
   execution: { allowWorkspaceWrite: boolean; allowScriptExecution: boolean; allowedNetworkHosts: string[]; allowAllNonDestructive: boolean };
 }
 
-export interface ToolActivity { toolName: string; summary: string; status: 'running' | 'completed' | 'failed'; }
+export interface ToolActivity { invocationId?: string; progress?: number; toolName: string; summary: string; status: 'running' | 'completed' | 'failed'; }
+export interface CapabilityHealthObservation {
+  capability: import('@workmate/contracts').ModelCapability;
+  modelId: string;
+  ok: boolean;
+  summary: string;
+}
+let capabilityHealthObserver: ((value: CapabilityHealthObservation) => void) | undefined;
+/** Subscribe to terminal application-model results without coupling transport to settings storage. */
+export function setCapabilityHealthObserver(observer: (value: CapabilityHealthObservation) => void) {
+  capabilityHealthObserver = observer;
+}
+export function mergeToolActivity(activities: ToolActivity[], incoming: ToolActivity) {
+  const existing = incoming.invocationId
+    ? activities.find((item) => item.invocationId === incoming.invocationId)
+    : activities.find((item) => !item.invocationId && item.toolName === incoming.toolName && item.status === 'running');
+  if (existing) {
+    const startedSummary = existing.summary;
+    Object.assign(existing, incoming);
+    if (incoming.status !== 'running' && incoming.status !== 'failed') existing.summary = startedSummary;
+    else if (incoming.status === 'failed' && startedSummary && incoming.summary && !startedSummary.includes(incoming.summary)) {
+      existing.summary = `${startedSummary} — ${incoming.summary}`;
+    }
+    return existing;
+  }
+  const duplicate = !incoming.invocationId && activities.find((item) => !item.invocationId
+    && item.toolName === incoming.toolName && item.summary === incoming.summary && item.status === incoming.status);
+  if (duplicate) return duplicate;
+  const added = { ...incoming };
+  activities.push(added);
+  return added;
+}
 export interface ToolApproval { skillId: string; capability: 'workspace-write' | 'script-execution' | 'network-access'; summary: string; /** Server-side approval id when originating from /api/orch sessions. */ id?: string; }
 export interface GeneratedArtifact { runId: string; path: string; }
 export interface SearchSource { title: string; url: string; source?: string; }
@@ -377,6 +408,7 @@ export type StreamChatInput = {
   searchProviders?: Array<{ id: 'bocha' | 'tavily' | 'brave' | 'exa' | 'zhipu' | 'aliyun'; label: string; apiKey: string; baseUrl?: string; enabled: boolean; preferred: boolean }>;
   mcpConnections?: McpConnectionPayload[];
   knowledgeBases?: KnowledgeBasePayload[];
+  modelCapabilities?: import('@workmate/contracts').ModelCapabilityRuntime[];
   runId?: string;
   projectWorkspacePath?: string;
   maxSteps?: number;
@@ -458,10 +490,13 @@ export async function streamChat(
           text?: string;
           message?: string;
           toolName?: string;
+          invocationId?: string;
+          progress?: number;
           summary?: string;
           ok?: boolean;
           skillId?: string;
           capability?: ToolApproval['capability'];
+          modelId?: string;
           runId?: string;
           path?: string;
           provider?: string;
@@ -469,9 +504,20 @@ export async function streamChat(
           reason?: 'user' | 'timeout';
         };
         if (event.type === 'message.delta' && event.text) onDelta(event.text);
-        if (event.type === 'tool.started' && event.toolName && event.summary) onToolActivity?.({ toolName: event.toolName, summary: event.summary, status: 'running' });
-        if (event.type === 'tool.completed' && event.toolName && event.summary) onToolActivity?.({ toolName: event.toolName, summary: event.summary, status: event.ok ? 'completed' : 'failed' });
-        if (event.type === 'tool.failed' && event.toolName && event.summary) onToolActivity?.({ toolName: event.toolName, summary: event.summary, status: 'failed' });
+        if (event.type === 'tool.started' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running' });
+        if (event.type === 'tool.progress' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, progress: event.progress, toolName: event.toolName, summary: event.summary, status: 'running' });
+        if (event.type === 'tool.completed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: event.ok ? 'completed' : 'failed' });
+        if (event.type === 'tool.failed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'failed' });
+        if (event.type === 'capability.started' && event.capability && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'running' });
+        if (event.type === 'capability.progress' && event.capability && event.summary) onToolActivity?.({ invocationId: event.invocationId, progress: event.progress, toolName: `model:${event.capability}`, summary: event.summary, status: 'running' });
+        if (event.type === 'capability.completed' && event.capability && event.summary) {
+          onToolActivity?.({ invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: event.ok ? 'completed' : 'failed' });
+          if (event.modelId) capabilityHealthObserver?.({ capability: event.capability as import('@workmate/contracts').ModelCapability, modelId: event.modelId, ok: event.ok !== false, summary: event.summary });
+        }
+        if (event.type === 'capability.failed' && event.capability && event.summary) {
+          onToolActivity?.({ invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'failed' });
+          if (event.modelId) capabilityHealthObserver?.({ capability: event.capability as import('@workmate/contracts').ModelCapability, modelId: event.modelId, ok: false, summary: event.summary });
+        }
         if (event.type === 'tool.approval_required' && event.skillId && event.capability && event.summary) onApproval?.({ skillId: event.skillId, capability: event.capability, summary: event.summary });
         if (event.type === 'artifact.created' && event.runId && event.path) await onArtifact?.({ runId: event.runId, path: event.path });
         if (event.type === 'search.sources' && event.provider && event.sources) onSearchSources?.({ provider: event.provider, sources: event.sources });
@@ -732,6 +778,7 @@ export async function testMcpConnection(connection: McpConnectionPayload, timeou
 export async function testProviderConnection(input: {
   type: string;
   baseUrl?: string;
+  workspaceId?: string;
   apiKey?: string;
 }) {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
@@ -793,6 +840,7 @@ export async function testEmbeddingConnection(input: {
 export async function listProviderModels(input: {
   type: string;
   baseUrl?: string;
+  workspaceId?: string;
   apiKey?: string;
 }) {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
@@ -1013,6 +1061,24 @@ export async function writeWorkspaceFile(root: string, relative: string, content
   const body = await response.json().catch(() => ({})) as { relative?: string; content?: string; message?: string };
   if (!response.ok) throw new Error(body.message || `Workspace file write failed: ${response.status}`);
   return { relative: String(body.relative || relative), content: String(body.content || '') };
+}
+
+export async function uploadRecording(file: File): Promise<{ reference: string; name: string; size: number }> {
+  if (!file.size || file.size > 25 * 1024 * 1024) throw new Error('录音文件必须非空且不超过25 MB。');
+  const base64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('录音文件读取失败。'));
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.readAsDataURL(file);
+  });
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const response = await fetch(`${apiBase}/api/workspace/audio-input`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...(getStoredSessionToken() ? { Authorization: `Bearer ${getStoredSessionToken()}` } : {}) },
+    body: JSON.stringify({ name: file.name, base64 }),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.message || '录音上传失败。');
+  return body;
 }
 
 export async function readWorkspaceInfo(root: string) {
@@ -1372,6 +1438,16 @@ export function archivedAssetContentUrl(assetId: string, options: { download?: b
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
   const params = new URLSearchParams({ assetId, ...(options.download ? { download: '1' } : {}) });
   return `${apiBase}/api/assets/content?${params.toString()}`;
+}
+
+/**
+ * Load protected asset media through the authenticated fetch wrapper. Native
+ * img/audio/video requests cannot attach Workmate's session header.
+ */
+export async function loadArchivedAssetContentUrl(assetId: string, signal?: AbortSignal) {
+  const response = await fetch(archivedAssetContentUrl(assetId), { signal });
+  if (!response.ok) throw new Error(`Asset media failed: ${response.status}`);
+  return URL.createObjectURL(await response.blob());
 }
 
 export type { DataColumn } from '@workmate/contracts';

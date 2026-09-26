@@ -177,7 +177,11 @@ watch(section, () => {
           <tbody>
             <tr v-for="row in stats.byModel" :key="row.key" class="border-t border-[var(--border)]">
               <td class="px-3 py-2">
-                <div class="font-medium">{{ row.providerLabel || row.provider }} · {{ row.chatModel }}</div>
+                <div class="flex flex-wrap items-center gap-1.5 font-medium">
+                  <span>{{ row.providerLabel || row.provider }} · {{ row.chatModel }}</span>
+                  <span v-if="row.capability" class="rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">应用模型 · {{ t(`settings.capability.${row.capability}`) }}</span>
+                  <span v-else class="rounded-full bg-[var(--surface-muted)] px-2 py-0.5 text-[10px] font-semibold text-[var(--muted)]">主模型</span>
+                </div>
                 <div v-if="row.baseUrl" class="mt-0.5 text-xs text-[var(--muted)]">{{ row.baseUrl }}</div>
               </td>
               <td class="px-3 py-2 tabular-nums">{{ formatTokens(row.inputTokens) }}</td>

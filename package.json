@@ -25,10 +25,7 @@
     "runtimes/agentscope-runtime/pyproject.toml",
     "README.md",
     "README-EN.md",
-    "docs/runtime-modes.md",
-    "docs/release-checklist.md",
-    "docs/dual-runtime-release-notes.md",
-    "docs/pr-template-dual-runtime.md",
+    "docs",
     "apps/gateway/package.json",
     "apps/gateway/dist",
     "packages/channel/package.json",
@@ -53,6 +50,9 @@
     ]
   },
   "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
     "dev": "pnpm --filter @workmate/desktop dev",
     "web:build": "pnpm build",
     "web:start": "node scripts/start-web.mjs",
@@ -75,6 +75,7 @@
     "gateway:relay": "node scripts/relay-smoke.mjs",
     "agentscope:smoke": "node scripts/agentscope-smoke.mjs",
     "dsh:regression": "node scripts/dsh-mcp-skills-regression.mjs",
+    "esight:contracts:regression": "pnpm --filter @workmate/contracts build && node scripts/esight-contracts-regression.mjs",
     "mcp:user-scope:regression": "node scripts/mcp-user-scope-regression.mjs",
     "concurrency:loadtest": "node scripts/concurrency-loadtest.mjs",
     "concurrency:regression": "node scripts/concurrency-regression.mjs",
@@ -84,6 +85,7 @@
   "devDependencies": {
     "@types/node": "^22.15.0",
     "typescript": "^5.8.3",
+    "vitepress": "2.0.0-alpha.20",
     "ws": "^8.18.0"
   }
 }

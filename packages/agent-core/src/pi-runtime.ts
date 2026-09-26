@@ -29,6 +29,7 @@ import {
   toPiModel,
 } from './pi-model.js';
 import { collectAgentTools, extractToolDetails } from './pi-tools.js';
+import { createUnifiedToolSession, registrationsFromTools } from './unified-tool-runtime.js';
 import { createPiCapabilityTools } from './pi-capability-adapter.js';
 import { createPreviewServerTools } from './preview-server.js';
 import {
@@ -37,6 +38,9 @@ import {
   mergeDiscoveredSkillDescriptions,
 } from './pi-skills.js';
 import { compactAgentContext, convertToLlm } from './context-compaction.js';
+import { resolveChatImages, imageMessageText } from './image-input.js';
+import { visionAttachmentText } from './vision-capability.js';
+import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from './model-capability-runtime.js';
 
 export const DEFAULT_RUN_TIMEOUT_MS = 600_000;
 /** Maximum silence for one provider turn, including the turn after a tool result. */
@@ -357,6 +361,7 @@ function toolResultSummary(toolName: string, output: unknown) {
     return count > 0 ? `已加载 ${count} 条高置信经验。` : '未命中高置信经验（已忽略）。';
   }
   if (value.ok === false) return failText();
+  if (toolName === 'model_understand_images') return `图片理解完成 · ${String(value.modelId || '')}${value.cached ? '（复用本轮结果）' : ''}`;
   if (toolName === 'install_python_dependency') {
     const pkg = String(value.package || '');
     return value.alreadyAvailable
@@ -485,6 +490,29 @@ function tokenUsageFromPi(usage: {
   };
 }
 
+/** Normalize Pi and OpenAI-compatible usage objects returned by capability tools. */
+export function tokenUsageFromCapability(value: unknown): TokenUsage | null {
+  if (!value || typeof value !== 'object') return null;
+  const usage = value as Record<string, unknown>;
+  const promptDetails = usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object'
+    ? usage.prompt_tokens_details as Record<string, unknown> : {};
+  const completionDetails = usage.completion_tokens_details && typeof usage.completion_tokens_details === 'object'
+    ? usage.completion_tokens_details as Record<string, unknown> : {};
+  const inputTokens = asNonNegInt(usage.input ?? usage.input_tokens ?? usage.prompt_tokens);
+  const outputTokens = asNonNegInt(usage.output ?? usage.output_tokens ?? usage.completion_tokens);
+  const cacheReadTokens = asNonNegInt(usage.cacheRead ?? usage.cache_read_tokens ?? promptDetails.cached_tokens);
+  const cacheWriteTokens = asNonNegInt(usage.cacheWrite ?? usage.cache_write_tokens);
+  const reasoningTokens = asNonNegInt(usage.reasoningTokens ?? usage.reasoning_tokens ?? completionDetails.reasoning_tokens);
+  const totalTokens = asNonNegInt(usage.totalTokens ?? usage.total_tokens) || inputTokens + outputTokens;
+  if (inputTokens + outputTokens + totalTokens + cacheReadTokens + cacheWriteTokens + reasoningTokens <= 0) return null;
+  return {
+    inputTokens, outputTokens, totalTokens,
+    ...(cacheReadTokens ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+    ...(reasoningTokens ? { reasoningTokens } : {}),
+  };
+}
+
 function modelRefFromConfig(model: ModelConfig): RunModelRef {
   return {
     provider: model.provider,
@@ -494,14 +522,18 @@ function modelRefFromConfig(model: ModelConfig): RunModelRef {
   };
 }
 
-function toPiHistoryMessages(
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+const MODEL_CAPABILITY_TOOLS: Record<string, import('@workmate/contracts').ModelCapability> = MODEL_CAPABILITY_BY_TOOL;
+
+export async function toPiHistoryMessages(
+  messages: import('@workmate/contracts').ChatModelMessage[],
   model: ModelConfig,
-): AgentMessage[] {
+  conversationId?: string,
+): Promise<AgentMessage[]> {
   const api = model.provider === 'anthropic' ? 'anthropic-messages' : model.provider === 'google' ? 'google-generative-ai' : 'openai-completions';
-  return messages.map((message) => {
+  return Promise.all(messages.map(async (message) => {
     if (message.role === 'user') {
-      return { role: 'user' as const, content: message.content, timestamp: Date.now() };
+      const images = model.supportsVision ? await resolveChatImages(message, conversationId) : [];
+      return { role: 'user' as const, content: images.length ? [{ type: 'text' as const, text: imageMessageText(message) }, ...images] : visionAttachmentText(message), timestamp: Date.now() };
     }
     return {
       role: 'assistant' as const,
@@ -513,7 +545,7 @@ function toPiHistoryMessages(
       stopReason: 'stop' as const,
       timestamp: Date.now(),
     } satisfies AssistantMessage;
-  });
+  }));
 }
 
 function yieldArtifactEvents(
@@ -543,6 +575,9 @@ function yieldArtifactEvents(
   if (toolName === 'write_workspace_file' || toolName === 'finish_workspace_write' || toolName === 'register_deliverable' || toolName === 'commit_artifact') {
     if (value.deliverable === true && typeof value.path === 'string') pushDeliverable(value.path);
   }
+  if (toolName === 'model_generate_image' || toolName === 'model_transcribe_audio' || toolName === 'model_synthesize_speech') {
+    if (value.deliverable === true && typeof value.path === 'string') pushDeliverable(value.path);
+  }
   if (toolName === 'publish_to_project') {
     if (typeof value.path === 'string' && typeof value.projectPath === 'string') {
       events.push({ type: 'project.file.published', runId, path: value.path, projectPath: value.projectPath });
@@ -567,12 +602,13 @@ function yieldArtifactEvents(
  */
 export async function* streamAgentReply(input: {
   profile: AgentProfile;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: import('@workmate/contracts').ChatModelMessage[];
   model: ModelConfig;
   skills?: AgentSkillRuntime[];
   searchProviders?: import('@workmate/contracts').SearchProviderRuntime[];
   mcpConnections?: import('@workmate/contracts').McpConnectionRuntime[];
   knowledgeBases?: import('@workmate/contracts').KnowledgeBaseRuntime[];
+  modelCapabilities?: import('@workmate/contracts').ModelCapabilityRuntime[];
   runId?: string;
   conversationId?: string;
   projectWorkspacePath?: string;
@@ -645,6 +681,9 @@ export async function* streamAgentReply(input: {
 
     const runtimeInstructions = [
       input.profile.instructions,
+      (input.modelCapabilities ?? []).length
+        ? `Authorized specialist model capabilities for this run: ${(input.modelCapabilities ?? []).map((item) => `${item.capability} (${item.mode})`).join(', ')}. Use their typed tools only for matching subtasks. "preferred" means prefer the specialist after a task match; it does not replace planning or justify unrelated calls.`
+        : '',
       runtimeClockContext(),
       'Authorized Agent Skills (associated skills are preloaded before the first model turn when instructions are available):\n' + formatAuthorizedSkillsCatalog(skills),
       preloadedSkills ? `Preloaded Skill instructions (available on first turn; follow only when relevant):\n${preloadedSkills}` : '',
@@ -664,6 +703,7 @@ export async function* streamAgentReply(input: {
       workspaceModeContract(workspaceMode),
       'Associated Skill instructions are preloaded before the first model turn whenever available, so prefer those specialized procedures immediately instead of exploring generic alternatives. Preloading is for reasoning only: if you need packaged Skill files or bundled Skill scripts, call load_skill for that relevant user Skill first. Workspace and artifact operations are platform Tools, not a Skill: follow each Tool schema and result exactly. Skill files are read-only. Never claim an operation ran unless its Tool returned a successful result. For artifact requests, do not stop at a plan: produce and verify the file, then commit it with commit_artifact. Once a verified deliverable exists, stop calling tools and return the result. In the user-facing answer, refer to the delivered asset by its filename, not its internal workspace path. Use reasonable defaults for non-critical details; if a required permission, script, dependency, or output path is unavailable, state the exact blocker and the one next user action.',
       'Agent runtime: QuantumAI pi-agent-core + pi-coding-agent skills catalog.',
+      'This is a new execution. Tool retryScope=current_run and retryable=false from earlier conversation turns do not block this execution. If the latest user explicitly requests transcription or retry and ASR is authorized, call model_transcribe_audio instead of repeating a historical refusal. Only tool results actually obtained in this execution count as current attempts; never invent attempt counts. A failure obtained in this execution still stops automatic retries as specified by the tool.',
     ].filter(Boolean).join('\n\n');
 
     // Keep the configured task budget. Do not impose a document-specific global
@@ -686,7 +726,12 @@ export async function* streamAgentReply(input: {
         'finish_workspace_write', 'register_deliverable',
       ]).has(tool.name))
       : platformTools;
-    const agentTools = collectAgentTools(
+    const modelCapabilityTools = createModelCapabilityToolSession({
+      configs: input.model.supportsVision ? input.modelCapabilities?.filter((config) => config.capability !== 'vision') : input.modelCapabilities,
+      workspaceRoot,
+      visionContext: conversationId ? { conversationId, messages: input.messages } : undefined,
+    });
+    const collectedTools = collectAgentTools(
       createPiCapabilityTools({
         runId,
         workspaceRoot,
@@ -700,12 +745,16 @@ export async function* streamAgentReply(input: {
         conversationId: conversationId || undefined,
         workspaceMode,
       }),
+      modelCapabilityTools.nativeTools,
       skillTools,
       searchTools,
       knowledgeTools,
       experienceTools,
       mcp.tools,
     );
+    // Pi consumes the native view of the same registry used by sidecar transports.
+    // collectAgentTools resolves legacy name precedence before strict duplicate checks.
+    const agentTools = createUnifiedToolSession(registrationsFromTools(collectedTools)).nativeTools;
 
     let emittedText = false;
     let lastToolSucceeded: boolean | undefined;
@@ -742,12 +791,17 @@ export async function* streamAgentReply(input: {
       // strip thinking → path-only writes → wrap/truncate command results → compact.
       transformContext: async (messages, signal) => {
         const sanitized = sanitizeToolPayloadsInMessages(messages);
-        return compactAgentContext({
+        const compacted = await compactAgentContext({
           messages: sanitized,
           model: input.model,
           piModel,
           signal,
         });
+        // Summary text cannot replace visual evidence during a long tool loop.
+        const missingImages = sanitized.filter((message) => message.role === 'user'
+          && Array.isArray(message.content) && message.content.some((part) => part.type === 'image')
+          && !compacted.includes(message));
+        return [...missingImages, ...compacted];
       },
       getApiKey: () => input.model.apiKey || (input.model.provider === 'ollama' ? 'ollama' : undefined),
       streamFn: (model, context, options) =>
@@ -811,12 +865,25 @@ export async function* streamAgentReply(input: {
           agent.abort();
           return;
         }
-        enqueue({
-          type: 'tool.started',
-          runId,
-          toolName: event.toolName,
+        const modelCapability = MODEL_CAPABILITY_TOOLS[event.toolName];
+        const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
+        enqueue(modelCapability && capabilityConfig ? {
+          type: 'capability.started', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId,
           summary: toolInputSummary(event.toolName, event.args),
-        });
+        } : { type: 'tool.started', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolInputSummary(event.toolName, event.args) });
+        return;
+      }
+
+      if (event.type === 'tool_execution_update') {
+        const details = extractToolDetails(event.partialResult);
+        const value = details && typeof details === 'object' ? details as Record<string, unknown> : {};
+        const summary = typeof value.summary === 'string' ? value.summary : '处理中…';
+        const progress = typeof value.progress === 'number' ? Math.max(0, Math.min(100, value.progress)) : undefined;
+        const modelCapability = MODEL_CAPABILITY_TOOLS[event.toolName];
+        const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
+        enqueue(modelCapability && capabilityConfig
+          ? { type: 'capability.progress', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary, ...(progress !== undefined ? { progress } : {}) }
+          : { type: 'tool.progress', runId, invocationId: event.toolCallId, toolName: event.toolName, summary, ...(progress !== undefined ? { progress } : {}) });
         return;
       }
 
@@ -847,7 +914,11 @@ export async function* streamAgentReply(input: {
           const hint = /JSON|parse|Invalid input|Unterminated string/i.test(raw)
             ? ' 写入内容过大或转义失败：请改用更小的 content，或分多次 mode=append / chunks 写入。'
             : '';
-          enqueue({ type: 'tool.failed', runId, toolName: event.toolName, summary: `${raw}${hint}` });
+          const modelCapability = MODEL_CAPABILITY_TOOLS[event.toolName];
+          const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
+          enqueue(modelCapability && capabilityConfig
+            ? { type: 'capability.failed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: `${raw}${hint}` }
+            : { type: 'tool.failed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: `${raw}${hint}` });
           return;
         }
 
@@ -856,13 +927,29 @@ export async function* streamAgentReply(input: {
         // should not escalate the whole turn to「需要处理」.
         const ok = logicalOk || isSoftFailTool(event.toolName);
         lastToolSucceeded = logicalOk;
-        enqueue({
-          type: 'tool.completed',
-          runId,
-          toolName: event.toolName,
-          summary: toolResultSummary(event.toolName, output),
-          ok,
-        });
+        const modelCapability = MODEL_CAPABILITY_TOOLS[event.toolName];
+        const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
+        const outputRecord = output && typeof output === 'object' ? output as Record<string, unknown> : undefined;
+        const capabilityUsage = logicalOk && capabilityConfig && outputRecord?.cached !== true
+          ? tokenUsageFromCapability(outputRecord?.usage)
+          : null;
+        if (capabilityUsage && capabilityConfig) {
+          enqueue({
+            type: 'run.usage', runId, usage: capabilityUsage, capability: capabilityConfig.capability,
+            model: {
+              provider: capabilityConfig.provider, chatModel: capabilityConfig.modelId,
+              ...(capabilityConfig.baseUrl ? { baseUrl: capabilityConfig.baseUrl } : {}),
+              ...(capabilityConfig.providerLabel ? { providerLabel: capabilityConfig.providerLabel } : {}),
+            },
+            stepIndex: usageSteps,
+          });
+          usageSteps += 1;
+        }
+        enqueue(modelCapability && capabilityConfig
+          ? logicalOk
+            ? { type: 'capability.completed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: toolResultSummary(event.toolName, output), ok }
+            : { type: 'capability.failed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: toolResultSummary(event.toolName, output) }
+          : { type: 'tool.completed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolResultSummary(event.toolName, output), ok });
         for (const artifactEvent of yieldArtifactEvents(runId, event.toolName, output, emittedArtifactPaths)) {
           enqueue(artifactEvent);
         }
@@ -872,7 +959,7 @@ export async function* streamAgentReply(input: {
     const history = input.messages;
     const prior = history.length > 1 ? history.slice(0, -1) : [];
     const last = history[history.length - 1];
-    if (prior.length) agent.replaceMessages(toPiHistoryMessages(prior, input.model));
+    if (prior.length) agent.replaceMessages(await toPiHistoryMessages(prior, input.model, conversationId));
 
     const runPromise = (async () => {
       try {
@@ -880,7 +967,7 @@ export async function* streamAgentReply(input: {
           enqueue({ type: 'run.failed', runId, message: 'Missing user message for agent run.' });
           return;
         }
-        await agent.prompt(last.content);
+        await agent.prompt(input.model.supportsVision ? imageMessageText(last) : visionAttachmentText(last), input.model.supportsVision ? await resolveChatImages(last, conversationId) : []);
         if (abortSignal.aborted) {
           const timedOut = timeoutController.signal.aborted && !input.abortSignal?.aborted;
           enqueue({

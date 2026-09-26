@@ -1,12 +1,14 @@
 # 测试约定
 
-> 场景级规格还可对照：[../sdd/test-spec.md](../sdd/test-spec.md)
+> 项目级策略和回归目录见 [测试与质量中心](../quality/README.md)；历史场景规格仅供追溯：[早期测试规格](../archive/legacy-global-sdd/test-spec.md)。
 
 ## 1. 原则
 
 - **每个模块**公共行为变更必须有可运行回归；禁止只交实现。
 - 优先测 **契约、权限、路径隔离、状态机、并发**，而非供应商 SDK 内部。
 - 已有脚本回归必须纳入相关 PR 的自检。
+- 测试应验证对外行为和稳定契约，避免把内部实现细节固化为不可重构的断言。
+- 外部模型和第三方服务默认使用 mock/stub；真实服务测试必须记录模型、参数、环境、成本和数据边界。
 
 ## 2. 分层
 
@@ -44,4 +46,8 @@ pnpm concurrency:regression
 pnpm dsh:regression
 ```
 
-发布前清单见 `docs/release-checklist.md`。
+发布前清单见 `docs/releases/checklist.md`。
+
+## 6. 测试证据
+
+测试记录至少包含提交或工作区状态、执行日期、环境、命令、结果和失败项。统一使用 `通过`、`失败`、`未执行`、`不适用`、`风险接受`，不得用“应该没问题”代替结论。性能和能力比较进入 `docs/benchmarks/`，不能用 Benchmark 得分代替功能正确性。

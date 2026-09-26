@@ -3,6 +3,7 @@ import { chatRequestToRunParams } from './client.js';
 import { prepareAgentscopeHostTools, type HostToolCall } from './host-tools.js';
 import { acquireSharedAgentscopeRunSlot, ensureSharedAgentscopeRuntime, markSharedAgentscopeHandleUnhealthy } from './process.js';
 import { resolveAgentWorkspaceRoot } from '../workspace-mode.js';
+import { MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
 
 /** Silence between sidecar events before we abort a hung provider stream. */
 export const DEFAULT_STREAM_IDLE_MS = 150_000;
@@ -54,9 +55,9 @@ export async function* streamAgentReplyViaAgentscope(input: ChatRequest & {
   runId?: string;
   sessionSummary?: string;
 }): AsyncGenerator<AgentEvent> {
-  const hostTools = await prepareAgentscopeHostTools(input);
   const streamIdleMs = resolveStreamIdleMs(input);
   const baseParams = chatRequestToRunParams(input);
+  const hostTools = await prepareAgentscopeHostTools({ ...input, runId: baseParams.runId });
   const params = {
     ...baseParams,
     ...hostTools.runtimePatch,
@@ -82,12 +83,36 @@ export async function* streamAgentReplyViaAgentscope(input: ChatRequest & {
       handle.client.setHostRequestHandler(runId, async (method, params) => {
         if (method !== 'host.tool.invoke') throw new Error(`Unsupported host method: ${method}`);
         const runId = String(params.runId || '');
-        const results = await hostTools.executeHostToolCalls(runId, asToolCalls(params.toolCalls));
+        const calls = asToolCalls(params.toolCalls);
+        for (const call of calls) {
+          const capability = MODEL_CAPABILITY_BY_TOOL[call.name as keyof typeof MODEL_CAPABILITY_BY_TOOL];
+          const modelId = input.modelCapabilities?.find((item) => item.capability === capability)?.modelId;
+          if (capability && modelId) queue.push({ type: 'capability.started', runId, invocationId: call.id, capability, modelId, summary: call.name });
+        }
+        bump();
+        const results = await hostTools.executeHostToolCalls(runId, calls);
+        for (const result of results) {
+          const capability = MODEL_CAPABILITY_BY_TOOL[result.name as keyof typeof MODEL_CAPABILITY_BY_TOOL];
+          const modelId = input.modelCapabilities?.find((item) => item.capability === capability)?.modelId;
+          if (!capability || !modelId) continue;
+          queue.push(result.state === 'success'
+            ? { type: 'capability.completed', runId, invocationId: result.id, capability, modelId, summary: result.summary || result.name, ok: true }
+            : { type: 'capability.failed', runId, invocationId: result.id, capability, modelId, summary: result.summary || result.name });
+          try {
+            const output = JSON.parse(result.output) as { path?: unknown; deliverable?: unknown };
+            if (result.state === 'success' && output.deliverable === true && typeof output.path === 'string') {
+              queue.push({ type: 'artifact.created', runId, path: output.path });
+            }
+          } catch { /* non-JSON tool output */ }
+        }
+        bump();
         return { executionResults: results };
       });
 
       const offEvent = handle.client.onEvent((payload) => {
         if (payload.runId !== runId) return;
+        if ((payload.event.type === 'tool.started' || payload.event.type === 'tool.completed' || payload.event.type === 'tool.failed')
+          && MODEL_CAPABILITY_BY_TOOL[payload.event.toolName as keyof typeof MODEL_CAPABILITY_BY_TOOL]) return;
         lastEventAt = Date.now();
         queue.push(payload.event);
         bump();

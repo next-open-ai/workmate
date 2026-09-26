@@ -9,8 +9,12 @@ import type {
   Message,
 } from "../../app/workspace";
 import ChatReplyPending from "./ChatReplyPending.vue";
+import ChatImagePreview from './ChatImagePreview.vue';
+import ChatAssetMediaPreview from './ChatAssetMediaPreview.vue';
+import type { ChatImageAttachment } from '@workmate/contracts';
+import { uploadChatImage } from '../../services/orchestration';
 import ChatAutoScheduleRail from "./ChatAutoScheduleRail.vue";
-import type { ProviderConfig } from "../../app/model-config";
+import { useModelConfig, type ProviderConfig } from "../../app/model-config";
 import type { ToolActivity, ToolApproval } from "../../services/api";
 import type { ExecutionLevel } from "../../app/capabilities";
 import { useCapabilities } from "../../app/capabilities";
@@ -23,8 +27,10 @@ import { useNotify } from "../../app/notify";
 import { employeeDisplayDescription, employeeDisplayName } from "../../app/employees";
 import { getServerRuntimeConfig, createMobileChatSession, getMobileChatSession, importDataFromAsset } from "../../services/api";
 import { chatBusy } from "../../app/workspace";
+import { uploadRecording } from '../../services/api';
 import { qrDataUrl } from "../../app/qr-data-url.js";
 import { markdownToHtml } from "../../app/project-files";
+import { shouldPollServerMirror } from '../../app/chat-run-timing.js';
 
 type EngineId = "pi" | "agentscope" | "dsh";
 function isEngineId(value: unknown): value is EngineId {
@@ -47,6 +53,7 @@ const props = defineProps<{
     collaborationDelivery?: CollaborationDelivery,
     onlineSearch?: boolean,
     autoSchedule?: boolean,
+    attachments?: ChatImageAttachment[],
   ) => Promise<void>;
   abortMessage?: () => void;
   approve: (
@@ -80,6 +87,68 @@ const collaborationDelivery = ref<CollaborationDelivery>("direct");
 const onlineSearch = ref(true);
 const autoSchedule = ref(false);
 const sending = ref(false);
+const uploadingRecording = ref(false);
+const recordingInput = ref<HTMLInputElement | null>(null);
+const recording = ref<{ reference: string; name: string; size: number } | null>(null);
+const imageInput = ref<HTMLInputElement | null>(null);
+const images = ref<ChatImageAttachment[]>([]);
+const uploadingImages = ref(false);
+const imageSessionId = ref('');
+let imageUploadVersion = 0;
+watch(() => [props.conversation?.id, props.selectedEmployeeId], () => {
+  images.value = []; imageSessionId.value = ''; imageUploadVersion += 1;
+});
+async function attachImages(files: File[]) {
+  if (inputBusy.value) return;
+  if (!visionReady.value) { notify.error(new Error(visionHelp.value)); return; }
+  if (files.length + images.value.length > 4) { notify.error(new Error('每次最多附加 4 张图片。')); return; }
+  uploadingImages.value = true;
+  try {
+    const sessionId = await props.ensureServerSession?.();
+    if (!sessionId) throw new Error('请先创建会话。');
+    await nextTick();
+    const version = imageUploadVersion;
+    imageSessionId.value = sessionId;
+    for (const file of files) {
+      const attachment = await uploadChatImage(sessionId, file);
+      if (version !== imageUploadVersion) return;
+      images.value.push(attachment);
+    }
+    if (!draft.value.trim()) draft.value = '请分析这些图片。';
+  } catch (cause) { notify.error(cause); }
+  finally { uploadingImages.value = false; }
+}
+async function selectImages(event: Event) {
+  const input = event.target as HTMLInputElement;
+  await attachImages(Array.from(input.files || []));
+  input.value = '';
+}
+function pasteImages(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'));
+  if (files.length) { event.preventDefault(); void attachImages(files); }
+}
+const { modelCapabilitiesForAgent, modelForEmployee } = useModelConfig();
+const effectiveChatModel = computed(() => modelForEmployee(props.selectedEmployeeId, props.model) ?? props.model);
+const recordingReady = computed(() => modelCapabilitiesForAgent(props.selectedEmployeeId).some((model) => model.capability === 'asr'));
+const recordingHelp = computed(() => recordingReady.value
+  ? '上传录音（≤25 MB）。转写时会发送至员工已授权的语音识别服务；阿里本地文件使用临时存储。'
+  : '请先在员工配置中开启“语音识别”应用模型能力。');
+watch(() => [props.conversation?.id, props.selectedEmployeeId], () => { recording.value = null; });
+async function selectRecording(event: Event) {
+  const element = event.target as HTMLInputElement;
+  const file = element.files?.[0];
+  if (!file) return;
+  const conversationId = props.conversation?.id;
+  const employeeId = props.selectedEmployeeId;
+  uploadingRecording.value = true;
+  try {
+    const uploaded = await uploadRecording(file);
+    if (props.conversation?.id !== conversationId || props.selectedEmployeeId !== employeeId) return;
+    recording.value = uploaded;
+    if (!draft.value.trim()) draft.value = '请将这份录音转成文字，生成可下载的转写文件，并总结要点。';
+  } catch (cause) { notify.error(cause); }
+  finally { uploadingRecording.value = false; element.value = ''; }
+}
 const mobileShareOpen = ref(false);
 const mobileShareBusy = ref(false);
 const mobileShareUrl = ref("");
@@ -90,8 +159,9 @@ const mobileShareToken = ref("");
 const importingAssetId = ref("");
 let mobilePullTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
+let serverSyncBusy = false;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
-const inputBusy = computed(() => sending.value || chatBusy.value);
+const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value);
 const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
 const { get: getEmployeePrefs } = useEmployeeRuntimePrefs();
@@ -110,6 +180,7 @@ const tiers: Array<{ value: ExecutionLevel; label: string }> = [
 ];
 
 function displayTool(activity: ToolActivity) {
+  if (activity.toolName === 'model:vision' || activity.toolName === 'model_understand_images') return '图片理解';
   return activity.toolName.replace(/_/g, " ");
 }
 function handlePermissionTierChange(event: Event) {
@@ -186,11 +257,18 @@ function elapsedLabel(elapsedMs?: number) {
 }
 async function submit() {
   if (!draft.value.trim() || !props.modelConfigured || inputBusy.value) return;
-  const text = draft.value;
+  const attachedImages = [...images.value];
+  if ((attachedImages.length || props.conversation?.messages.some((message) => message.attachments?.length)) && !visionReady.value) {
+    notify.error(new Error(visionHelp.value)); return;
+  }
+  const attachedRecording = recording.value;
+  const text = draft.value + (attachedRecording ? `\n\n录音附件：${attachedRecording.name}\n请调用 model_transcribe_audio，path=${attachedRecording.reference}，outputFormat=text。` : '');
   const selected = autoSchedule.value ? [] : [...collaboratorIds.value];
   const delivery = collaborationDelivery.value;
   const useAutoSchedule = autoSchedule.value;
   draft.value = "";
+  recording.value = null;
+  images.value = [];
   if (!useAutoSchedule) {
     collaboratorIds.value = [];
   }
@@ -201,8 +279,11 @@ async function submit() {
   stickToBottom.value = true;
   void nextTick(() => scrollMessagesToBottom(true));
   try {
-    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule);
+    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule, attachedImages);
   } catch (cause) {
+    draft.value = text.split('\n\n录音附件：')[0];
+    recording.value = attachedRecording;
+    images.value = attachedImages;
     notify.error(cause);
   } finally {
     sending.value = false;
@@ -244,12 +325,22 @@ function stopServerSync() {
   }
 }
 
+async function pullServerOnce() {
+  if (serverSyncBusy) return;
+  serverSyncBusy = true;
+  try { await props.pullFromServer?.(); }
+  finally { serverSyncBusy = false; }
+}
+
 function ensureServerSync() {
   stopServerSync();
   if (!props.conversation?.serverSessionId) return;
+  // One catch-up when entering/switching conversations. Periodic mirroring is
+  // reserved for conversations explicitly shared to a phone.
+  void pullServerOnce();
+  if (!shouldPollServerMirror(props.conversation.serverSessionId, props.conversation.mobileMirrorEnabled)) return;
   serverSyncTimer = setInterval(() => {
-    // Keep desktop mirror caught up with phone-originated turns even after the QR sheet closes.
-    void props.pullFromServer?.();
+    void pullServerOnce();
   }, 1800);
 }
 
@@ -278,6 +369,7 @@ async function openMobileShare() {
     mobileShareUrl.value = created.lanUrls[0] || created.url;
     mobileShareExpiresAt.value = created.expiresAt;
     mobileShareQr.value = await qrDataUrl(mobileShareUrl.value, 200);
+    if (props.conversation) props.conversation.mobileMirrorEnabled = true;
     ensureServerSync();
     stopMobilePull();
     mobilePullTimer = setInterval(() => {
@@ -441,6 +533,15 @@ const employeeEngineOverride = computed(() => {
 const expectedEngine = computed<EngineId>(
   () => employeeEngineOverride.value ?? runtimeDefaultEngine.value,
 );
+const visionService = computed(() => modelCapabilitiesForAgent(props.selectedEmployeeId).find((model) => model.capability === 'vision'));
+const visionHelp = computed(() => !effectiveChatModel.value.supportsVision && !visionService.value
+  ? '请选用视觉主模型，或在设置中绑定“图片理解”模型并在员工应用模型能力中开启它。'
+  : expectedEngine.value !== 'pi' ? '图片理解暂只支持 Pi，请在员工设置中切换执行引擎。'
+  : autoSchedule.value || collaboratorIds.value.length ? '图片理解暂只支持单员工，请关闭自动调度并移除协作者。'
+  : effectiveChatModel.value.supportsVision
+    ? 'PNG / JPEG / WebP · 每张 ≤10 MB，每次 ≤4 张；图片交给当前主模型直接理解。追问保留最近4张原图。'
+    : `图片将与问题及必要上下文一起交给 ${visionService.value?.providerLabel || visionService.value?.provider} · ${visionService.value?.modelId} 识别，再由主模型回答。每张 ≤10 MB，最近4张原图可追问。`);
+const visionReady = computed(() => Boolean(props.modelConfigured && (effectiveChatModel.value.supportsVision || visionService.value) && expectedEngine.value === 'pi' && !autoSchedule.value && !collaboratorIds.value.length));
 /** Live engine from the latest assistant turn when SSE reported it. */
 const liveTurnEngine = computed<EngineId | null>(() => {
   const messages = props.conversation?.messages;
@@ -839,6 +940,9 @@ onBeforeUnmount(() => {
               <div v-if="message.role === 'assistant'" v-html="markdownToHtml(message.content)" />
               <template v-else>{{ message.content }}</template>
             </div>
+            <div v-if="message.attachments?.length" class="mt-2 flex flex-wrap gap-2">
+              <ChatImagePreview v-for="(image, index) in message.attachments" :key="image.id" :image="image" :index="index" :session-id="conversation?.serverSessionId" />
+            </div>
             <details
               v-if="message.role === 'assistant' && message.reasoning"
               class="mt-2 overflow-hidden rounded-lg border border-[var(--border)]/80 bg-[var(--surface)]/92 text-[11px] shadow-[0_4px_14px_rgba(15,23,42,0.035)]"
@@ -962,7 +1066,7 @@ onBeforeUnmount(() => {
               <ol class="space-y-0.5 border-t border-[var(--border)] p-1">
                 <li
                   v-for="(activity, index) in message.activities"
-                  :key="`${activity.toolName}-${index}`"
+                  :key="activity.invocationId || `${activity.toolName}-${index}`"
                   :class="[
                     'relative overflow-hidden rounded-md border px-1.5 py-1 shadow-sm transition-all',
                     activity.status === 'running'
@@ -1003,6 +1107,22 @@ onBeforeUnmount(() => {
                       <p class="mt-0.5 break-words text-[10px] leading-3.5 text-[var(--muted)]">
                         {{ activity.summary }}
                       </p>
+                      <div
+                        v-if="activity.status === 'running' && activity.progress !== undefined"
+                        class="mt-1 flex items-center gap-1.5"
+                        role="progressbar"
+                        :aria-valuenow="Math.round(activity.progress)"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                      >
+                        <div class="h-1 flex-1 overflow-hidden rounded-full bg-[var(--border)]">
+                          <div
+                            class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
+                            :style="{ width: `${Math.max(2, Math.min(100, activity.progress))}%` }"
+                          ></div>
+                        </div>
+                        <span class="w-7 text-right text-[8px] tabular-nums text-[var(--muted)]">{{ Math.round(activity.progress) }}%</span>
+                      </div>
                     </div>
                   </div>
                 </li>
@@ -1054,46 +1174,49 @@ onBeforeUnmount(() => {
               <article
                 v-for="asset in message.assets"
                 :key="asset.id"
-                class="flex items-center gap-3 rounded-xl border border-[var(--accent)]/25 bg-[var(--accent-soft)]/45 p-3"
+                class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-[0_10px_30px_rgba(15,23,42,0.07)] transition-shadow hover:shadow-[0_14px_36px_rgba(15,23,42,0.11)]"
               >
-                <span
-                  class="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-[var(--surface)] text-[10px] font-extrabold text-[var(--accent)]"
-                  >{{ assetType(asset) }}</span
-                >
-                <div class="min-w-0 flex-1">
-                  <p class="truncate text-sm font-bold">{{ asset.name }}</p>
-                  <p class="mt-0.5 text-xs text-[var(--muted)]">
-                    已归档至资产库 · {{ assetType(asset) }} ·
-                    {{ formatBytes(asset.sizeBytes) }}
-                  </p>
-                  <div v-if="asset.kind === 'bundle'" class="mt-2 max-h-24 overflow-y-auto rounded-lg bg-[var(--surface)]/70 p-1.5 font-mono text-[10px] text-[var(--muted)]">
-                    <button v-for="file in asset.manifest?.files || []" :key="file.path" class="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]" type="button" @click="openBundleFile(asset, file.path)">{{ file.path }}</button>
+                <ChatAssetMediaPreview :asset="asset" />
+                <div class="flex flex-wrap items-center gap-3 p-3.5">
+                  <span
+                    class="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[var(--accent)]/15 bg-[var(--accent-soft)] text-[10px] font-extrabold tracking-wide text-[var(--accent)]"
+                    >{{ assetType(asset) }}</span
+                  >
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate text-sm font-bold">{{ asset.name }}</p>
+                    <p class="mt-0.5 text-xs text-[var(--muted)]">
+                      已安全归档 · {{ assetType(asset) }} ·
+                      {{ formatBytes(asset.sizeBytes) }}
+                    </p>
+                    <div v-if="asset.kind === 'bundle'" class="mt-2 max-h-24 overflow-y-auto rounded-lg bg-[var(--surface)]/70 p-1.5 font-mono text-[10px] text-[var(--muted)]">
+                      <button v-for="file in asset.manifest?.files || []" :key="file.path" class="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]" type="button" @click="openBundleFile(asset, file.path)">{{ file.path }}</button>
+                    </div>
                   </div>
-                </div>
-                <div class="flex shrink-0 flex-wrap justify-end gap-2">
-                  <button
-                    class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent)]"
-                    type="button"
-                    @click="downloadAsset(asset)"
-                  >
-                    下载
-                  </button>
-                  <button
-                    v-if="isSpreadsheetAsset(asset)"
-                    class="rounded-lg border border-emerald-500/40 bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:border-emerald-600 disabled:opacity-50"
-                    type="button"
-                    :disabled="importingAssetId === asset.id"
-                    @click="importAssetToData(asset)"
-                  >
-                    {{ importingAssetId === asset.id ? "导入中…" : "导入数据中心" }}
-                  </button>
-                  <button
-                    class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-semibold text-white"
-                    type="button"
-                    @click="emit('openAssets')"
-                  >
-                    资产库
-                  </button>
+                  <div class="flex shrink-0 flex-wrap justify-end gap-2">
+                    <button
+                      class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent)]"
+                      type="button"
+                      @click="downloadAsset(asset)"
+                    >
+                      下载
+                    </button>
+                    <button
+                      v-if="isSpreadsheetAsset(asset)"
+                      class="rounded-lg border border-emerald-500/40 bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:border-emerald-600 disabled:opacity-50"
+                      type="button"
+                      :disabled="importingAssetId === asset.id"
+                      @click="importAssetToData(asset)"
+                    >
+                      {{ importingAssetId === asset.id ? "导入中…" : "导入数据中心" }}
+                    </button>
+                    <button
+                      class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-semibold text-white"
+                      type="button"
+                      @click="emit('openAssets')"
+                    >
+                      资产库
+                    </button>
+                  </div>
                 </div>
               </article>
             </section>
@@ -1120,18 +1243,32 @@ onBeforeUnmount(() => {
 
     <div class="mx-auto mb-7 w-full max-w-[1560px] shrink-0 px-6 lg:px-10">
       <form
-        class="relative grid gap-2 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-4 shadow-lg"
+        class="relative grid gap-3 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-3 shadow-lg transition focus-within:border-[var(--accent)]/35 focus-within:shadow-xl"
         @submit.prevent="submit"
       >
+        <div v-if="images.length || recording" class="flex flex-wrap items-center gap-2 border-b border-[var(--border)]/70 pb-3">
+          <div v-for="(image, index) in images" :key="image.id" class="relative">
+            <ChatImagePreview :image="image" :index="index" :session-id="imageSessionId" />
+            <button type="button" class="absolute -right-1 -top-1 grid h-5 w-5 place-items-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-xs shadow-sm hover:text-[var(--danger)]" :aria-label="`移除图片 ${image.name}`" :disabled="inputBusy" @click="images.splice(index, 1)">×</button>
+          </div>
+          <span v-if="recording" class="inline-flex max-w-full items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs">
+            <svg aria-hidden="true" class="h-4 w-4 shrink-0 text-[var(--accent)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+            <span class="truncate">{{ recording.name }}</span><span class="shrink-0 text-[var(--muted)]">{{ Math.ceil(recording.size / 1024) }} KB</span>
+            <button type="button" class="text-base leading-none hover:text-[var(--danger)]" aria-label="移除录音" :disabled="inputBusy" @click="recording = null">×</button>
+          </span>
+        </div>
         <textarea
           v-model="draft"
           rows="3"
-          class="min-h-[76px] w-full resize-y border-0 bg-transparent p-0 outline-none"
+          class="min-h-[76px] w-full resize-y border-0 bg-transparent px-1 py-0.5 outline-none"
           :placeholder="t('chat.placeholder')"
           :disabled="!modelConfigured || inputBusy"
           @input="handleDraftInput"
           @keydown="handleDraftKeydown"
+          @paste="pasteImages"
         ></textarea>
+        <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" @change="selectImages" />
+        <input ref="recordingInput" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,.mp4,.mpeg,.mpga" class="hidden" @change="selectRecording" />
         <div
           v-if="mentionMenuOpen"
           class="absolute bottom-[104px] left-4 z-30 w-[280px] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl"
@@ -1197,7 +1334,22 @@ onBeforeUnmount(() => {
             <option value="direct">交付：专家直接答复</option>
           </select>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2 border-t border-[var(--border)]/70 pt-3">
+          <div class="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
+            <div class="group relative">
+              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-35" :disabled="inputBusy || !visionReady || images.length >= 4" aria-label="添加图片" :aria-describedby="'image-upload-help'" @click="imageInput?.click()">
+                <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m4 17 4-4 3 3 3-3 6 5"/></svg>
+              </button>
+              <div id="image-upload-help" role="tooltip" class="pointer-events-none absolute bottom-[calc(100%+9px)] left-0 z-40 hidden w-72 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left text-[11px] leading-4 text-[var(--text)] shadow-xl group-hover:block group-focus-within:block">{{ uploadingImages ? '正在上传图片…' : visionHelp }}</div>
+            </div>
+            <div class="group relative">
+              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-35" :disabled="inputBusy || !modelConfigured || !recordingReady" aria-label="上传录音" :aria-describedby="'recording-upload-help'" @click="recordingInput?.click()">
+                <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg>
+              </button>
+              <div id="recording-upload-help" role="tooltip" class="pointer-events-none absolute bottom-[calc(100%+9px)] left-0 z-40 hidden w-72 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left text-[11px] leading-4 text-[var(--text)] shadow-xl group-hover:block group-focus-within:block">{{ uploadingRecording ? '正在上传录音…' : recordingHelp }}</div>
+            </div>
+          </div>
+          <span class="hidden h-6 w-px bg-[var(--border)] sm:block" aria-hidden="true" />
           <div class="relative">
             <button
               class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2.5 py-2 text-xs font-semibold hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"

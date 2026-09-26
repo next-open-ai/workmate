@@ -39,6 +39,12 @@ function isDeltaLike(event: AgentEvent): boolean {
   return event.type === 'message.delta' || event.type === 'reasoning.delta';
 }
 
+function findRunningActivity(activities: RunActivity[], event: { invocationId?: string; toolName: string }) {
+  return [...activities].reverse().find((item) => event.invocationId
+    ? item.invocationId === event.invocationId
+    : !item.invocationId && item.toolName === event.toolName && item.status === 'running');
+}
+
 function looksLikeReasoningBlock(text: string) {
   const trimmed = text.replace(/\u0000/g, '').trim();
   if (!trimmed) return false;
@@ -232,16 +238,24 @@ export class RunEngine {
           break;
         }
         case 'tool.started': {
-          const activity: RunActivity = { toolName: event.toolName, summary: event.summary, status: 'running', at: Date.now() };
+          const activity: RunActivity = { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', at: Date.now() };
           run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity });
           scheduleCheckpoint();
           break;
         }
+        case 'tool.progress': {
+          const existing = findRunningActivity(run.activities, event);
+          const activity: RunActivity = existing
+            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: Date.now() })
+            : { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', progress: event.progress, at: Date.now() };
+          if (!existing) run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity: { ...activity } });
+          scheduleCheckpoint();
+          break;
+        }
         case 'tool.completed': {
-          const existing = [...run.activities].reverse().find(
-            (item) => item.toolName === event.toolName && item.status === 'running',
-          );
+          const existing = findRunningActivity(run.activities, event);
           // Keep the started summary (often includes args); only flip status.
           const activity: RunActivity = existing
             ? Object.assign(existing, {
@@ -249,7 +263,7 @@ export class RunEngine {
                 at: Date.now(),
               })
             : {
-                toolName: event.toolName,
+                invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
                 status: event.ok ? 'completed' : 'failed',
                 at: Date.now(),
@@ -260,9 +274,7 @@ export class RunEngine {
           break;
         }
         case 'tool.failed': {
-          const existing = [...run.activities].reverse().find(
-            (item) => item.toolName === event.toolName && item.status === 'running',
-          );
+          const existing = findRunningActivity(run.activities, event);
           const activity: RunActivity = existing
             ? Object.assign(existing, {
                 status: 'failed',
@@ -272,11 +284,42 @@ export class RunEngine {
                 at: Date.now(),
               })
             : {
-                toolName: event.toolName,
+                invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
                 status: 'failed',
                 at: Date.now(),
               };
+          if (!existing) run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity: { ...activity } });
+          scheduleCheckpoint();
+          break;
+        }
+        case 'capability.started': {
+          const activity: RunActivity = { invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'running', at: Date.now() };
+          run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity });
+          scheduleCheckpoint();
+          break;
+        }
+        case 'capability.progress': {
+          const toolName = `model:${event.capability}`;
+          const existing = findRunningActivity(run.activities, { invocationId: event.invocationId, toolName });
+          const activity: RunActivity = existing
+            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: Date.now() })
+            : { invocationId: event.invocationId, toolName, summary: event.summary, status: 'running', progress: event.progress, at: Date.now() };
+          if (!existing) run.activities.push(activity);
+          publish({ type: 'run.activity', runId, activity: { ...activity } });
+          scheduleCheckpoint();
+          break;
+        }
+        case 'capability.completed':
+        case 'capability.failed': {
+          const toolName = `model:${event.capability}`;
+          const existing = findRunningActivity(run.activities, { invocationId: event.invocationId, toolName });
+          const failed = event.type === 'capability.failed' || (event.type === 'capability.completed' && !event.ok);
+          const activity: RunActivity = existing
+            ? Object.assign(existing, { status: failed ? 'failed' : 'completed', ...(failed ? { summary: event.summary } : {}), progress: failed ? existing.progress : 100, at: Date.now() })
+            : { invocationId: event.invocationId, toolName, summary: event.summary, status: failed ? 'failed' : 'completed', progress: failed ? undefined : 100, at: Date.now() };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
@@ -331,7 +374,7 @@ export class RunEngine {
           break;
         }
         case 'run.usage': {
-          applyUsageEvent(run, event.usage, event.model);
+          applyUsageEvent(run, event.usage, event.model, event.capability);
           publish({
             type: 'run.usage',
             runId,

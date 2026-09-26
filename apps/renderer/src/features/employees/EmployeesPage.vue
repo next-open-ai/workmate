@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import type { Employee, EmployeeDraft, EmployeeId } from '../../app/workspace';
 import { useI18n } from '../../app/i18n';
 import { useCapabilities, type PolicyMode, type SkillRecord } from '../../app/capabilities';
-import { chatEndpointLabel, useModelConfig } from '../../app/model-config';
+import { chatEndpointLabel, useModelConfig, type AgentCapabilityMode, type ModelCapability } from '../../app/model-config';
 import { searchProviderIds, useSearchConfig } from '../../app/search-config';
 import {
   DEFAULT_MAX_STEPS,
@@ -56,7 +56,7 @@ const formOpen = ref(false);
 const editingId = ref<EmployeeId | null>(null);
 const draft = ref(defaultEmployeeDraft());
 const { skills, load, policyFor, setPolicy } = useCapabilities();
-const { availableChatModels, load: loadModels, setEmployeeDefaultModel, settings: modelSettings } = useModelConfig();
+const { availableChatModels, load: loadModels, setEmployeeDefaultModel, settings: modelSettings, agentCapabilityMode, setAgentCapabilityMode, capabilityAvailable } = useModelConfig();
 const { settings: searchSettings, load: loadSearch } = useSearchConfig();
 const { load: loadPrefs, get: getPrefs, set: setPrefs, reset: resetPrefs } = useEmployeeRuntimePrefs();
 const { connections: mcpConnections, load: loadMcp } = useMcpConfig();
@@ -71,6 +71,16 @@ const draftMcpIds = ref<string[]>([]);
 const draftKnowledgeProvider = ref<EmployeeKnowledgeProvider>('off');
 const draftKnowledgeBaseIds = ref<string[]>([]);
 const draftEngine = ref<EmployeeEngineChoice>('');
+type SpecialistCapability = Extract<ModelCapability, 'quantum-code' | 'image' | 'vision' | 'embedding' | 'asr' | 'tts'>;
+const specialistCapabilities: Array<{ id: SpecialistCapability; labelKey: string }> = [
+  { id: 'quantum-code', labelKey: 'settings.capability.quantum-code' },
+  { id: 'image', labelKey: 'settings.capability.image' },
+  { id: 'vision', labelKey: 'settings.capability.vision' },
+  { id: 'embedding', labelKey: 'settings.capability.embedding' },
+  { id: 'asr', labelKey: 'settings.capability.asr' },
+  { id: 'tts', labelKey: 'settings.capability.tts' },
+];
+const draftCapabilityModes = ref<Record<SpecialistCapability, AgentCapabilityMode>>({ 'quantum-code': 'disabled', image: 'disabled', vision: 'disabled', embedding: 'disabled', asr: 'disabled', tts: 'disabled' });
 const enabledEngines = ref<Array<'pi' | 'agentscope' | 'dsh'>>(['pi', 'agentscope', 'dsh']);
 const mcpPickerOpen = ref(false);
 const mcpPickerDraft = ref<string[]>([]);
@@ -151,6 +161,7 @@ watch(
     draftRunTimeoutSec.value = Math.round((prefs.runTimeoutMs || DEFAULT_RUN_TIMEOUT_MS) / 1000);
     draftMcpToolTimeoutSec.value = Math.round((prefs.mcpToolTimeoutMs || DEFAULT_MCP_TOOL_TIMEOUT_MS) / 1000);
     draftEngine.value = prefs.engine || '';
+    for (const capability of specialistCapabilities) draftCapabilityModes.value[capability.id] = agentCapabilityMode(id, capability.id);
     draftMcpIds.value = [...(prefs.mcpIds || [])].filter((id) =>
       mcpConnections.value.some((item) => item.id === id && isAssociableMcp(item)),
     );
@@ -272,6 +283,8 @@ async function saveRuntime() {
       engine: draftEngine.value || null,
     });
     await setEmployeeDefaultModel(selected.value, modelId);
+    await Promise.all(specialistCapabilities.map((capability) =>
+      setAgentCapabilityMode(selected.value!, capability.id, draftCapabilityModes.value[capability.id])));
     notify.success('notify.employeeRuntimeSaved');
   } catch (cause) {
     notify.error(cause, 'notify.saveFailed');
@@ -292,8 +305,10 @@ async function resetRuntime() {
   draftKnowledgeProvider.value = defaults.knowledgeProvider;
   draftKnowledgeBaseIds.value = [];
   draftEngine.value = '';
+  for (const capability of specialistCapabilities) draftCapabilityModes.value[capability.id] = 'disabled';
   await resetPrefs(selected.value);
   await setEmployeeDefaultModel(selected.value, null);
+  await Promise.all(specialistCapabilities.map((capability) => setAgentCapabilityMode(selected.value!, capability.id, 'disabled')));
   notify.success('notify.employeeRuntimeReset');
 }
 
@@ -552,6 +567,18 @@ watch(employeeModelSupportsBuiltinSearch, (ok) => {
                 <option v-for="option in engineOptions" :key="option.value || 'inherit'" :value="option.value">{{ option.label }}</option>
               </select>
               <span class="font-normal text-[11px]">{{ t('employee.engineHelp') }}</span>
+            </label>
+
+            <label v-for="capability in specialistCapabilities" :key="capability.id" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t(capability.labelKey) }}</span>
+              <select v-model="draftCapabilityModes[capability.id]" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal">
+                <option value="disabled">{{ t('employee.quantumDisabled') }}</option>
+                <option value="auto" :disabled="!capabilityAvailable(capability.id)">{{ t('employee.quantumAuto') }}</option>
+                <option value="preferred" :disabled="!capabilityAvailable(capability.id)">{{ t('employee.quantumPreferred') }}</option>
+              </select>
+              <span class="font-normal text-[11px]">
+                {{ capabilityAvailable(capability.id) ? t('employee.quantumAvailableHelp') : t('employee.capabilityUnavailableHelp', { capability: t(capability.labelKey) }) }}
+              </span>
             </label>
 
             <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)] sm:col-span-2">

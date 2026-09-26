@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
 import { unzipSync, zipSync } from 'fflate';
-import { reconcileProjectOutputDirectory } from '@workmate/agent-core';
+import { reconcileProjectOutputDirectory, storeAudioInput } from '@workmate/agent-core';
 
 function dataDir(): string {
   return process.env.WORKMATE_DATA_DIR || path.join(os.homedir(), '.workmate');
@@ -293,6 +293,10 @@ function exportWorkspaceZip(root: string) {
 }
 
 export const workspaceRoutes: FastifyPluginAsync = async (app) => {
+  app.post('/workspace/audio-input', { bodyLimit: 36 * 1024 * 1024 }, async (request, reply) => {
+    try { return await storeAudioInput(request.body); }
+    catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) }); }
+  });
   app.post('/workspace/create', async (request, reply) => {
     const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
     try {

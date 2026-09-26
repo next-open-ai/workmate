@@ -1,15 +1,15 @@
 /**
- * 用户手册：以 docs/user-manual.md 为单一事实来源，构建应用内可渲染的 HTML。
+ * 用户手册：以 docs/guides/user-manual.md 为单一事实来源，构建应用内可渲染的 HTML。
  * 渲染器只支持手册中用到的 Markdown 子集：标题 / 段落 / 列表 / 代码块 / 引用 / 表格 / 链接 / 强调。
  * 安全策略：先按结构切块，再对每块的文本内容做 HTML 转义后执行白名单变换，杜绝注入。
  */
-import manualSource from '../../../../docs/user-manual.md?raw';
-import imgOverview from '../../../../docs/images/user-manual-1-overview.png?url';
-import imgModelConfig from '../../../../docs/images/user-manual-2-model-config.png?url';
-import imgChat from '../../../../docs/images/user-manual-3-chat.png?url';
-import imgKnowledge from '../../../../docs/images/user-manual-4-knowledge.png?url';
-import imgEnvCheck from '../../../../docs/images/user-manual-5-env-check.png?url';
-import imgFaq from '../../../../docs/images/user-manual-6-faq.png?url';
+import manualSource from '../../../../docs/guides/user-manual.md?raw';
+import imgOverview from '../../../../docs/guides/images/user-manual-1-overview.png?url';
+import imgModelConfig from '../../../../docs/guides/images/user-manual-2-model-config.png?url';
+import imgChat from '../../../../docs/guides/images/user-manual-3-chat.png?url';
+import imgKnowledge from '../../../../docs/guides/images/user-manual-4-knowledge.png?url';
+import imgEnvCheck from '../../../../docs/guides/images/user-manual-5-env-check.png?url';
+import imgFaq from '../../../../docs/guides/images/user-manual-6-faq.png?url';
 
 /** 手册内相对路径图片 → 打包资源地址的映射（仅映射已在 md 中引用的截图）。 */
 const IMAGE_URLS: Record<string, string> = {

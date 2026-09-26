@@ -1,4 +1,6 @@
 import type { ChatRunContext, KeyValueStore, ProjectTask } from '@workmate/orchestrator';
+import { ProviderIdSchema, resolveProviderBaseUrl } from '@workmate/contracts';
+import type { ModelCapabilityRuntime } from '@workmate/contracts';
 import { ensureModelSecrets } from './secrets.js';
 
 /**
@@ -51,18 +53,23 @@ interface PrefsRow {
   engine?: string | null;
 }
 interface ModelSettings {
-  providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; apiKey?: string; disableThinking?: boolean }>;
+  providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; workspaceId?: string; appId?: string; apiSecret?: string; apiKey?: string; disableThinking?: boolean }>;
   models?: Array<{
+    supportsVision?: boolean;
     id?: string;
     providerInstanceId?: string;
     capability?: string;
     modelId?: string;
+    voice?: string;
     label?: string;
+    imageProtocol?: string;
     meta?: { dimension?: number; normalize?: boolean; maxBatch?: number; maxInputChars?: number };
   }>;
   activeChatModelId?: string | null;
   activeEmbeddingModelId?: string | null;
   employeeDefaultModelIds?: Record<string, string>;
+  capabilityBindings?: Array<{ capability?: string; modelId?: string; enabled?: boolean }>;
+  agentCapabilityAssignments?: Array<{ agentId?: string; capability?: string; mode?: string }>;
   activeProvider?: string;
   providers?: Array<{
     provider?: string;
@@ -72,6 +79,42 @@ interface ModelSettings {
     disableThinking?: boolean;
     embeddingModel?: string;
   }>;
+}
+
+function modelCapabilitiesFor(employeeId: string, raw: unknown): ModelCapabilityRuntime[] {
+  const settings = (raw && typeof raw === 'object' ? raw : {}) as ModelSettings;
+  const models = settings.models ?? [];
+  const instances = settings.providerInstances ?? [];
+  const bindings = settings.capabilityBindings ?? [];
+  const supported = new Set(['quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts']);
+  return (settings.agentCapabilityAssignments ?? []).flatMap((assignment) => {
+    const capability = String(assignment.capability || '');
+    const mode = String(assignment.mode || 'disabled');
+    if (assignment.agentId !== employeeId || !supported.has(capability) || (mode !== 'auto' && mode !== 'preferred')) return [];
+    const binding = bindings.find((item) => item.capability === capability && item.enabled !== false)
+      ?? (capability === 'embedding' && settings.activeEmbeddingModelId
+        ? { capability: 'embedding', modelId: settings.activeEmbeddingModelId, enabled: true }
+        : undefined);
+    const model = binding ? models.find((item) => item.id === binding.modelId && item.capability === capability) : undefined;
+    const provider = model ? instances.find((item) => item.id === model.providerInstanceId) : undefined;
+    if (!model?.id || !model.modelId?.trim() || !provider?.baseUrl?.trim() || !provider.type || !ProviderIdSchema.safeParse(provider.type).success) return [];
+    return [{
+      id: model.id,
+      capability: capability as ModelCapabilityRuntime['capability'],
+      provider: provider.type as ModelCapabilityRuntime['provider'],
+      providerLabel: provider.name,
+      baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+      apiKey: provider.apiKey || (provider.type === 'ollama' ? 'ollama' : ''),
+      ...(provider.appId ? { appId: provider.appId } : {}),
+      ...(provider.apiSecret ? { apiSecret: provider.apiSecret } : {}),
+      modelId: model.modelId,
+      ...(capability === 'tts' && model.voice?.trim() ? { voice: model.voice.trim() } : {}),
+      ...(capability === 'image' && model.imageProtocol
+        ? { imageProtocol: model.imageProtocol as ModelCapabilityRuntime['imageProtocol'] }
+        : {}),
+      mode: mode as 'auto' | 'preferred',
+    }];
+  });
 }
 interface SearchSettings {
   defaultProvider?: string;
@@ -184,6 +227,7 @@ function modelFor(employeeId: string, prefs: PrefsRow, raw: unknown): ChatRunCon
       provider: provider as ChatRunContext['model']['provider'],
       ...(instance?.baseUrl?.trim() ? { baseUrl: instance.baseUrl.trim() } : {}),
       chatModel: pick.modelId || pick.id || '',
+      supportsVision: Boolean(pick.supportsVision),
       ...(instance?.disableThinking ? { disableThinking: true } : {}),
       apiKey: instance?.apiKey ?? '',
       ...embeddingFields,
@@ -412,6 +456,7 @@ export async function resolveTaskContext(
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
     mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
     knowledgeBases: await knowledgeBasesFor(store, prefs),
+    modelCapabilities: modelCapabilitiesFor(task.employeeId, secrets.model),
     maxSteps,
     runTimeoutMs,
     mcpToolTimeoutMs,

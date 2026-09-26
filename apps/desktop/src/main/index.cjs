@@ -213,7 +213,7 @@ function setStoredValue(key, value) { database.run('INSERT INTO app_kv (key, val
 
 function assetMimeType(name) {
   const extension = path.extname(name).toLowerCase();
-  return ({ '.pdf': 'application/pdf', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.csv': 'text/csv', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.zip': 'application/zip' })[extension] || 'application/octet-stream';
+  return ({ '.pdf': 'application/pdf', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.csv': 'text/csv', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.svg': 'image/svg+xml', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac', '.ogg': 'audio/ogg', '.oga': 'audio/ogg', '.opus': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.m4v': 'video/x-m4v', '.zip': 'application/zip' })[extension] || 'application/octet-stream';
 }
 function mapAssetRow(row) {
   const [id, name, relativePath, mimeType, sizeBytes, createdAt, conversationId, employeeId, runId, sha256, projectId, workspaceRelative] = row;
@@ -569,6 +569,9 @@ function readModelConfig() {
         apiKey: provider.apiKey && safeStorage.isEncryptionAvailable()
           ? safeStorage.decryptString(Buffer.from(provider.apiKey, 'base64'))
           : provider.apiKey || '',
+        apiSecret: provider.apiSecret && safeStorage.isEncryptionAvailable()
+          ? safeStorage.decryptString(Buffer.from(provider.apiSecret, 'base64'))
+          : provider.apiSecret || '',
       }));
       return config;
     }
@@ -589,14 +592,17 @@ function readModelConfig() {
 function writeModelConfig(value) {
   if (Number(value?.version) === 2 || Array.isArray(value?.providerInstances)) {
     const config = {
-      version: 2,
+      version: 3,
       providerInstances: Array.isArray(value?.providerInstances)
         ? value.providerInstances.map((provider) => ({
             id: String(provider.id || ''),
             type: String(provider.type || ''),
             name: String(provider.name || ''),
             baseUrl: String(provider.baseUrl || ''),
+            workspaceId: String(provider.workspaceId || ''),
+            appId: String(provider.appId || ''),
             apiKey: String(provider.apiKey || ''),
+            apiSecret: String(provider.apiSecret || ''),
             disableThinking: Boolean(provider.disableThinking),
           }))
         : [],
@@ -606,7 +612,9 @@ function writeModelConfig(value) {
             providerInstanceId: String(model.providerInstanceId || ''),
             capability: String(model.capability || 'chat'),
             modelId: String(model.modelId || ''),
+            voice: model.voice ? String(model.voice) : undefined,
             label: model.label ? String(model.label) : undefined,
+            imageProtocol: model.imageProtocol ? String(model.imageProtocol) : undefined,
             meta: model.meta && typeof model.meta === 'object'
               ? {
                   ...(Number(model.meta.dimension) ? { dimension: Number(model.meta.dimension) } : {}),
@@ -616,6 +624,7 @@ function writeModelConfig(value) {
                 }
               : undefined,
             supportsBuiltinWebSearch: Boolean(model.supportsBuiltinWebSearch) || undefined,
+            supportsVision: model.capability === 'chat' && Boolean(model.supportsVision),
           }))
         : [],
       activeChatModelId: value?.activeChatModelId ? String(value.activeChatModelId) : null,
@@ -623,6 +632,8 @@ function writeModelConfig(value) {
       employeeDefaultModelIds: value?.employeeDefaultModelIds && typeof value.employeeDefaultModelIds === 'object'
         ? Object.fromEntries(Object.entries(value.employeeDefaultModelIds).map(([key, modelId]) => [String(key), String(modelId)]))
         : {},
+      capabilityBindings: Array.isArray(value?.capabilityBindings) ? value.capabilityBindings : [],
+      agentCapabilityAssignments: Array.isArray(value?.agentCapabilityAssignments) ? value.agentCapabilityAssignments : [],
     };
     const persisted = {
       ...config,
@@ -631,6 +642,9 @@ function writeModelConfig(value) {
         apiKey: provider.apiKey && safeStorage.isEncryptionAvailable()
           ? safeStorage.encryptString(provider.apiKey).toString('base64')
           : provider.apiKey,
+        apiSecret: provider.apiSecret && safeStorage.isEncryptionAvailable()
+          ? safeStorage.encryptString(provider.apiSecret).toString('base64')
+          : provider.apiSecret,
       })),
     };
     setStoredValue('model-settings', JSON.stringify(persisted));

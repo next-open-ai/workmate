@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { Conversation, View } from './workspace';
 import type { AuthUser } from '../services/auth.js';
 import { useI18n } from './i18n';
@@ -12,6 +12,8 @@ const props = defineProps<{ collapsed: boolean; view: View; conversations: Conve
 const emit = defineEmits<{ toggle: []; navigate: [view: View]; newChat: []; selectConversation: [id: string]; deleteConversation: [id: string]; logout: [] }>();
 const { t } = useI18n();
 const { preference, cycleTheme } = useTheme();
+const accountMenuOpen = ref(false);
+const accountMenuRoot = ref<HTMLElement | null>(null);
 
 type NavItem = { id: View; labelKey: string; icon: 'chat' | 'employees' | 'capabilities' | 'knowledge' | 'automations' | 'assets' | 'data' | 'projects' | 'remote' | 'docs' };
 
@@ -70,6 +72,29 @@ const currentUserInitial = computed(() => {
   const source = props.currentUser?.displayName?.trim() || props.currentUser?.username?.trim() || 'U';
   return source.slice(0, 1).toUpperCase();
 });
+
+function closeAccountMenu(event: MouseEvent) {
+  if (!accountMenuRoot.value?.contains(event.target as Node)) accountMenuOpen.value = false;
+}
+function handleAccountKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') accountMenuOpen.value = false;
+}
+function navigateFromAccount(view: View) {
+  accountMenuOpen.value = false;
+  emit('navigate', view);
+}
+function logoutFromAccount() {
+  accountMenuOpen.value = false;
+  emit('logout');
+}
+onMounted(() => {
+  document.addEventListener('click', closeAccountMenu);
+  document.addEventListener('keydown', handleAccountKeydown);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeAccountMenu);
+  document.removeEventListener('keydown', handleAccountKeydown);
+});
 </script>
 
 <template>
@@ -126,63 +151,62 @@ const currentUserInitial = computed(() => {
       <span v-if="conversations.length === 0" class="px-3 py-2 text-xs text-[var(--muted)]">{{ t('recent.empty') }}</span>
     </section>
 
-    <div class="mt-auto pt-3">
+    <div ref="accountMenuRoot" class="relative mt-auto pt-2">
       <div
-        v-if="!collapsed && currentUser"
-        class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 shadow-sm"
+        v-if="currentUser && accountMenuOpen"
+        :class="[
+          'absolute z-40 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-[0_18px_50px_rgba(15,23,42,0.18)]',
+          collapsed ? 'bottom-0 left-[52px] w-[224px]' : 'bottom-[58px] left-0 right-0',
+        ]"
+        role="menu"
+        aria-label="账户与配置"
       >
-        <div class="flex items-start gap-3">
-          <span class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-[var(--accent)] text-sm font-extrabold text-white shadow-sm">
-            {{ currentUserInitial }}
-          </span>
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <p class="truncate text-sm font-semibold text-[var(--text)]">{{ currentUserLabel }}</p>
-              <span class="rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">{{ currentUser.role }}</span>
-            </div>
-            <p class="mt-1 truncate text-xs text-[var(--muted)]">{{ currentUserMeta }}</p>
-            <p class="mt-1 truncate text-[11px] text-[var(--muted)]">orgId: {{ currentUser.orgId }}</p>
+        <div class="border-b border-[var(--border)] px-2.5 pb-2.5 pt-1.5">
+          <div class="flex items-center gap-2">
+            <p class="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text)]">{{ currentUserLabel }}</p>
+            <span class="rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">{{ currentUser.role }}</span>
           </div>
+          <p class="mt-1 truncate text-xs text-[var(--muted)]">{{ currentUserMeta }} · {{ currentUser.orgId }}</p>
         </div>
-
-        <div class="mt-3 grid grid-cols-2 gap-2">
-          <button
-            class="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
-            type="button"
-            :title="themeButtonTitle()"
-            :aria-label="themeAriaLabel"
-            @click="cycleTheme"
-          >
-            <SidebarIcon :name="themeIcon" class="!h-4 !w-4" />
-            <span>{{ t(`theme.${preference}`) }}</span>
-          </button>
-          <button
-            class="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
-            type="button"
-            :title="t('nav.settings')"
-            @click="emit('navigate', 'settings')"
-          >
-            <SidebarIcon name="settings" class="!h-4 !w-4" />
-            <span>{{ t('nav.settings') }}</span>
-          </button>
-        </div>
-
-        <div class="mt-3 flex items-center justify-between rounded-xl bg-[var(--surface-muted)] px-3 py-2 text-[11px] text-[var(--muted)]">
-          <span class="inline-flex items-center gap-1.5">
-            <span class="h-2 w-2 rounded-full" :class="serviceReady ? 'bg-emerald-500' : 'bg-slate-400'" />
-            {{ serviceStatusLabel() }}
-          </span>
-          <button
-            class="font-semibold text-[var(--muted)] transition hover:text-rose-600"
-            type="button"
-            @click="emit('logout')"
-          >
-            退出登录
-          </button>
-        </div>
+        <button class="mt-1 flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]" type="button" role="menuitem" :title="themeButtonTitle()" :aria-label="themeAriaLabel" @click="cycleTheme">
+          <SidebarIcon :name="themeIcon" class="!h-4 !w-4" />
+          <span class="flex-1">外观</span><span class="text-[11px]">{{ t(`theme.${preference}`) }}</span>
+        </button>
+        <button class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]" type="button" role="menuitem" @click="navigateFromAccount('settings')">
+          <SidebarIcon name="settings" class="!h-4 !w-4" />
+          <span>{{ t('nav.settings') }}</span>
+        </button>
+        <button class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-[var(--muted)] transition hover:bg-rose-500/10 hover:text-rose-600" type="button" role="menuitem" @click="logoutFromAccount">
+          <span class="grid h-4 w-4 place-items-center text-sm font-bold" aria-hidden="true">↪</span>
+          <span>退出登录</span>
+        </button>
       </div>
 
-      <div :class="['flex gap-1', collapsed ? 'flex-col items-center' : 'items-center mt-3']">
+      <button
+        v-if="currentUser"
+        :class="[
+          'group flex items-center border border-transparent text-left transition hover:border-[var(--border)] hover:bg-[var(--surface)] hover:shadow-sm',
+          collapsed ? 'mx-auto h-11 w-11 justify-center rounded-2xl' : 'w-full gap-2.5 rounded-xl px-2 py-1.5',
+          accountMenuOpen ? 'border-[var(--border)] bg-[var(--surface)] shadow-sm' : '',
+        ]"
+        type="button"
+        aria-haspopup="menu"
+        :aria-expanded="accountMenuOpen"
+        title="账户与配置"
+        @click.stop="accountMenuOpen = !accountMenuOpen"
+      >
+        <span class="relative grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[var(--accent)] text-xs font-extrabold text-white shadow-sm">
+          {{ currentUserInitial }}
+          <span class="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--sidebar)]" :class="serviceReady ? 'bg-emerald-500' : 'bg-slate-400'" aria-hidden="true" />
+        </span>
+        <span v-if="!collapsed" class="min-w-0 flex-1">
+          <span class="block truncate text-[13px] font-semibold text-[var(--text)]">{{ currentUserLabel }}</span>
+          <span class="block truncate text-[10px] text-[var(--muted)]">{{ serviceStatusLabel() }}</span>
+        </span>
+        <span v-if="!collapsed" class="text-xs text-[var(--muted)] transition group-hover:text-[var(--text)]" :class="accountMenuOpen ? 'rotate-180' : ''" aria-hidden="true">⌃</span>
+      </button>
+
+      <div :class="['flex gap-1', collapsed ? 'mt-1 flex-col items-center' : 'items-center']">
       <button
         v-if="collapsed"
         class="grid h-10 w-10 place-items-center rounded-[10px] text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
@@ -193,7 +217,7 @@ const currentUserInitial = computed(() => {
         <SidebarIcon name="chevron-right" />
       </button>
       <button
-        v-if="collapsed"
+        v-if="collapsed && !currentUser"
         class="grid h-10 w-10 place-items-center rounded-[10px] text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
         type="button"
         :title="themeButtonTitle()"
@@ -210,7 +234,7 @@ const currentUserInitial = computed(() => {
         </span>
       </button>
       <button
-        v-if="collapsed"
+        v-if="collapsed && !currentUser"
         :class="itemClass(navActive('settings'))"
         type="button"
         :title="t('nav.settings')"
@@ -243,15 +267,6 @@ const currentUserInitial = computed(() => {
           <SidebarIcon name="settings" />
         </span>
         <span v-if="!collapsed" class="truncate">{{ t('nav.settings') }}</span>
-      </button>
-      <button
-        v-if="collapsed && currentUser"
-        class="grid h-10 w-10 place-items-center rounded-[10px] text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
-        type="button"
-        title="退出登录"
-        @click="emit('logout')"
-      >
-        <span class="text-sm font-bold">⎋</span>
       </button>
       </div>
     </div>

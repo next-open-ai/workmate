@@ -16,7 +16,7 @@ import {
 import type { ModelConfig } from '@workmate/contracts';
 import type { ChatMessage, ChatSession, SessionMemory } from './types.js';
 
-export type ModelTurn = { role: 'user' | 'assistant'; content: string };
+export type ModelTurn = import('@workmate/contracts').ChatModelMessage;
 
 /** Canonical non-empty messages in conversation order. */
 export function canonicalTurns(messages: ChatMessage[]): ChatMessage[] {
@@ -69,15 +69,24 @@ export function buildSessionModelMessages(
   });
 
   const memory = session.memory;
+  // Bounded original-image window, independent of the text summary watermark.
+  const recentImageIds = new Set(visible.flatMap((message) => message.attachments ?? []).slice(-4).map((image) => image.id));
+  const toTurn = (message: ChatMessage): ModelTurn => ({
+    role: message.role, content: message.content + (message.attachments?.some((image) => !recentImageIds.has(image.id))
+      ? '\n[部分早期图片已超出最近4张原图窗口，若需检查其细节，请用户重新上传，不得仅凭之前描述声称看到了原图。]' : ''),
+    ...(message.attachments?.length ? { attachments: message.attachments.filter((image) => recentImageIds.has(image.id)) } : {}),
+  });
   const summary = memory?.summary?.trim() || '';
   if (!summary || !memory?.coveredUntilId) {
-    return visible.map((message) => ({ role: message.role, content: message.content }));
+    return visible.map(toTurn);
   }
 
   const uncovered = uncoveredMessages(visible, memory.coveredUntilId);
+  const pinned = visible.filter((message) => !uncovered.includes(message) && message.attachments?.some((image) => recentImageIds.has(image.id)));
   return [
     ...sessionSummaryMessagePair(summary),
-    ...uncovered.map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content })),
+    ...pinned.map(toTurn),
+    ...uncovered.map(toTurn),
   ];
 }
 

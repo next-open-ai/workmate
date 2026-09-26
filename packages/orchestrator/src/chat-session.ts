@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { cleanupConversationSessionWorkspaces } from '@workmate/agent-core';
+import { cleanupConversationSessionWorkspaces, deleteChatImages, readChatImage, assertVisionSupported, resolveExecutionBackend, loadExecutionRoutingConfig } from '@workmate/agent-core';
+import { ChatImagesSchema } from '@workmate/contracts';
 import type { ChatRequest, ModelConfig } from '@workmate/contracts';
 import type { EventHub, HubListener } from './hub.js';
 import { deleteKey, listJsonIds, readJson, writeJson } from './repo.js';
@@ -54,6 +55,7 @@ export interface ChatSessionServiceOptions {
 
 export interface SendUserMessageInput {
   content: string;
+  attachments?: import('@workmate/contracts').ChatImageAttachment[];
   /** Resolved runtime context; when omitted the service uses its resolver. */
   context?: ChatRunContext;
   /** Override the session employee recorded with the message. */
@@ -220,6 +222,7 @@ export class ChatSessionService {
     }
     // Best-effort: remove conversation staging (Agent temp scripts / .python-packages).
     await cleanupConversationSessionWorkspaces(runIds).catch(() => undefined);
+    await deleteChatImages(id);
     this.hub.publish(`session:${id}`, { type: 'session.deleted', sessionId: id });
   }
 
@@ -247,15 +250,12 @@ export class ChatSessionService {
     const text = input.content.trim();
     if (!text) throw new Error('Message content is empty.');
 
-    const previous = this.activeAborts.get(sessionId);
-    if (previous && !previous.signal.aborted) previous.abort();
-    const abort = new AbortController();
-    this.activeAborts.set(sessionId, abort);
-
+    const attachments = ChatImagesSchema.parse(input.attachments ?? []);
+    const verifiedAttachments = await Promise.all(attachments.map(async (image) => (await readChatImage(sessionId, image.id)).attachment));
     const turnId = randomUUID();
     const runId = randomUUID();
     const now = Date.now();
-    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, createdAt: now, turnId };
+    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, ...(verifiedAttachments.length ? { attachments: verifiedAttachments } : {}), createdAt: now, turnId };
     const assistantMessage: ChatMessage = { id: randomUUID(), role: 'assistant', content: '', createdAt: now, turnId, runId };
     const attemptNo = 1;
 
@@ -266,6 +266,15 @@ export class ChatSessionService {
     if (!runContext) {
       throw new Error('缺少运行上下文（模型/Skill 配置）。请先在桌面端配置模型。');
     }
+    const visionHistory = buildSessionModelMessages({ ...session, messages: [...session.messages, userMessage] });
+    if (visionHistory.some((message) => message.attachments?.length)) {
+      const routing = loadExecutionRoutingConfig();
+      assertVisionSupported(visionHistory, runContext.model.supportsVision, resolveExecutionBackend({ ...routing, employeeEngine: runContext.engine }).id, runContext.modelCapabilities);
+    }
+    const previous = this.activeAborts.get(sessionId);
+    if (previous && !previous.signal.aborted) previous.abort();
+    const abort = new AbortController();
+    this.activeAborts.set(sessionId, abort);
     session.messages.push(userMessage, assistantMessage);
     if (session.title === '新对话') session.title = text.slice(0, 28);
     await this.saveSession(session);

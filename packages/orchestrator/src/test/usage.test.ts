@@ -39,17 +39,39 @@ describe('token usage', () => {
       totalTokens: 70,
       reasoningTokens: 5,
     }, {
-      provider: 'qwen',
-      chatModel: 'qwen-plus',
-      providerLabel: '通义 #1',
-    });
+      provider: 'glm',
+      chatModel: 'glm-4v',
+      providerLabel: '智谱视觉',
+    }, 'vision');
     assert.equal(run.usage?.inputTokens, 150);
     assert.equal(run.usage?.outputTokens, 60);
     assert.equal(run.usage?.totalTokens, 210);
     assert.equal(run.usage?.cacheReadTokens, 10);
     assert.equal(run.usage?.reasoningTokens, 5);
     assert.equal(run.usage?.steps.length, 2);
-    assert.equal(run.model?.providerLabel, '通义 #1');
+    assert.equal(run.model?.providerLabel, '通义 #1', 'specialist usage must not replace primary model');
+    assert.equal(run.usage?.byModel?.length, 2);
+    assert.equal(run.usage?.byModel?.find((item) => item.capability === 'vision')?.chatModel, 'glm-4v');
+  });
+
+  it('attributes primary and application-model tokens to their actual models', async () => {
+    const orch = Orchestrator.memory({ runner: { async start(request, emit) {
+      emit({ type: 'run.usage', runId: 'ignored', usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 }, model: { provider: request.model.provider, chatModel: request.model.chatModel } });
+      emit({ type: 'run.usage', runId: 'ignored', usage: { inputTokens: 30, outputTokens: 12, totalTokens: 42 }, model: { provider: 'glm', chatModel: 'glm-4v' }, capability: 'vision' });
+      emit({ type: 'message.delta', runId: 'ignored', text: 'ok' }); emit({ type: 'run.completed', runId: 'ignored' });
+    } } });
+    const session = await orch.chat.createChatSession({ title: '应用模型用量', employeeId: 'general' });
+    const run = await orch.engine.execute({ sessionId: session.id, kind: 'chat', request: {
+      profile: { id: 'general', name: 'G', instructions: 'x', toolIds: [] }, messages: [{ role: 'user', content: '看图' }],
+      model: { provider: 'qwen', chatModel: 'qwen-plus', apiKey: 'x' }, skills: [], searchProviders: [], mcpConnections: [], knowledgeBases: [],
+    } });
+    assert.equal(run.model?.chatModel, 'qwen-plus');
+    assert.equal(run.usage?.totalTokens, 57);
+    const stats = await orch.usageStats();
+    assert.equal(stats.byModel.find((item) => item.chatModel === 'qwen-plus')?.totalTokens, 15);
+    assert.equal(stats.byModel.find((item) => item.chatModel === 'glm-4v')?.totalTokens, 42);
+    assert.equal(stats.byModel.find((item) => item.chatModel === 'glm-4v')?.capability, 'vision');
+    assert.equal(stats.totals.totalTokens, 57);
   });
 
   it('aggregates usage stats by model / chat / project', async () => {

@@ -1,7 +1,34 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MemoryStore, Orchestrator } from '../index.js';
+import { MemoryStore, Orchestrator, type AgentRunner } from '../index.js';
 import { FakeRunner, runContext, waitFor } from './fake.js';
+
+test('same-name tool calls settle by invocation id without duplicating activities', async () => {
+  const runner: AgentRunner = {
+    async start(_request, emit) {
+      const runId = 'tool-run';
+      emit({ type: 'run.started', runId });
+      emit({ type: 'tool.started', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'first command' });
+      emit({ type: 'tool.started', runId, invocationId: 'bash-2', toolName: 'bash', summary: 'second command' });
+      emit({ type: 'tool.failed', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'exit 1' });
+      emit({ type: 'tool.completed', runId, invocationId: 'bash-2', toolName: 'bash', summary: 'completed', ok: true });
+      emit({ type: 'run.completed', runId });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const session = await orch.chat.createChatSession();
+    const { runId } = await orch.chat.sendUserMessage(session.id, { content: 'run twice', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(runId))?.status === 'completed');
+    const run = await orch.chat.getRun(runId);
+    assert.deepEqual(run?.activities.map(({ invocationId, summary, status }) => ({ invocationId, summary, status })), [
+      { invocationId: 'bash-1', summary: 'first command — exit 1', status: 'failed' },
+      { invocationId: 'bash-2', summary: 'second command', status: 'completed' },
+    ]);
+  } finally {
+    await orch.close();
+  }
+});
 
 test('two clients share the same durable chat session state', async () => {
   const fake = new FakeRunner();

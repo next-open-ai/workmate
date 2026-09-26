@@ -17,6 +17,7 @@ import {
   bailianOpenApiUploadDocument,
 } from './bailian-openapi.js';
 import { buildEmbeddingSignature, embedOpenAiCompatible } from './embedding-http.js';
+import { graphDocumentHints, planOntologyQuery, type OntologyQueryPlan } from './ontology-runtime.js';
 
 export type KnowledgeHit = {
   id: string;
@@ -1084,6 +1085,44 @@ export async function searchKnowledgeBase(kb: KnowledgeBaseRuntime, query: strin
     default:
       return [];
   }
+}
+
+export type HybridKnowledgeSearchResult = {
+  query: string;
+  plan: OntologyQueryPlan;
+  strategy: 'vector-only' | 'ontology-enhanced';
+  results: KnowledgeHit[];
+};
+
+/**
+ * Phase-1 hybrid retrieval. The original query always runs as a recall safety
+ * net; ontology terms add a second route and graph document hints boost rather
+ * than exclude candidates, so an incomplete graph cannot hide valid evidence.
+ */
+export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig): Promise<HybridKnowledgeSearchResult> {
+  const plan = planOntologyQuery(kb, query, 1);
+  const enhancedQuery = [query, ...plan.expandedTerms, ...plan.relatedNodes.map((node) => node.name)].filter(Boolean).join(' ');
+  const rawPromise = searchKnowledgeBase(kb, query, Math.min(8, Math.max(topK, topK * 2)), model);
+  const enhancedPromise = enhancedQuery === query
+    ? Promise.resolve([] as KnowledgeHit[])
+    : searchKnowledgeBase(kb, enhancedQuery.slice(0, 800), Math.min(8, Math.max(topK, topK * 2)), model);
+  const [raw, enhanced] = await Promise.all([rawPromise, enhancedPromise]);
+  const hints = graphDocumentHints(plan).map((value) => value.toLocaleLowerCase());
+  const merged = new Map<string, KnowledgeHit & { routes: Set<string> }>();
+  for (const [route, hits] of [['raw-vector', raw], ['ontology-vector', enhanced]] as const) {
+    for (const hit of hits) {
+      const key = `${hit.knowledgeBaseId}:${hit.id}`;
+      const hinted = hints.some((hint) => (hit.source || '').toLocaleLowerCase().includes(hint) || hit.title.toLocaleLowerCase().includes(hint));
+      const score = Math.min(1, hit.score + (hinted ? 0.12 : 0));
+      const current = merged.get(key);
+      if (current) {
+        current.score = Math.max(current.score, score) + 0.03;
+        current.routes.add(route);
+      } else merged.set(key, { ...hit, score, routes: new Set([route]) });
+    }
+  }
+  const results = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, topK).map(({ routes: _routes, ...hit }) => hit);
+  return { query, plan, strategy: plan.matchedNodes.length ? 'ontology-enhanced' : 'vector-only', results };
 }
 
 export function createKnowledgeTools(input: {

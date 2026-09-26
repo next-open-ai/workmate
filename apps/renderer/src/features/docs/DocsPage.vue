@@ -3,7 +3,7 @@ import { onMounted, ref, watch } from 'vue';
 import { manualHeadings, renderManualHtml } from '../../app/user-manual';
 
 /**
- * 「用户手册」页面：把 docs/user-manual.md 渲染为带目录的阅读视图。
+ * 「用户手册」页面：把 docs/guides/user-manual.md 渲染为带目录的阅读视图。
  * 支持外部（如启动引导弹窗）传入锚点自动定位到对应章节。
  */
 const props = defineProps<{ anchor?: string | null }>();
@@ -71,7 +71,7 @@ watch(
           <p class="text-[10px] font-bold tracking-[0.16em] text-[var(--accent)]">DOCS · USER MANUAL</p>
           <h1 class="truncate text-lg font-semibold tracking-tight sm:text-xl">用户手册</h1>
         </div>
-        <p class="text-xs text-[var(--muted)]">应用内帮助文档 · docs/user-manual.md</p>
+        <p class="text-xs text-[var(--muted)]">应用内帮助文档 · docs/guides/user-manual.md</p>
       </div>
     </header>
 

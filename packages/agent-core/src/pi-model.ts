@@ -65,7 +65,7 @@ export function toPiModel(config: ModelConfig): Model<Api> {
     provider: config.provider,
     baseUrl,
     reasoning: false,
-    input: ['text'],
+    input: config.supportsVision ? ['text', 'image'] : ['text'],
     cost: ZERO_COST,
     contextWindow: 128_000,
     // Tool calls that embed HTML/CSS need headroom; 8k often truncates mid-JSON

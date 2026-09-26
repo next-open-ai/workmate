@@ -1,11 +1,15 @@
 import { computed, ref } from 'vue';
-import { getServerModelConfig, saveServerModelConfig } from '../services/api.js';
+import { resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
+import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, ImageGenerationProtocol, ModelCapability } from '@workmate/contracts';
+import { getServerModelConfig, saveServerModelConfig, setCapabilityHealthObserver, type CapabilityHealthObservation } from '../services/api.js';
 
-export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'ollama', 'openai-compatible'] as const;
+export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'volcengine', 'iflytek', 'ollama', 'openai-compatible'] as const;
 export type ProviderId = (typeof providerIds)[number];
-export type ModelCapability = 'chat' | 'image' | 'embedding' | 'asr' | 'tts';
+export type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, ImageGenerationProtocol, ModelCapability };
 
-export const modelCapabilities: ModelCapability[] = ['chat', 'image', 'embedding', 'asr', 'tts'];
+export const imageGenerationProtocols: ImageGenerationProtocol[] = ['openai-images', 'dashscope-multimodal', 'dashscope-image-async'];
+
+export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts'];
 
 /** Connection instance — same provider type can appear multiple times. */
 export interface ProviderInstance {
@@ -13,17 +17,28 @@ export interface ProviderInstance {
   type: ProviderId;
   name: string;
   baseUrl: string;
+  /** Optional Bailian workspace. Region is inferred from the API host. */
+  workspaceId?: string;
+  /** Vendor application identifier used by Volcengine and iFlytek speech APIs. */
+  appId?: string;
+  /** Additional signing secret used by iFlytek speech APIs. */
+  apiSecret?: string;
   apiKey: string;
   disableThinking: boolean;
 }
 
 /** User-registered model that appears in pickers across the app. */
 export interface ConfiguredModel {
+  supportsVision?: boolean;
   id: string;
   providerInstanceId: string;
   capability: ModelCapability;
   modelId: string;
   label?: string;
+  /** Default system voice or a pre-authorized cloned voice identifier for TTS. */
+  voice?: string;
+  /** Transport protocol is independent from both provider brand and image capability. */
+  imageProtocol?: ImageGenerationProtocol;
   meta?: {
     dimension?: number;
     normalize?: boolean;
@@ -35,6 +50,12 @@ export interface ConfiguredModel {
    * Only meaningful for qwen / openai-compatible connections.
    */
   supportsBuiltinWebSearch?: boolean;
+  /** Latest passive verification from a real capability invocation. */
+  health?: {
+    status: 'available' | 'configuration_error' | 'permission_error' | 'temporarily_unavailable';
+    checkedAt: string;
+    summary: string;
+  };
 }
 
 /**
@@ -42,6 +63,7 @@ export interface ConfiguredModel {
  * `id` is the configured-model id used by pickers; connection fields come from the provider instance.
  */
 export interface ProviderConfig {
+  supportsVision?: boolean;
   id: string;
   providerInstanceId: string;
   providerLabel: string;
@@ -57,10 +79,12 @@ export interface ProviderConfig {
   asrModel: string;
   ttsModel: string;
   apiKey: string;
+  appId?: string;
+  apiSecret?: string;
 }
 
 export interface ModelSettings {
-  version: 2;
+  version: 3;
   providerInstances: ProviderInstance[];
   models: ConfiguredModel[];
   /** Default chat model for the main workspace selector. */
@@ -72,6 +96,10 @@ export interface ModelSettings {
   activeEmbeddingModelId: string | null;
   /** Per digital-employee default when acting as sub-agent / collaborator. */
   employeeDefaultModelIds: Record<string, string>;
+  /** Default model per specialist capability; independent from the controller chat model. */
+  capabilityBindings: CapabilityBinding[];
+  /** Explicit per-agent authorization. Missing entries resolve to disabled. */
+  agentCapabilityAssignments: AgentCapabilityAssignment[];
 }
 
 export interface LocalEmbeddingProviderDraft {
@@ -113,11 +141,130 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
     embedding: ['text-embedding-004'],
   },
   deepseek: { chat: providerSuggestedChatModels.deepseek },
-  glm: { chat: providerSuggestedChatModels.glm },
-  qwen: { chat: providerSuggestedChatModels.qwen },
+  glm: { chat: providerSuggestedChatModels.glm, vision: ['glm-4.5v', 'glm-4v-plus'], image: ['glm-image', 'cogview-4-250304'] },
+  qwen: {
+    chat: providerSuggestedChatModels.qwen,
+    vision: ['qwen3-vl-flash', 'qwen-vl-max', 'qwen-vl-plus'],
+    image: ['qwen-image-3.0-pro', 'qwen-image-3.0', 'qwen-image', 'wan2.7-image-pro', 'wan2.7-image', 'wan2.6-t2i', 'wan2.5-t2i-preview', 'wan2.2-t2i-flash'],
+    embedding: ['text-embedding-v4', 'text-embedding-v3'],
+    asr: ['paraformer-v2', 'paraformer-8k-v2'],
+    tts: ['qwen-audio-3.1-tts-flash', 'qwen-audio-3.0-tts-flash', 'cosyvoice-v3-flash', 'cosyvoice-v2'],
+  },
+  volcengine: { asr: ['bigmodel'], tts: ['volc-tts'] },
+  iflytek: { asr: ['ifasr'], tts: ['online-tts'] },
   ollama: { chat: providerSuggestedChatModels.ollama },
-  'openai-compatible': { chat: [] },
+  // Compatible services are intentionally vendor-neutral. eSight is entered
+  // as a model ID under `quantum-code`, never as a provider protocol/type.
+  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [] },
 };
+
+const providerAutoProfiles: Partial<Record<ProviderId, Partial<Record<ModelCapability, string>>>> = {
+  openai: { chat: 'gpt-4.1-mini', vision: 'gpt-4.1-mini', image: 'gpt-image-1', embedding: 'text-embedding-3-small', asr: 'gpt-4o-mini-transcribe', tts: 'gpt-4o-mini-tts' },
+  anthropic: { chat: 'claude-sonnet-4-5', vision: 'claude-sonnet-4-5' },
+  google: { chat: 'gemini-2.5-flash', vision: 'gemini-2.5-flash', image: 'gemini-2.5-flash-image', embedding: 'text-embedding-004' },
+  deepseek: { chat: 'deepseek-chat' },
+  glm: { chat: 'glm-4.5-flash', vision: 'glm-4.5v', image: 'glm-image' },
+  qwen: { chat: 'qwen-plus', vision: 'qwen3-vl-flash', image: 'wan2.2-t2i-flash', embedding: 'text-embedding-v4', asr: 'paraformer-v2', tts: 'qwen-audio-3.1-tts-flash' },
+  volcengine: { asr: 'bigmodel', tts: 'volc-tts' },
+  iflytek: { asr: 'ifasr', tts: 'online-tts' },
+  ollama: { chat: 'llama3.2' },
+};
+
+export interface ProviderAutoConfigurationResult {
+  settings: ModelSettings;
+  configured: ModelCapability[];
+  addedModels: number;
+  preserved: ModelCapability[];
+  manualRequired: boolean;
+}
+
+export const MODEL_HEALTH_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function modelHealthIsStale(model: ConfiguredModel, now = Date.now()) {
+  if (!model.health?.checkedAt) return false;
+  const checkedAt = Date.parse(model.health.checkedAt);
+  return !Number.isFinite(checkedAt) || now - checkedAt > MODEL_HEALTH_FRESH_MS;
+}
+
+export function summarizeProviderModelHealth(models: ConfiguredModel[], providerInstanceId: string, now = Date.now()) {
+  const scoped = models.filter((item) => item.providerInstanceId === providerInstanceId);
+  return {
+    total: scoped.length,
+    available: scoped.filter((item) => item.health?.status === 'available' && !modelHealthIsStale(item, now)).length,
+    issues: scoped.filter((item) => item.health && item.health.status !== 'available' && !modelHealthIsStale(item, now)).length,
+    stale: scoped.filter((item) => modelHealthIsStale(item, now)).length,
+    unverified: scoped.filter((item) => !item.health).length,
+  };
+}
+
+/** Add only missing recommended entries. Existing user choices always win. */
+export function applyRecommendedProviderSetup(
+  current: ModelSettings,
+  instance: ProviderInstance,
+  agentIds: string[] = ['general'],
+): ProviderAutoConfigurationResult {
+  const settingsValue: ModelSettings = JSON.parse(JSON.stringify(current));
+  if (!settingsValue.providerInstances.some((item) => item.id === instance.id)) settingsValue.providerInstances.push(JSON.parse(JSON.stringify(instance)));
+  const profile = { ...(providerAutoProfiles[instance.type] ?? {}) };
+  if (instance.type === 'qwen' && instance.workspaceId?.trim()) profile.image = 'qwen-image-3.0';
+  const configured: ModelCapability[] = [];
+  const preserved: ModelCapability[] = [];
+  let addedModels = 0;
+  for (const capability of modelCapabilities) {
+    const modelId = profile[capability];
+    if (!modelId) continue;
+    let model = settingsValue.models.find((item) => item.providerInstanceId === instance.id && item.capability === capability && item.modelId === modelId);
+    if (!model) {
+      model = {
+        id: newId(), providerInstanceId: instance.id, capability, modelId,
+        ...(capability === 'chat' && ['openai', 'anthropic', 'google'].includes(instance.type) ? { supportsVision: true } : {}),
+        ...(capability === 'chat' && instance.type === 'qwen' ? { supportsBuiltinWebSearch: true } : {}),
+        ...(capability === 'image' ? { imageProtocol: inferImageGenerationProtocol(instance.type, modelId) } : {}),
+        ...(capability === 'tts' ? { voice: suggestedSpeechVoices(instance.type, modelId)[0] } : {}),
+      };
+      settingsValue.models.push(model);
+      addedModels += 1;
+    }
+    if (capability === 'chat') {
+      if (!settingsValue.activeChatModelId) settingsValue.activeChatModelId = model.id;
+      else if (settingsValue.activeChatModelId !== model.id) preserved.push(capability);
+      configured.push(capability);
+      continue;
+    }
+    if (capability === 'embedding' && !settingsValue.activeEmbeddingModelId) settingsValue.activeEmbeddingModelId = model.id;
+    const existingBinding = settingsValue.capabilityBindings.find((item) => item.capability === capability && item.enabled);
+    if (!existingBinding) {
+      settingsValue.capabilityBindings = settingsValue.capabilityBindings.filter((item) => item.capability !== capability);
+      settingsValue.capabilityBindings.push({ capability, modelId: model.id, enabled: true, updatedAt: new Date().toISOString() });
+    } else if (existingBinding.modelId !== model.id) preserved.push(capability);
+    for (const agentId of [...new Set(agentIds.filter(Boolean))]) {
+      if (settingsValue.agentCapabilityAssignments.some((item) => item.agentId === agentId && item.capability === capability)) continue;
+      settingsValue.agentCapabilityAssignments.push({ agentId, capability, mode: 'auto', updatedAt: new Date().toISOString() });
+    }
+    configured.push(capability);
+  }
+  return {
+    settings: sanitizeModelSettings(settingsValue), configured: [...new Set(configured)], addedModels,
+    preserved: [...new Set(preserved)], manualRequired: configured.length === 0,
+  };
+}
+
+/** Best-effort filtering for large remote catalogs. Manual entry and “show all” remain available. */
+export function modelLikelySupportsCapability(modelId: string, capability: ModelCapability) {
+  const id = modelId.toLowerCase();
+  const patterns: Partial<Record<ModelCapability, RegExp>> = {
+    image: /(image|text.?to.?image|t2i|wan\d|cogview|seedream|dall-e)/,
+    embedding: /(embed|embedding|vector)/,
+    asr: /(asr|speech.?to.?text|transcri|whisper|paraformer|recogn)/,
+    tts: /(tts|text.?to.?speech|speech.?synth|cosyvoice)/,
+    'quantum-code': /(quantum|esight)/,
+    vision: /(vision|(?:^|[-_])vl(?:[-_]|$)|gemini|claude|gpt-4o|gpt-4\.1)/,
+  };
+  const selected = patterns[capability];
+  if (selected) return selected.test(id);
+  if (capability === 'chat') return !Object.entries(patterns).some(([key, pattern]) => key !== 'quantum-code' && key !== 'vision' && pattern?.test(id));
+  return true;
+}
 
 export const defaultBaseUrl: Record<ProviderId, string> = {
   openai: 'https://api.openai.com/v1',
@@ -126,6 +273,8 @@ export const defaultBaseUrl: Record<ProviderId, string> = {
   deepseek: 'https://api.deepseek.com/v1',
   glm: 'https://open.bigmodel.cn/api/paas/v4',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  volcengine: 'https://openspeech.bytedance.com',
+  iflytek: 'https://raasr.xfyun.cn',
   ollama: 'http://127.0.0.1:11434/v1',
   'openai-compatible': '',
 };
@@ -138,6 +287,8 @@ export const providerDefaults: Record<ProviderId, Omit<ProviderConfig, 'apiKey' 
   deepseek: { provider: 'deepseek', baseUrl: defaultBaseUrl.deepseek, chatModel: 'deepseek-chat', chatModels: ['deepseek-chat'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   glm: { provider: 'glm', baseUrl: defaultBaseUrl.glm, chatModel: 'glm-4.5-flash', chatModels: ['glm-4.5-flash'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   qwen: { provider: 'qwen', baseUrl: defaultBaseUrl.qwen, chatModel: 'qwen-plus', chatModels: ['qwen-plus'], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
+  volcengine: { provider: 'volcengine', baseUrl: defaultBaseUrl.volcengine, chatModel: '', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
+  iflytek: { provider: 'iflytek', baseUrl: defaultBaseUrl.iflytek, chatModel: '', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   ollama: { provider: 'ollama', baseUrl: defaultBaseUrl.ollama, chatModel: 'llama3.2', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
   'openai-compatible': { provider: 'openai-compatible', baseUrl: '', chatModel: '', chatModels: [], disableThinking: false, supportsBuiltinWebSearch: false, imageModel: '', embeddingModel: '', asrModel: '', ttsModel: '' },
 };
@@ -149,17 +300,53 @@ export const ollamaLibraryCatalog = [
 const settings = ref<ModelSettings>(emptySettings());
 const loaded = ref(false);
 export const ollamaLocalModelNames = ref<string[]>([]);
+let healthSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function classifyCapabilityFailure(summary: string): NonNullable<ConfiguredModel['health']>['status'] {
+  const text = summary.toLowerCase();
+  if (/(401|403|permission|forbidden|unauthori|api.?key|无权限|未授权)/.test(text)) return 'permission_error';
+  if (/(400|404|model.*not found|workspace|endpoint|invalid|参数|配置|未开通|不存在)/.test(text)) return 'configuration_error';
+  return 'temporarily_unavailable';
+}
+
+function observeCapabilityHealth(observation: CapabilityHealthObservation) {
+  if (!loaded.value) return;
+  const candidates = settings.value.models.filter((item) => item.capability === observation.capability && item.modelId === observation.modelId);
+  const boundId = settings.value.capabilityBindings.find((item) => item.capability === observation.capability && item.enabled)?.modelId;
+  const model = candidates.find((item) => item.id === boundId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+  if (!model) return;
+  model.health = {
+    status: observation.ok ? 'available' : classifyCapabilityFailure(observation.summary),
+    checkedAt: new Date().toISOString(),
+    summary: observation.summary.slice(0, 500),
+  };
+  if (healthSaveTimer) clearTimeout(healthSaveTimer);
+  healthSaveTimer = setTimeout(() => {
+    const snapshot = sanitizeModelSettings(JSON.parse(JSON.stringify(settings.value)) as ModelSettings);
+    void (window.workmateDesktop ? window.workmateDesktop.saveModelConfig(snapshot) : saveServerModelConfig(snapshot)).catch(() => undefined);
+  }, 150);
+}
+
+setCapabilityHealthObserver(observeCapabilityHealth);
 
 function newId() {
   return crypto.randomUUID();
 }
 
 function emptySettings(): ModelSettings {
-  return { version: 2, providerInstances: [], models: [], activeChatModelId: null, activeEmbeddingModelId: null, employeeDefaultModelIds: {} };
+  return { version: 3, providerInstances: [], models: [], activeChatModelId: null, activeEmbeddingModelId: null, employeeDefaultModelIds: {}, capabilityBindings: [], agentCapabilityAssignments: [] };
 }
 
 export function providerCanBuiltinWebSearch(provider: ProviderId) {
   return provider === 'qwen' || provider === 'openai-compatible';
+}
+
+export function inferImageGenerationProtocol(provider: ProviderId, modelId: string): ImageGenerationProtocol {
+  const id = modelId.trim().toLowerCase();
+  if (provider !== 'qwen') return 'openai-images';
+  if (/^qwen-image-3(?:\.|-|$)/.test(id)) return 'openai-images';
+  if (/^(wan2\.[0-5]|wanx)/.test(id)) return 'dashscope-image-async';
+  return 'dashscope-multimodal';
 }
 
 export function providerNeedsApiKey(provider: ProviderId) {
@@ -194,6 +381,8 @@ export function defaultProviderName(type: ProviderId, existing: ProviderInstance
     deepseek: 'DeepSeek',
     glm: 'GLM（智谱）',
     qwen: '通义千问',
+    volcengine: '火山引擎',
+    iflytek: '科大讯飞',
     ollama: 'Ollama',
     'openai-compatible': 'OpenAI 兼容',
   };
@@ -206,6 +395,9 @@ export function createProviderInstance(type: ProviderId, existing: ProviderInsta
     type,
     name: defaultProviderName(type, existing),
     baseUrl: defaultBaseUrl[type],
+    workspaceId: '',
+    appId: '',
+    apiSecret: '',
     apiKey: '',
     disableThinking: false,
   };
@@ -214,11 +406,17 @@ export function createProviderInstance(type: ProviderId, existing: ProviderInsta
 export function providerInstanceReady(instance: ProviderInstance) {
   if (instance.type === 'openai-compatible' && !instance.baseUrl.trim()) return false;
   if (providerNeedsApiKey(instance.type) && !instance.apiKey.trim()) return false;
+  if ((instance.type === 'volcengine' || instance.type === 'iflytek') && !instance.appId?.trim()) return false;
+  if (instance.type === 'iflytek' && !instance.apiSecret?.trim()) return false;
   if (instance.type === 'ollama' && !instance.baseUrl.trim()) return false;
   if (instance.baseUrl.trim()) {
     try { new URL(instance.baseUrl); } catch { return false; }
   }
   return true;
+}
+
+export function effectiveProviderBaseUrl(instance: ProviderInstance) {
+  return resolveProviderBaseUrl({ provider: instance.type, baseUrl: instance.baseUrl, workspaceId: instance.workspaceId });
 }
 
 /** Drop models whose provider connection is incomplete (no valid key/URL). */
@@ -238,7 +436,16 @@ export function sanitizeModelSettings(value: ModelSettings): ModelSettings {
   for (const [employeeId, modelId] of Object.entries(value.employeeDefaultModelIds ?? {})) {
     if (models.some((item) => item.id === modelId && item.capability === 'chat')) employeeDefaultModelIds[employeeId] = modelId;
   }
-  return { version: 2, providerInstances: instances, models, activeChatModelId, activeEmbeddingModelId, employeeDefaultModelIds };
+  const capabilityBindings = (value.capabilityBindings ?? []).filter((binding) =>
+    models.some((model) => model.id === binding.modelId && model.capability === binding.capability),
+  );
+  if (activeEmbeddingModelId && !capabilityBindings.some((binding) => binding.capability === 'embedding')) {
+    capabilityBindings.push({ capability: 'embedding', modelId: activeEmbeddingModelId, enabled: true, updatedAt: new Date().toISOString() });
+  }
+  const agentCapabilityAssignments = (value.agentCapabilityAssignments ?? []).filter((assignment) =>
+    assignment.agentId && modelCapabilities.includes(assignment.capability),
+  );
+  return { version: 3, providerInstances: instances, models, activeChatModelId, activeEmbeddingModelId, employeeDefaultModelIds, capabilityBindings, agentCapabilityAssignments };
 }
 
 export function resolveConfiguredModel(model: ConfiguredModel, instances = settings.value.providerInstances): ProviderConfig | undefined {
@@ -249,16 +456,19 @@ export function resolveConfiguredModel(model: ConfiguredModel, instances = setti
     providerInstanceId: instance.id,
     providerLabel: instance.name,
     provider: instance.type,
-    baseUrl: instance.baseUrl,
+    baseUrl: effectiveProviderBaseUrl(instance),
     chatModel: model.capability === 'chat' ? model.modelId : '',
     chatModels: model.capability === 'chat' ? [model.modelId] : [],
     disableThinking: instance.disableThinking,
     supportsBuiltinWebSearch: Boolean(model.supportsBuiltinWebSearch) && providerCanBuiltinWebSearch(instance.type),
+    supportsVision: model.capability === 'chat' && Boolean(model.supportsVision),
     imageModel: model.capability === 'image' ? model.modelId : '',
     embeddingModel: model.capability === 'embedding' ? model.modelId : '',
     asrModel: model.capability === 'asr' ? model.modelId : '',
     ttsModel: model.capability === 'tts' ? model.modelId : '',
     apiKey: instance.apiKey,
+    appId: instance.appId,
+    apiSecret: instance.apiSecret,
   };
 }
 
@@ -297,6 +507,9 @@ function migrateFromV1(legacy: {
       type,
       name: defaultProviderName(type, next.providerInstances),
       baseUrl: row.baseUrl?.trim() || defaultBaseUrl[type],
+      workspaceId: '',
+      appId: '',
+      apiSecret: '',
       apiKey: String(row.apiKey || ''),
       disableThinking: Boolean(row.disableThinking),
     };
@@ -319,19 +532,34 @@ function migrateFromV1(legacy: {
   return sanitizeModelSettings(next);
 }
 
+function normalizeModelHealth(value: unknown): ConfiguredModel['health'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const row = value as Record<string, unknown>;
+  const status = String(row.status || '');
+  if (!['available', 'configuration_error', 'permission_error', 'temporarily_unavailable'].includes(status)) return undefined;
+  return {
+    status: status as NonNullable<ConfiguredModel['health']>['status'],
+    checkedAt: String(row.checkedAt || ''),
+    summary: String(row.summary || '').slice(0, 500),
+  };
+}
+
 function normalize(value: unknown): ModelSettings {
-  const raw = (value ?? {}) as Partial<ModelSettings> & {
+  const raw = (value ?? {}) as Omit<Partial<ModelSettings>, 'version'> & {
     activeProvider?: ProviderId;
     providers?: unknown[];
     version?: number;
   };
-  if (raw.version === 2 && Array.isArray(raw.providerInstances) && Array.isArray(raw.models)) {
+  if ((raw.version === 2 || raw.version === 3) && Array.isArray(raw.providerInstances) && Array.isArray(raw.models)) {
     const instances = raw.providerInstances
       .map((item) => ({
         id: String(item.id || newId()),
         type: providerIds.includes(item.type) ? item.type : ('openai-compatible' as ProviderId),
         name: String(item.name || '').trim() || defaultProviderName(item.type, []),
         baseUrl: String(item.baseUrl || ''),
+        workspaceId: String(item.workspaceId || '').trim() || undefined,
+        appId: String(item.appId || '').trim() || undefined,
+        apiSecret: String(item.apiSecret || ''),
         apiKey: String(item.apiKey || ''),
         disableThinking: Boolean(item.disableThinking),
       }))
@@ -340,6 +568,7 @@ function normalize(value: unknown): ModelSettings {
     const models = raw.models
       .map((item) => {
         const instanceType = instances.find((row) => row.id === String(item.providerInstanceId || ''))?.type;
+        const imageProtocol = String(item.imageProtocol || '') as ImageGenerationProtocol;
         const supportsBuiltinWebSearch = Boolean(item.supportsBuiltinWebSearch)
           && Boolean(instanceType && providerCanBuiltinWebSearch(instanceType));
         return {
@@ -347,7 +576,11 @@ function normalize(value: unknown): ModelSettings {
           providerInstanceId: String(item.providerInstanceId || ''),
           capability: (modelCapabilities.includes(item.capability) ? item.capability : 'chat') as ModelCapability,
           modelId: String(item.modelId || '').trim(),
+          voice: item.capability === 'tts' && item.voice ? String(item.voice).trim() || undefined : undefined,
           label: item.label ? String(item.label) : undefined,
+          imageProtocol: item.capability === 'image' && imageGenerationProtocols.includes(imageProtocol)
+            ? imageProtocol
+            : undefined,
           meta: item.meta && typeof item.meta === 'object'
             ? {
                 dimension: Number((item.meta as { dimension?: unknown }).dimension) || undefined,
@@ -359,16 +592,34 @@ function normalize(value: unknown): ModelSettings {
               }
             : undefined,
           supportsBuiltinWebSearch: supportsBuiltinWebSearch || undefined,
+          supportsVision: item.capability === 'chat' && Boolean(item.supportsVision),
+          health: normalizeModelHealth(item.health),
         };
       })
       .filter((item) => item.id && item.modelId && instanceIds.has(item.providerInstanceId));
     return sanitizeModelSettings({
-      version: 2,
+      version: 3,
       providerInstances: instances,
       models,
       activeChatModelId: raw.activeChatModelId ? String(raw.activeChatModelId) : null,
       activeEmbeddingModelId: raw.activeEmbeddingModelId ? String(raw.activeEmbeddingModelId) : null,
       employeeDefaultModelIds: (raw.employeeDefaultModelIds ?? {}) as Record<string, string>,
+      capabilityBindings: Array.isArray(raw.capabilityBindings)
+        ? raw.capabilityBindings.map((item) => ({
+            capability: modelCapabilities.includes(item.capability) ? item.capability : 'chat',
+            modelId: String(item.modelId || ''),
+            enabled: item.enabled !== false,
+            updatedAt: String(item.updatedAt || new Date().toISOString()),
+          }))
+        : [],
+      agentCapabilityAssignments: Array.isArray(raw.agentCapabilityAssignments)
+        ? raw.agentCapabilityAssignments.map((item) => ({
+            agentId: String(item.agentId || ''),
+            capability: modelCapabilities.includes(item.capability) ? item.capability : 'chat',
+            mode: (item.mode === 'auto' || item.mode === 'preferred' ? item.mode : 'disabled') as AgentCapabilityMode,
+            updatedAt: String(item.updatedAt || new Date().toISOString()),
+          }))
+        : [],
     });
   }
   return migrateFromV1(raw as Parameters<typeof migrateFromV1>[0]);
@@ -438,6 +689,7 @@ export function toModelPayload(config: ProviderConfig, options?: { enableSearch?
     baseUrl: config.baseUrl || undefined,
     providerLabel: config.providerLabel || undefined,
     disableThinking: config.disableThinking || undefined,
+    supportsVision: config.supportsVision || undefined,
     enableSearch: Boolean(options?.enableSearch) && config.supportsBuiltinWebSearch,
     imageModel: config.imageModel || undefined,
     embeddingModel: embed?.modelId || config.embeddingModel || undefined,
@@ -635,6 +887,48 @@ export function useModelConfig() {
     return next;
   };
 
+  const agentCapabilityMode = (agentId: string, capability: ModelCapability): AgentCapabilityMode =>
+    settings.value.agentCapabilityAssignments.find((item) => item.agentId === agentId && item.capability === capability)?.mode ?? 'disabled';
+
+  const setAgentCapabilityMode = async (agentId: string, capability: ModelCapability, mode: AgentCapabilityMode) => {
+    const next = settings.value.agentCapabilityAssignments.filter(
+      (item) => !(item.agentId === agentId && item.capability === capability),
+    );
+    next.push({ agentId, capability, mode, updatedAt: new Date().toISOString() });
+    await save({ ...settings.value, agentCapabilityAssignments: next });
+  };
+
+  const capabilityAvailable = (capability: ModelCapability) => {
+    const binding = settings.value.capabilityBindings.find((item) => item.capability === capability && item.enabled);
+    return Boolean(binding && settings.value.models.some((item) => item.id === binding.modelId && item.capability === capability));
+  };
+
+  const modelCapabilitiesForAgent = (agentId: string) => settings.value.agentCapabilityAssignments
+    .filter((assignment) => assignment.agentId === agentId && assignment.mode !== 'disabled')
+    .map((assignment) => {
+      const binding = settings.value.capabilityBindings.find((item) => item.capability === assignment.capability && item.enabled);
+      const model = binding ? settings.value.models.find((item) => item.id === binding.modelId && item.capability === assignment.capability) : undefined;
+      const provider = model ? settings.value.providerInstances.find((item) => item.id === model.providerInstanceId) : undefined;
+      if (!binding || !model || !provider || !providerInstanceReady(provider) || !provider.baseUrl.trim()) return null;
+      return {
+        id: model.id,
+        capability: assignment.capability,
+        provider: provider.type,
+        providerLabel: provider.name,
+        baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+        apiKey: apiKeyForRequest(resolveConfiguredModel(model, settings.value.providerInstances)!),
+        ...(provider.appId ? { appId: provider.appId } : {}),
+        ...(provider.apiSecret ? { apiSecret: provider.apiSecret } : {}),
+        modelId: model.modelId,
+        ...(model.capability === 'tts' && model.voice?.trim() ? { voice: model.voice.trim() } : {}),
+        imageProtocol: model.capability === 'image'
+          ? (model.imageProtocol ?? inferImageGenerationProtocol(provider.type, model.modelId))
+          : undefined,
+        mode: assignment.mode,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
   return {
     settings,
     activeConfig,
@@ -651,6 +945,10 @@ export function useModelConfig() {
     modelForEmployee,
     setEmployeeDefaultModel,
     registerLocalEmbeddingProvider,
+    agentCapabilityMode,
+    setAgentCapabilityMode,
+    capabilityAvailable,
+    modelCapabilitiesForAgent,
     resolveConfiguredModel,
   };
 }

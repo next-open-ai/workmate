@@ -8,6 +8,9 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Invalid chat request.', issues: parsed.error.issues });
     }
+    if (parsed.data.messages.some((message) => message.attachments?.length)) {
+      return reply.code(400).send({ message: 'VISION_SESSION_REQUIRED：图片仅支持有权限校验的会话接口。' });
+    }
     reply.hijack();
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',

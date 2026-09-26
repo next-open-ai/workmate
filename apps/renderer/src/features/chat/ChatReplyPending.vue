@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from '../../app/i18n';
 
 const props = defineProps<{ accent?: string; startedAt?: number }>();
@@ -24,6 +24,10 @@ const phase = computed(() => {
   if (seconds < 2) return '正在准备智能体资源';
   if (seconds < 8) return '正在连接模型服务';
   return '正在等待模型返回首字';
+});
+
+watch(() => props.startedAt, (value) => {
+  if (value && value > 0) origin.value = value;
 });
 
 onMounted(() => {

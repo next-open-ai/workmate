@@ -10,7 +10,7 @@
 
 Workmate 是一套桌面级 Agent 工作台：其中的“数字员工”可以对话、运行**项目编排**、使用 **Skills**、检索**知识库 / MCP 连接 / 联网搜索**、管理**资产与自动化**，并且能通过**本地通道网关**被外部 IM（Telegram / 飞书）乃至**远程中继终端**调度。与常见“聊天壳 + 状态都在前端”的 Agent 应用不同，Workmate 把重编排放进**服务端状态机**：桌面 UI、网关进程与未来的远程终端共享同一份会话、审批、运行、资产与项目状态。
 
-协作约定（人与 AI）：根目录 [AGENTS.md](./AGENTS.md) · [docs/engineering/](./docs/engineering/)
+协作约定（人与 AI）：根目录 [AGENTS.md](./AGENTS.md) · [文档中心](./docs/README.md) · [工程规则](./docs/engineering/README.md)
 
 仓库刻意保持 Electron 壳“薄”：
 
@@ -20,15 +20,15 @@ Vue renderer ────── HTTP / SSE ────────┘
 通道网关 ───────── HTTP / SSE ──────────┘（Telegram / 飞书 / 远程中继）
 ```
 
-AgentScope 迁移说明见 `docs/agentscope-migration.md`；协议 ABI 见 `docs/design/agentscope-abi.md`。
-并发执行机制说明见 `docs/design/concurrency-runtime.md`；压测与验收清单见 `docs/design/concurrency-verification.md`。
+AgentScope 迁移说明见 `docs/migrations/agentscope.md`；协议 ABI 见 `docs/architecture/agentscope-abi.md`。
+并发执行机制说明见 `docs/architecture/concurrency-runtime.md`；压测与验收清单见 `docs/architecture/concurrency-verification.md`。
 可重复执行的并发回归入口为 `pnpm concurrency:regression`（会先跑 dsh MCP/Skills 桥接 case）。独立验证：`pnpm dsh:regression`。
 
 快速入口：
 
-- 运行形态说明：`docs/runtime-modes.md`
-- 发布前检查清单：`docs/release-checklist.md`
-- 双运行形态改造说明：`docs/dual-runtime-release-notes.md`
+- 运行形态说明：`docs/guides/runtime-modes.md`
+- 发布前检查清单：`docs/releases/checklist.md`
+- 双运行形态改造说明：`docs/releases/dual-runtime-release-notes.md`
 
 ## 能力一览
 
@@ -62,7 +62,7 @@ AgentScope 迁移说明见 `docs/agentscope-migration.md`；协议 ABI 见 `docs
 | `packages/channel` | 与传输解耦的通道协议（`UnifiedMessage/IChannel/registry/StreamSink`） |
 | `packages/storage`、`packages/ui-kit` | 预留占位 |
 
-当前完整架构与模块职责见 [docs/design/architecture.md](docs/design/architecture.md)。
+当前完整架构与模块职责见 [docs/architecture/architecture.md](docs/architecture/architecture.md)。
 
 ## 安装与使用
 
@@ -142,7 +142,7 @@ Workmate 当前有 4 种实际运行形态：
 | npm / CLI | `workmate start` | 已支持 | 与 web launcher 是同一运行时形态 |
 | Docker | `deploy/docker/workmate/` | 支持构建 / 部署方案 | 已提供 Docker 构建与部署文档，能力对齐仍在演进 |
 
-完整能力对齐矩阵见 [docs/runtime-modes.md](docs/runtime-modes.md)。
+完整能力对齐矩阵见 [docs/guides/runtime-modes.md](docs/guides/runtime-modes.md)。
 
 ## 架构现实
 
@@ -156,11 +156,11 @@ Workmate 当前有 4 种实际运行形态：
 
 相关设计入口：
 
-- [docs/design/execution-backend.md](docs/design/execution-backend.md)
-- [docs/design/dsh-sidecar.md](docs/design/dsh-sidecar.md)
-- [docs/design/agentscope-abi.md](docs/design/agentscope-abi.md)
-- [docs/design/embedding-local-sidecar-architecture.md](docs/design/embedding-local-sidecar-architecture.md)
-- [docs/design/embedding-local-sidecar-implementation-plan.md](docs/design/embedding-local-sidecar-implementation-plan.md)
+- [docs/architecture/execution-backend.md](docs/architecture/execution-backend.md)
+- [docs/architecture/dsh-sidecar.md](docs/architecture/dsh-sidecar.md)
+- [docs/architecture/agentscope-abi.md](docs/architecture/agentscope-abi.md)
+- [docs/architecture/embedding-local-sidecar-architecture.md](docs/architecture/embedding-local-sidecar-architecture.md)
+- [docs/architecture/embedding-local-sidecar-implementation-plan.md](docs/architecture/embedding-local-sidecar-implementation-plan.md)
 
 ## 发布
 
@@ -179,14 +179,21 @@ Intel macOS 与 Linux 打包暂在 CI 停用（细节见 `.github/workflows/rele
 
 | 语言/主题 | 入口 |
 | --- | --- |
-| 运行形态 | [runtime-modes](docs/runtime-modes.md) |
-| 架构与模块 | [docs/design/architecture.md](docs/design/architecture.md)（当前权威） |
-| 设计文档索引与状态 | [docs/design/README.md](docs/design/README.md) |
-| 执行后端抽象 | [docs/design/execution-backend.md](docs/design/execution-backend.md) |
-| 并发机制与进程拓扑 | [docs/design/concurrency-runtime.md](docs/design/concurrency-runtime.md) |
-| 并发压测与验收 | [docs/design/concurrency-verification.md](docs/design/concurrency-verification.md) |
-| 通道网关里程碑 | [M0](docs/design/gateway-m0.md) · [M0 验收清单](docs/design/gateway-m0-acceptance.md) · [M1](docs/design/gateway-m1.md) · [M2](docs/design/gateway-m2.md) |
-| 需求/架构/测试规格（早期） | `docs/sdd/*` |
+| 文档总入口 | [docs/README.md](docs/README.md) |
+| 产品与需求 | [docs/product/README.md](docs/product/README.md) |
+| 架构中心 | [docs/architecture/README.md](docs/architecture/README.md) |
+| 功能 SDD | [docs/sdd/README.md](docs/sdd/README.md) |
+| 项目总计划 | [docs/planning/README.md](docs/planning/README.md) |
+| 测试、回归与验收 | [docs/quality/README.md](docs/quality/README.md) |
+| 平台 Benchmark | [docs/benchmarks/README.md](docs/benchmarks/README.md) |
+| 运行形态 | [runtime-modes](docs/guides/runtime-modes.md) |
+| 架构与模块 | [docs/architecture/architecture.md](docs/architecture/architecture.md)（当前权威） |
+| 架构决策 | [docs/architecture/adr/README.md](docs/architecture/adr/README.md) |
+| 执行后端抽象 | [docs/architecture/execution-backend.md](docs/architecture/execution-backend.md) |
+| 并发机制与进程拓扑 | [docs/architecture/concurrency-runtime.md](docs/architecture/concurrency-runtime.md) |
+| 并发压测与验收 | [docs/architecture/concurrency-verification.md](docs/architecture/concurrency-verification.md) |
+| 通道网关里程碑 | [M0](docs/architecture/gateway-m0.md) · [M0 验收清单](docs/architecture/gateway-m0-acceptance.md) · [M1](docs/architecture/gateway-m1.md) · [M2](docs/architecture/gateway-m2.md) |
+| 历史总规格 | [docs/archive/legacy-global-sdd/](docs/archive/legacy-global-sdd/README.md) |
 
 ## 通道网关里程碑状态
 

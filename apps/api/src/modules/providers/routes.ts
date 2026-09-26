@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { resolveProviderBaseUrl } from '@workmate/contracts';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -9,6 +10,7 @@ function providerInput(body: unknown) {
   return {
     type: String(value.type || '').trim(),
     baseUrl: String(value.baseUrl || '').trim(),
+    workspaceId: String(value.workspaceId || '').trim(),
     apiKey: String(value.apiKey || '').trim(),
     model: String(value.model || '').trim(),
   };
@@ -39,8 +41,12 @@ function extractModelsCount(payload: Record<string, unknown> | null) {
   return rows.length;
 }
 
-async function testProviderConnection(value: { type: string; baseUrl: string; apiKey: string }) {
-  const { type, baseUrl, apiKey } = value;
+async function testProviderConnection(value: { type: string; baseUrl: string; workspaceId?: string; apiKey: string }) {
+  const { type, apiKey } = value;
+  const baseUrl = resolveProviderBaseUrl({ provider: type, baseUrl: value.baseUrl, workspaceId: value.workspaceId });
+  if (type === 'volcengine' || type === 'iflytek') {
+    return { ok: true as const, message: '语音凭据已完整配置；该厂商没有通用模型列表接口，请通过 ASR/TTS 能力执行真实连通性验证。' };
+  }
   if (type === 'ollama') {
     const root = (baseUrl || 'http://127.0.0.1:11434/v1').replace(/\/v1\/?$/, '');
     const response = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(8_000) });
@@ -79,8 +85,9 @@ async function testProviderConnection(value: { type: string; baseUrl: string; ap
   return { ok: true as const, message: count ? `连接成功，接口返回 ${count} 个模型。` : '连接成功。' };
 }
 
-async function listProviderModels(value: { type: string; baseUrl: string; apiKey: string }) {
-  const { type, baseUrl, apiKey } = value;
+async function listProviderModels(value: { type: string; baseUrl: string; workspaceId?: string; apiKey: string }) {
+  const { type, apiKey } = value;
+  const baseUrl = resolveProviderBaseUrl({ provider: type, baseUrl: value.baseUrl, workspaceId: value.workspaceId });
   if (type === 'ollama') {
     const root = (baseUrl || 'http://127.0.0.1:11434/v1').replace(/\/v1\/?$/, '');
     const response = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(8_000) });
