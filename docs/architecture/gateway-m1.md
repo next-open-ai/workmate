@@ -64,7 +64,7 @@ Electron Main ── fork ── apps/gateway  (通道网关进程)
 ## 5. 真机 Telegram 联调步骤（需真实 bot token）
 
 1. `pnpm build`（含 channel/gateway）；
-2. 起桌面：`pnpm dev`（api 4328 + 域 KV 就绪）；或在 headless 下另起 api：
+2. 起桌面：`pnpm dev`（api 47832 + 域 KV 就绪）；或在 headless 下另起 api：
    `WORKMATE_ORCH_RUNNER=…` 不建议，生产应起真实模型（桌面 keyring 提供）；
 3. 写入配置：
    `WORKMATE_TG_BOT_TOKEN_FILE=/path/token WORKMATE_GATEWAY_ALLOW="telegram:user:<你的tg用户id>" node scripts/gateway-config.mjs`

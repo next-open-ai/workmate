@@ -84,6 +84,7 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
           ...(model.voice ? { voice: String(model.voice) } : {}),
           ...(model.label ? { label: String(model.label) } : {}),
           ...(model.imageProtocol ? { imageProtocol: String(model.imageProtocol) } : {}),
+          ...(model.decisionProtocol ? { decisionProtocol: String(model.decisionProtocol) } : {}),
           ...(model.meta && typeof model.meta === 'object'
             ? {
                 meta: {
@@ -113,8 +114,9 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
         employeeDefaultModelIds: asRecord(raw.employeeDefaultModelIds),
         capabilityBindings: arrayOfRecords(raw.capabilityBindings),
         agentCapabilityAssignments: arrayOfRecords(raw.agentCapabilityAssignments),
+        ...(raw.decisionRuntime && typeof raw.decisionRuntime === 'object' ? { decisionRuntime: { ...asRecord(raw.decisionRuntime), apiKey: undefined } } : {}),
       },
-      secrets: { providerInstances: providerSecrets },
+      secrets: { providerInstances: providerSecrets, decisionRuntime: { apiKey: String(asRecord(raw.decisionRuntime).apiKey || '') } },
     };
   }
   const providers = arrayOfRecords(raw.providers).map((provider) => ({
@@ -162,6 +164,7 @@ function mergeModelSettings(value: unknown) {
       employeeDefaultModelIds: asRecord(meta.employeeDefaultModelIds),
       capabilityBindings: Array.isArray(meta.capabilityBindings) ? meta.capabilityBindings : [],
       agentCapabilityAssignments: Array.isArray(meta.agentCapabilityAssignments) ? meta.agentCapabilityAssignments : [],
+      ...(meta.decisionRuntime && typeof meta.decisionRuntime === 'object' ? { decisionRuntime: { ...asRecord(meta.decisionRuntime), apiKey: String(asRecord(secrets.decisionRuntime).apiKey || '') } } : {}),
     };
   }
   const providerSecrets = asRecord(secrets.providers);

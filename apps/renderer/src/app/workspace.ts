@@ -2,7 +2,7 @@ import { computed, ref } from 'vue';
 import { materializeWorkspaceAssets, createManagedWorkspace, mergeToolActivity, streamChat, syncWorkspaceRun, type RuntimeSkill, type ToolActivity, type ToolApproval, type SearchSource } from '../services/api.js';
 import * as orch from '../services/orchestration.js';
 import type { ProviderConfig } from './model-config.js';
-import { toModelPayload, useModelConfig } from './model-config.js';
+import { resolveDecisionRuntime, toModelPayload, useModelConfig } from './model-config.js';
 import { useSearchConfig } from './search-config.js';
 import { DEFAULT_MAX_STEPS, DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_RUN_TIMEOUT_MS, useEmployeeRuntimePrefs } from './employee-prefs.js';
 import { useMcpConfig } from './mcp-config.js';
@@ -278,7 +278,7 @@ export function useWorkspace() {
   const { archiveArtifact, archiveBundle } = useAssets();
   const { config: autoScheduleConfig, load: loadAutoScheduleConfig } = useAutoScheduleConfig();
   void loadAutoScheduleConfig();
-  const { modelForEmployee, modelCapabilitiesForAgent } = useModelConfig();
+  const { settings: modelSettings, modelForEmployee, modelCapabilitiesForAgent } = useModelConfig();
 
   const runOptionsFor = (employeeId: EmployeeId, onlineSearch = true) => {
     const prefs = getEmployeePrefs(employeeId);
@@ -296,7 +296,8 @@ export function useWorkspace() {
         engine,
         mcpConnections: mcpRuntimePayload(prefs.mcpIds),
         knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
-        modelCapabilities: modelCapabilitiesForAgent(employeeId),
+        modelCapabilities: modelCapabilitiesForAgent(employeeId, prefs.useApplicationModels),
+        decisionRuntime: resolveDecisionRuntime(modelSettings.value),
       };
     }
     const enableBuiltinSearch = prefs.searchMode === 'llm-builtin';
@@ -308,7 +309,8 @@ export function useWorkspace() {
       engine,
       mcpConnections: mcpRuntimePayload(prefs.mcpIds),
       knowledgeBases: kbRuntimePayload(prefs.knowledgeBaseIds, prefs.knowledgeProvider),
-      modelCapabilities: modelCapabilitiesForAgent(employeeId),
+      modelCapabilities: modelCapabilitiesForAgent(employeeId, prefs.useApplicationModels),
+      decisionRuntime: resolveDecisionRuntime(modelSettings.value),
     };
   };
 
@@ -601,6 +603,7 @@ export function useWorkspace() {
         mcpConnections: opts.mcpConnections,
         knowledgeBases: opts.knowledgeBases,
         modelCapabilities: opts.modelCapabilities,
+        decisionRuntime: opts.decisionRuntime,
         maxSteps: opts.maxSteps,
         runTimeoutMs: opts.runTimeoutMs,
         mcpToolTimeoutMs: opts.mcpToolTimeoutMs,
@@ -1018,7 +1021,8 @@ export function useWorkspace() {
     const hasImages = Boolean(options.attachments?.length || activeConversation.value?.messages.some((message) => message.attachments?.length));
     if (hasImages && (options.autoSchedule || options.collaboratorIds?.length)) throw new Error('含图片的会话暂只支持单员工对话，请关闭自动调度并移除协作者。');
     const effectiveModel = modelForEmployee(options.employeeId ?? activeConversation.value?.employeeId ?? currentEmployeeId.value, model) ?? model;
-    const visionService = modelCapabilitiesForAgent(options.employeeId ?? activeConversation.value?.employeeId ?? currentEmployeeId.value).find((item) => item.capability === 'vision');
+    const visionEmployeeId = options.employeeId ?? activeConversation.value?.employeeId ?? currentEmployeeId.value;
+    const visionService = modelCapabilitiesForAgent(visionEmployeeId, getEmployeePrefs(visionEmployeeId).useApplicationModels).find((item) => item.capability === 'vision');
     if (hasImages && !effectiveModel.supportsVision && !visionService) throw new Error('请使用视觉主模型，或绑定“图片理解”应用模型并为员工开启该能力。');
     chatBusy.value = true;
     try {

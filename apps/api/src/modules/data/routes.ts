@@ -791,7 +791,7 @@ function localPublishUrl(host: string, appId: string, token: string) {
 }
 
 function apiListenPort() {
-  return Number(process.env.WORKMATE_API_PORT || 4328);
+  return Number(process.env.WORKMATE_API_PORT || 47832);
 }
 
 function listLanIPv4Addresses() {
@@ -1681,7 +1681,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
       `SELECT id, name, app_type, source_id, table_id, created_at FROM data_apps WHERE owner_user_id = ? AND org_id = ?${sourceId ? ' AND source_id = ?' : ''} ORDER BY created_at DESC`,
       sourceId ? [auth.userId, auth.orgId, sourceId] : [auth.userId, auth.orgId],
     )[0]?.values || [];
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     return rows.map((row) => {
       const id = String(row[0]);
       const token = publishedTokenForApp(db, id);
@@ -1732,7 +1732,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     db.run('INSERT INTO data_apps (id, name, app_type, source_id, table_id, created_at, org_id, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, name, appType, sourceId, tableId, createdAt, auth.orgId, auth.userId]);
     const token = ensurePublishToken(db, id);
     flushDatabase(db);
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     const urls = publishUrlBundle(id, token, host);
     const samples = recordsForTable(db, table).slice(0, 5).map((record) => record.values);
     const prompt = buildDataAppCustomizePrompt({
@@ -1766,7 +1766,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const db = await database(); const appValue = getApp(db, appId, auth);
     if (!appValue) return reply.code(404).send({ message: '数据应用不存在或无权访问。' });
     const token = ensurePublishToken(db, appId);
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     const urls = publishUrlBundle(appId, token, host);
     const samples = recordsForTable(db, appValue.table).slice(0, 5).map((record) => record.values);
     const prompt = buildDataAppCustomizePrompt({
@@ -1822,7 +1822,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ message: error instanceof Error ? error.message : '保存失败。' });
     }
     const token = ensurePublishToken(db, appId);
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     return { ok: true, appId, url: localPublishUrl(host, appId, token) };
   });
 
@@ -1859,7 +1859,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     if (!appValue) return reply.code(404).send({ message: '数据应用不存在或无权访问。' });
     const token = publishedTokenForApp(db, appId);
     if (!token) return { appId, published: false as const, url: null, localUrl: null, lanUrls: [] as string[] };
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     const urls = publishUrlBundle(appId, token, host);
     return { appId, published: true as const, ...urls };
   });
@@ -1872,7 +1872,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     // links already rendered in cards, QR codes, browsers or agent prompts.
     // Token rotation should be a separate explicit revoke operation.
     const token = ensurePublishToken(db, appId);
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     return { appId, ...publishUrlBundle(appId, token, host) };
   });
 
@@ -2017,7 +2017,7 @@ export const publicDataAppRoutes: FastifyPluginAsync = async (app) => {
     }
     // Restore missing/stale query token in the address bar so refreshes & shares keep working.
     if (tokenHint !== token) {
-      const host = String(request.headers.host || '127.0.0.1:4328');
+      const host = String(request.headers.host || '127.0.0.1:47832');
       return reply.redirect(localPublishUrl(host, appId, token));
     }
     db.run('UPDATE data_app_publishes SET last_accessed_at = ? WHERE app_id = ?', [Date.now(), appId]);
@@ -2090,7 +2090,7 @@ export const publicDataAppRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : '保存失败。' });
     }
-    const host = String(request.headers.host || '127.0.0.1:4328');
+    const host = String(request.headers.host || '127.0.0.1:47832');
     return { ok: true, appId, url: localPublishUrl(host, appId, token) };
   });
   app.get('/data-apps/:appId/custom-site', async (request, reply) => {

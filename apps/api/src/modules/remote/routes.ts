@@ -48,7 +48,7 @@ function gatewayEntry(): string {
 }
 
 function gatewayApiUrl(): string {
-  const port = Number(process.env.WORKMATE_API_PORT ?? 4328);
+  const port = Number(process.env.WORKMATE_API_PORT ?? 47832);
   return `http://127.0.0.1:${port}/api/orch`;
 }
 

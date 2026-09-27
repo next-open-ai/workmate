@@ -16,7 +16,7 @@ export class GatewayRuntime {
   constructor(config: GatewayConfig) {
     this.config = config;
     this.defaultEmployeeId = config.defaultEmployeeId ?? 'general';
-    this.client = new OrchestratorClient(config.apiBaseUrl ?? 'http://127.0.0.1:4328/api/orch');
+    this.client = new OrchestratorClient(config.apiBaseUrl ?? 'http://127.0.0.1:47832/api/orch');
   }
 
   async isAuthorized(message: UnifiedMessage): Promise<boolean> {

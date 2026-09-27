@@ -21,7 +21,7 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 │      └─ 远程办公·连接门户 (P1)         │  HTTP/SSE(/api/orch)             │
 │                                       ▼                                   │
 │  ┌────────────────────────────────────────────────────────────┐           │
-│  │ apps/api（Fastify，端口 4328，localhost）                     │           │
+│  │ apps/api（Fastify，端口 47832，localhost）                     │           │
 │  │   ├─ /api/chat        (旧 stateless 流式，兼容)               │           │
 │  │   ├─ /api/orch/**     (REST + SSE)                           │           │
 │  │   └─ @workmate/orchestrator   ← 编排层（唯一运行层）              │           │
@@ -61,6 +61,7 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 | --- | --- | --- |
 | `contracts` | Zod 契约与 `AgentEvent` 事件并集 | 单一事实源 |
 | `agent-core` | 唯一模型执行层：`ExecutionBackend` 注册表 + `streamAgentReply`（默认 **pi**，可选 **AgentScope** / **dsh** sidecar）、provider 适配、step 压缩、`summarizeSessionMemory`、Skill/MCP | 不感知会话持久化 |
+| `agent-core/decision-runtime` | 可插拔有限问题决策模型、`decision_evaluate` 与工具执行前守卫；默认关闭、超时降级和短时熔断 | 不替代确定性权限规则；首个适配器为 Jev/System One |
 | `tools` | `OpcaiTool{id,risk,inputSchema,execute}` + `ToolPolicy` | 契约层 |
 | `orchestrator` | **编排核心**（见 §5）：含 **Session Rolling Memory** | 纯 Node，测试友好（runner 可注入） |
 | `channel` | 通道协议与核心 | 传输无关 |

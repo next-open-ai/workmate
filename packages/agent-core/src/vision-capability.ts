@@ -12,6 +12,31 @@ export interface VisionToolContext {
 
 export const VISION_MAX_OUTPUT_TOKENS = 2048;
 
+export async function testVisionCapabilityDataUrl(config: ModelCapabilityRuntime, prompt: string, dataUrl: string) {
+  const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/s.exec(dataUrl);
+  if (!match) throw new ImageInputError('IMAGE_FORMAT_INVALID', '测试图片只支持 PNG、JPEG、WebP。');
+  const bytes = Buffer.from(match[2], 'base64');
+  if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw new ImageInputError('IMAGE_SIZE_INVALID', '测试图片须小于等于 10 MB。');
+  const effectiveModelId = effectiveVisionModelId(config);
+  const runtimeModel = { provider: config.provider, baseUrl: config.baseUrl, apiKey: config.apiKey, chatModel: effectiveModelId, supportsVision: true };
+  const response = await complete(toPiModel(runtimeModel), {
+    systemPrompt: 'You are a focused image-understanding specialist. Describe only visible evidence, distinguish facts from inference, and answer concisely in the user language.',
+    messages: [{ role: 'user', timestamp: Date.now(), content: [
+      { type: 'text', text: prompt.trim() || '请简要描述图片的主要内容。' },
+      { type: 'image', data: match[2], mimeType: match[1] as 'image/png' | 'image/jpeg' | 'image/webp' },
+    ] }],
+  }, {
+    apiKey: config.apiKey || (config.provider === 'ollama' ? 'ollama' : undefined),
+    signal: AbortSignal.timeout(90_000),
+    maxTokens: VISION_MAX_OUTPUT_TOKENS,
+    onPayload: createChatCompletionsPayloadPatch(runtimeModel),
+  });
+  if (response.stopReason === 'error' || response.stopReason === 'aborted') throw new ImageInputError('VISION_PROVIDER_FAILED', response.errorMessage || '图片理解服务未完成请求。');
+  const analysis = response.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n').trim();
+  if (!analysis) throw new ImageInputError('VISION_EMPTY_RESULT', '图片理解模型未返回有效文字。');
+  return { ok: true, capability: 'vision' as const, modelId: effectiveModelId, ...(effectiveModelId !== config.modelId ? { configuredModelId: config.modelId } : {}), analysis, usage: response.usage };
+}
+
 /** Alibaba MaaS deployment endpoints are verified against stable aliases; remote
  * catalogs may expose dated snapshots that the deployment route never serves. */
 export function effectiveVisionModelId(config: Pick<ModelCapabilityRuntime, 'provider' | 'baseUrl' | 'modelId'>) {

@@ -55,7 +55,7 @@ export const AgentSkillRuntimeSchema = z.object({
 });
 export type AgentSkillRuntime = z.infer<typeof AgentSkillRuntimeSchema>;
 
-export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts']);
+export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision']);
 export type ModelCapability = z.infer<typeof ModelCapabilitySchema>;
 export const ImageGenerationProtocolSchema = z.enum([
   'openai-images',
@@ -202,6 +202,32 @@ export const ModelCapabilityRuntimeSchema = z.object({
   mode: AgentCapabilityModeSchema,
 });
 export type ModelCapabilityRuntime = z.infer<typeof ModelCapabilityRuntimeSchema>;
+
+export const DecisionProtocolSchema = z.enum(['system-one-v1']);
+export type DecisionProtocol = z.infer<typeof DecisionProtocolSchema>;
+
+/** Persisted guard policy. Provider credentials live in the selected application model. */
+export const DecisionGuardPolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['off', 'observe', 'enforce']).default('off'),
+  applicationModelId: z.string().min(1).optional(),
+  timeoutMs: z.number().int().min(200).max(10_000).default(1_500),
+  failurePolicy: z.enum(['allow', 'deny']).default('allow'),
+  guardTools: z.boolean().default(true),
+  agentTool: z.boolean().default(true),
+  mcpEnabled: z.boolean().default(false),
+});
+export type DecisionGuardPolicy = z.infer<typeof DecisionGuardPolicySchema>;
+
+/** Resolved immutable run snapshot. Never persisted as the source of provider credentials. */
+export const DecisionRuntimeConfigSchema = DecisionGuardPolicySchema.extend({
+  provider: z.string().min(1).max(80).default('jev'),
+  protocol: DecisionProtocolSchema.default('system-one-v1'),
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),
+  model: z.string().min(1).max(120).default('jev-latest'),
+});
+export type DecisionRuntimeConfig = z.infer<typeof DecisionRuntimeConfigSchema>;
 
 /** Curated suggestions, not an exhaustive allowlist. Keep custom/clone voices valid. */
 export function suggestedSpeechVoices(provider: string, modelId: string): string[] {
@@ -490,6 +516,7 @@ export const ChatRequestSchema = z.object({
   knowledgeBases: z.array(KnowledgeBaseRuntimeSchema).max(12).default([]),
   /** Authorized specialist models. Disabled assignments are omitted before prompt construction. */
   modelCapabilities: z.array(ModelCapabilityRuntimeSchema).max(12).optional(),
+  decisionRuntime: DecisionRuntimeConfigSchema.optional(),
   /**
    * Stable run id shared by orchestrator records and the on-disk run workspace
    * (`~/.workmate/workspaces/<runId>`). When omitted, agent-core generates one.

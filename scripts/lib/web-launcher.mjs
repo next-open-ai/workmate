@@ -32,7 +32,7 @@ export async function choosePort(basePort) {
 export async function startWebLauncher(projectRoot, options = {}) {
   const entry = apiEntry(projectRoot);
   const staticRoot = staticDir(projectRoot);
-  const requestedPort = Number(options.port || process.env.WORKMATE_API_PORT || '4328');
+  const requestedPort = Number(options.port || process.env.WORKMATE_API_PORT || '47832');
   const host = options.host || process.env.WORKMATE_API_HOST || '127.0.0.1';
   if (!existsSync(entry)) throw new Error(`Missing API build: ${entry}. Run \`pnpm build\` first.`);
   if (!existsSync(path.join(staticRoot, 'index.html'))) throw new Error(`Missing renderer build: ${staticRoot}/index.html. Run \`pnpm --filter @workmate/renderer build\` first.`);

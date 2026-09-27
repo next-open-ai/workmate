@@ -34,6 +34,13 @@ export {
   type ExecutionRoutingConfig,
 } from './execution-routing-config.js';
 
+export function requiresDecisionGuardCompatibleBackend(
+  input: Pick<ExecutionBackendStreamInput, 'decisionRuntime'>,
+): boolean {
+  const decision = input.decisionRuntime;
+  return Boolean(decision?.enabled && decision.mode === 'enforce' && decision.guardTools);
+}
+
 /**
  * Single product entry: resolve an ExecutionBackend then stream AgentEvents.
  *
@@ -49,7 +56,7 @@ export async function* streamAgentReply(
     skills: await attachBuiltinSkillPackages(input.skills ?? []),
   };
   const stored = loadExecutionRoutingConfig();
-  const backend = resolveExecutionBackend({
+  let backend = resolveExecutionBackend({
     enabledEngines: resolve?.enabledEngines ?? stored.enabledEngines,
     defaultEngine: resolve?.defaultEngine ?? stored.defaultEngine,
     override: resolve?.override,
@@ -57,6 +64,14 @@ export async function* streamAgentReply(
     preferCoding: resolve?.preferCoding,
     preferProcessIsolation: resolve?.preferProcessIsolation,
   });
+  if (backend.id !== 'pi' && requiresDecisionGuardCompatibleBackend(preparedInput)) {
+    console.info('[workmate] decision guard requires an execution backend with complete before-tool coverage', {
+      requestedEngine: backend.id,
+      fallbackEngine: 'pi',
+      provider: preparedInput.decisionRuntime?.provider ?? 'jev',
+    });
+    backend = resolveExecutionBackend({ override: 'pi' });
+  }
   assertVisionSupported(input.messages, input.model.supportsVision, backend.id, input.modelCapabilities);
   console.info('[workmate] execution backend selected', {
     engine: backend.id,

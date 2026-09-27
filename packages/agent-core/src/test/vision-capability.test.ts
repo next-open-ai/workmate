@@ -8,7 +8,7 @@ import type { ModelCapabilityRuntime } from '@workmate/contracts';
 import { saveChatImage, assertVisionSupported } from '../image-input.js';
 import { createModelCapabilityToolSession } from '../model-capability-runtime.js';
 import { toPiHistoryMessages } from '../pi-runtime.js';
-import { effectiveVisionModelId } from '../vision-capability.js';
+import { effectiveVisionModelId, testVisionCapabilityDataUrl } from '../vision-capability.js';
 
 test('VIS-M2-T5 normalizes dated Qwen vision snapshots only for MaaS deployment endpoints', () => {
   assert.equal(effectiveVisionModelId({ provider: 'qwen', baseUrl: 'https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', modelId: 'qwen3-vl-flash-2026-01-22' }), 'qwen3-vl-flash');
@@ -36,6 +36,10 @@ test('VIS-M2-T1 targeted vision uses trusted question, scoped images, cache and 
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
     const attachment = await saveChatImage('s1', { name: 'error.png', dataBase64: png });
     const config: ModelCapabilityRuntime = { id: 'vision', capability: 'vision', provider: 'openai-compatible', modelId: 'vision-test', apiKey: 'local-test', baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, mode: 'auto' };
+    const directTest = await testVisionCapabilityDataUrl(config, '描述图片', `data:image/png;base64,${png}`);
+    assert.match(directTest.analysis, /连接错误/);
+    assert.ok(JSON.stringify(payloads[0]).includes(png));
+    payloads.length = 0;
     const messages = [{ role: 'assistant' as const, content: '很久以前的无关数据大屏需求' }, { role: 'user' as const, content: '这是生产连接界面', attachments: [attachment] }, { role: 'assistant' as const, content: '请告诉我关注点。' }, { role: 'user' as const, content: '为何连接失败？' }];
     const input = { configs: [config], workspaceRoot: root, visionContext: { conversationId: 's1', messages } };
     const session = createModelCapabilityToolSession(input);

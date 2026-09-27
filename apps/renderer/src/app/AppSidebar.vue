@@ -192,18 +192,30 @@ onBeforeUnmount(() => {
         type="button"
         aria-haspopup="menu"
         :aria-expanded="accountMenuOpen"
+        aria-label="打开账户与设置菜单"
         title="账户与配置"
         @click.stop="accountMenuOpen = !accountMenuOpen"
       >
         <span class="relative grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[var(--accent)] text-xs font-extrabold text-white shadow-sm">
           {{ currentUserInitial }}
-          <span class="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--sidebar)]" :class="serviceReady ? 'bg-emerald-500' : 'bg-slate-400'" aria-hidden="true" />
+          <span class="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--sidebar)]" :class="serviceReady ? 'bg-emerald-500' : 'bg-slate-400'" :title="serviceStatusLabel()" aria-hidden="true" />
         </span>
         <span v-if="!collapsed" class="min-w-0 flex-1">
           <span class="block truncate text-[13px] font-semibold text-[var(--text)]">{{ currentUserLabel }}</span>
-          <span class="block truncate text-[10px] text-[var(--muted)]">{{ serviceStatusLabel() }}</span>
+          <span class="mt-0.5 block truncate text-[10px] text-[var(--muted)]">账户与设置</span>
         </span>
-        <span v-if="!collapsed" class="text-xs text-[var(--muted)] transition group-hover:text-[var(--text)]" :class="accountMenuOpen ? 'rotate-180' : ''" aria-hidden="true">⌃</span>
+        <span
+          v-if="!collapsed"
+          :class="[
+            'grid h-7 w-7 shrink-0 place-items-center rounded-lg transition',
+            accountMenuOpen
+              ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+              : 'text-[var(--muted)] group-hover:bg-[var(--surface-muted)] group-hover:text-[var(--text)]',
+          ]"
+          aria-hidden="true"
+        >
+          <SidebarIcon name="settings" class="!h-4 !w-4 transition-transform duration-200" :class="accountMenuOpen ? 'rotate-45' : ''" />
+        </span>
       </button>
 
       <div :class="['flex gap-1', collapsed ? 'mt-1 flex-col items-center' : 'items-center']">

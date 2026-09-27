@@ -9,8 +9,10 @@ import { writeWorkmateDshCordis } from './cordis-compose.js';
 import { materializeWorkmateSkillsForDsh } from './skills-materialize.js';
 import { warmMcpConnections, type McpWarmResult } from '../mcp-runtime.js';
 import { openDshMcpBridges } from '../mcp-dsh-bridge.js';
-import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
+import { createModelCapabilityTools, MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
 import { openUnifiedToolMcpBridge } from '../unified-tool-mcp-bridge.js';
+import { createUnifiedToolSession, registrationsFromTools } from '../unified-tool-runtime.js';
+import { createDecisionAgentTool, guardAgentTools } from '../decision-runtime.js';
 import { DshCapabilityAdapter } from '../dsh-capability-adapter.js';
 import {
   resolveWorkspaceMode,
@@ -160,7 +162,16 @@ export async function* streamAgentReplyViaDsh(input: ChatRequest & {
       workspaceAccess: input.workspaceAccess ?? 'write',
       workspaceMode: projectBound ? 'project' : 'conversation',
     });
-    const applicationModels = createModelCapabilityToolSession({ configs: input.modelCapabilities, workspaceRoot: cwd });
+    const modelCapabilityTools = createModelCapabilityTools({ configs: input.modelCapabilities, workspaceRoot: cwd });
+    const guardedModelCapabilityTools = guardAgentTools(modelCapabilityTools, input.decisionRuntime);
+    const decisionTools = createDecisionAgentTool(input.decisionRuntime);
+    const applicationModels = createUnifiedToolSession([
+      ...registrationsFromTools(guardedModelCapabilityTools, {
+        category: 'model-capability',
+        capabilities: MODEL_CAPABILITY_BY_TOOL,
+      }),
+      ...registrationsFromTools(decisionTools, { category: 'platform' }),
+    ]);
     if (applicationModels.descriptors.length) {
       applicationModelBridge = await openUnifiedToolMcpBridge({ runId, session: applicationModels, name: 'application-models' });
     }

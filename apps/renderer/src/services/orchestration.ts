@@ -4,14 +4,14 @@
  * The Vue renderer and future channel/relay gateways call the SAME endpoints;
  * the orchestrator process owns the durable state machines (chat sessions,
  * resumable runs, project scheduling). Development uses the Vite `/api` proxy;
- * packaged desktop loads from `file:` and calls `http://127.0.0.1:4328` — same
+ * packaged desktop loads from `file:` and calls `http://127.0.0.1:47832` — same
  * convention as services/api.ts.
  */
 
 import type { ChatImageAttachment } from '@workmate/contracts';
 
 const apiBase = () =>
-  window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
 
 /* ------------------------------------------------------------------ *
  * Server shapes (mirror of packages/orchestrator/src/types.ts)

@@ -8,7 +8,7 @@ import path from 'node:path';
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = path.resolve(desktopRoot, '..', '..');
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const apiPort = process.env.WORKMATE_API_PORT || '4328';
+const apiPort = process.env.WORKMATE_API_PORT || '47832';
 const apiEntry = path.join(repoRoot, 'apps', 'api', 'dist', 'main.cjs');
 const dataDir = process.env.WORKMATE_DATA_DIR || path.join(homedir(), '.workmate');
 const internalToken = process.env.WORKMATE_INTERNAL_TOKEN || randomBytes(24).toString('hex');
@@ -159,8 +159,8 @@ function startElectron() {
     // hot restart cannot orphan the binary (and leave another Dock icon).
     detached: process.platform !== 'win32',
     env: sharedEnv({
-      WORKMATE_RENDERER_URL: 'http://127.0.0.1:5173',
-      // API is owned by this supervisor — Electron must not bind :4328 again.
+      WORKMATE_RENDERER_URL: 'http://127.0.0.1:47831',
+      // API is owned by this supervisor — Electron must not bind :47832 again.
       WORKMATE_API_EXTERNAL: '1',
     }),
   });
@@ -239,7 +239,7 @@ async function waitForUrl(url, timeoutMs = 30_000) {
 
 async function startUi() {
   vite = run(pnpm, ['--filter', '@workmate/renderer', 'dev']);
-  const rendererUrl = 'http://127.0.0.1:5173/';
+  const rendererUrl = 'http://127.0.0.1:47831/';
   console.log('[workmate-dev] waiting for Vite…');
   await waitForUrl(rendererUrl);
   console.log(`[workmate-dev] Vite ready at ${rendererUrl}`);

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n, localeOptions, type Locale } from '../../app/i18n';
 import { themeOptions, type ThemePreference, useTheme } from '../../app/theme';
-import { applyRecommendedProviderSetup, useModelConfig, type ModelSettings, type ProviderInstance } from '../../app/model-config';
+import { applyRecommendedProviderSetup, resolveDecisionRuntime, useModelConfig, type ModelSettings, type ProviderInstance } from '../../app/model-config';
 import type { Employee, EmployeeId } from '../../app/workspace';
 import type { AuthUser } from '../../services/auth';
 import { employeeDisplayName } from '../../app/employees';
@@ -13,7 +13,7 @@ import LocalEmbeddingSettingsCard from './LocalEmbeddingSettingsCard.vue';
 import UsageStatsPanel from './UsageStatsPanel.vue';
 import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
-import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, type RuntimeStatusResponse } from '../../services/api';
+import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse } from '../../services/api';
 import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
 import { knowledgeProviderMeta, useKnowledgeConfig } from '../../app/kb-config';
@@ -56,6 +56,9 @@ const {
 } = useKnowledgeConfig();
 const notify = useNotify();
 const dirty = ref(false);
+const decisionTest = ref('');
+const decisionTesting = ref(false);
+const decisionModels = computed(() => settings.value.models.filter((item) => item.capability === 'decision'));
 const autoConfigSummary = ref('');
 const {
   config: autoScheduleStored,
@@ -86,7 +89,7 @@ const runtimeStatusAutoRefresh = ref(true);
 const runtimeStatusPending = ref(false);
 const runtimeStatusLive = ref(false);
 const languageLabel: Record<Locale, string> = { 'zh-CN': '简体中文', 'en-US': 'English' };
-type SettingsTab = 'appearance' | 'providers' | 'models' | 'search' | 'knowledge' | 'account' | 'usage' | 'environment' | 'users' | 'general';
+type SettingsTab = 'appearance' | 'providers' | 'models' | 'decision' | 'search' | 'knowledge' | 'account' | 'usage' | 'environment' | 'users' | 'general';
 const tab = ref<SettingsTab>('providers');
 
 // 外部指定初始 tab（启动引导弹窗「去配置」跳转）：应用一次后通知父组件清空，
@@ -103,6 +106,7 @@ const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
   { id: 'appearance', labelKey: 'settings.tabAppearance' },
   { id: 'providers', labelKey: 'settings.tabProviders' },
   { id: 'models', labelKey: 'settings.tabModels' },
+  { id: 'decision', labelKey: 'settings.tabDecision' },
   { id: 'search', labelKey: 'settings.tabSearch' },
   { id: 'knowledge', labelKey: 'settings.tabKnowledge' },
   { id: 'account', labelKey: 'settings.tabAccount' },
@@ -178,6 +182,17 @@ function onDirty() {
   dirty.value = true;
 }
 
+async function testDecision() {
+  const runtime = resolveDecisionRuntime(settings.value);
+  if (!runtime) { decisionTest.value = '请先在“模型”中登记决策判断模型并在此选择。'; return; }
+  decisionTesting.value = true; decisionTest.value = '';
+  try {
+    const result = await testDecisionRuntime(runtime as unknown as Record<string, unknown>);
+    decisionTest.value = `连接正常 · ${Number(result.latencyMs || 0)} ms`;
+  } catch (error) { decisionTest.value = error instanceof Error ? error.message : String(error); }
+  finally { decisionTesting.value = false; }
+}
+
 function providerRuntimeFingerprint(instance: ProviderInstance | undefined) {
   if (!instance) return '';
   return JSON.stringify({
@@ -207,6 +222,9 @@ function updateProviderInstances(next: ProviderInstance[]) {
 async function saveModelConfig() {
   try {
     const next: ModelSettings = JSON.parse(JSON.stringify(settings.value));
+    if (next.decisionRuntime?.enabled && !resolveDecisionRuntime(next)) {
+      throw new Error('启用决策守卫前，请先选择一个配置完整的“决策判断”应用模型。');
+    }
     const instanceIds = new Set(next.providerInstances.map((item) => item.id));
     next.models = next.models.filter((item) => instanceIds.has(item.providerInstanceId) && item.modelId.trim());
     if (next.activeChatModelId && !next.models.some((item) => item.id === next.activeChatModelId && item.capability === 'chat')) {
@@ -517,6 +535,36 @@ function handleDefaultEmployeeChange(event: Event) {
       <div class="mt-6 flex items-center justify-between gap-3">
         <span class="text-[13px] text-[var(--muted)]">{{ dirty ? t('settings.saveHint') : t('settings.tabProvidersHint') }}</span>
         <button class="rounded-lg bg-[var(--accent)] px-3 py-2.5 text-[13px] font-semibold text-white" type="button" @click="saveModelConfig">{{ t('settings.save') }}</button>
+      </div>
+    </section>
+
+    <section v-else-if="tab === 'decision'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6">
+      <div v-if="settings.decisionRuntime">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div class="flex items-center gap-2"><h2 class="text-[17px] font-bold">决策守卫</h2><span class="rounded-full bg-[var(--surface-muted)] px-2 py-1 text-[10px] font-bold text-[var(--muted)]">默认关闭</span></div>
+            <p class="mt-2 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">选择 JEV 或未来兼容的决策应用模型，在 Tool 真正执行前进行风险判断，也可供主模型按需调用。关闭时不请求决策模型，不增加对话延迟。</p>
+          </div>
+          <label class="flex cursor-pointer items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm font-semibold"><input v-model="settings.decisionRuntime.enabled" type="checkbox" @change="onDirty" />启用决策守卫</label>
+        </div>
+        <div v-if="!decisionModels.length" class="mt-6 rounded-2xl border border-amber-400/40 bg-amber-400/10 p-4 text-sm">
+          <strong>尚未配置决策模型</strong><p class="mt-1 text-xs text-[var(--muted)]">请先在 Provider 中保存连接，再到“模型”新增能力为“决策判断”的模型。</p><button class="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold" type="button" @click="tab = 'models'">去配置应用模型</button>
+        </div>
+        <div class="mt-6 grid gap-4 sm:grid-cols-2">
+          <label class="grid gap-1.5 text-xs font-semibold sm:col-span-2">决策应用模型<select v-model="settings.decisionRuntime.applicationModelId" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-normal" @change="onDirty"><option value="">请选择决策模型</option><option v-for="item in decisionModels" :key="item.id" :value="item.id">{{ item.label || item.modelId }}</option></select><span class="font-normal text-[var(--muted)]">连接地址与 API Key 统一由 Provider 管理，此处不再重复保存。</span></label>
+          <label class="grid gap-1.5 text-xs font-semibold">运行模式<select v-model="settings.decisionRuntime.mode" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-normal" @change="onDirty"><option value="off">关闭</option><option value="observe">观察：判断但不拦截</option><option value="enforce">强制：高风险时拦截</option></select></label>
+          <label class="grid gap-1.5 text-xs font-semibold">请求超时（ms）<input v-model.number="settings.decisionRuntime.timeoutMs" type="number" min="200" max="10000" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-normal" @input="onDirty" /></label>
+          <label class="grid gap-1.5 text-xs font-semibold">网络失败策略<select v-model="settings.decisionRuntime.failurePolicy" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-normal" @change="onDirty"><option value="allow">自动放行，不影响主流程</option><option value="deny">拒绝执行，安全优先</option></select></label>
+        </div>
+        <div class="mt-5 grid gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-4 text-xs sm:grid-cols-3">
+          <label class="flex items-center gap-2"><input v-model="settings.decisionRuntime.guardTools" type="checkbox" @change="onDirty" /> Tool 执行前安检</label>
+          <label class="flex items-center gap-2"><input v-model="settings.decisionRuntime.agentTool" type="checkbox" @change="onDirty" /> 主模型按需调用</label>
+          <label class="flex items-center gap-2"><input v-model="settings.decisionRuntime.mcpEnabled" type="checkbox" @change="onDirty" /> MCP 对外开放（预留）</label>
+        </div>
+        <div class="mt-6 flex flex-wrap items-center justify-between gap-3">
+          <span class="text-xs text-[var(--muted)]">{{ decisionTest || (dirty ? '配置已修改，请保存后生效。' : '建议启用后先测试连接。') }}</span>
+          <div class="flex gap-2"><button class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-xs font-semibold disabled:opacity-50" type="button" :disabled="decisionTesting || !settings.decisionRuntime.enabled || !settings.decisionRuntime.applicationModelId" @click="testDecision">{{ decisionTesting ? '测试中…' : '测试连接' }}</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-xs font-semibold text-white" type="button" @click="saveModelConfig">保存配置</button></div>
+        </div>
       </div>
     </section>
 

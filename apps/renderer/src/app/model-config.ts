@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue';
 import { resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
-import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, ImageGenerationProtocol, ModelCapability } from '@workmate/contracts';
+import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, DecisionGuardPolicy, DecisionProtocol, DecisionRuntimeConfig, ImageGenerationProtocol, ModelCapability } from '@workmate/contracts';
 import { getServerModelConfig, saveServerModelConfig, setCapabilityHealthObserver, type CapabilityHealthObservation } from '../services/api.js';
 
 export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'volcengine', 'iflytek', 'ollama', 'openai-compatible'] as const;
@@ -9,7 +9,7 @@ export type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding,
 
 export const imageGenerationProtocols: ImageGenerationProtocol[] = ['openai-images', 'dashscope-multimodal', 'dashscope-image-async'];
 
-export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts'];
+export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision'];
 
 /** Connection instance — same provider type can appear multiple times. */
 export interface ProviderInstance {
@@ -39,6 +39,8 @@ export interface ConfiguredModel {
   voice?: string;
   /** Transport protocol is independent from both provider brand and image capability. */
   imageProtocol?: ImageGenerationProtocol;
+  /** Decision-provider wire protocol; independent from the Provider connection type. */
+  decisionProtocol?: DecisionProtocol;
   meta?: {
     dimension?: number;
     normalize?: boolean;
@@ -100,6 +102,7 @@ export interface ModelSettings {
   capabilityBindings: CapabilityBinding[];
   /** Explicit per-agent authorization. Missing entries resolve to disabled. */
   agentCapabilityAssignments: AgentCapabilityAssignment[];
+  decisionRuntime?: DecisionGuardPolicy;
 }
 
 export interface LocalEmbeddingProviderDraft {
@@ -155,7 +158,7 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
   ollama: { chat: providerSuggestedChatModels.ollama },
   // Compatible services are intentionally vendor-neutral. eSight is entered
   // as a model ID under `quantum-code`, never as a provider protocol/type.
-  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [] },
+  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [], decision: [] },
 };
 
 const providerAutoProfiles: Partial<Record<ProviderId, Partial<Record<ModelCapability, string>>>> = {
@@ -333,8 +336,28 @@ function newId() {
   return crypto.randomUUID();
 }
 
+export function defaultDecisionRuntime(): DecisionGuardPolicy {
+  return { enabled: false, mode: 'off', timeoutMs: 1500, failurePolicy: 'allow', guardTools: true, agentTool: true, mcpEnabled: false };
+}
+
+function normalizeDecisionPolicy(raw: unknown): DecisionGuardPolicy {
+  const row = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const mode = row.mode === 'observe' || row.mode === 'enforce' ? row.mode : 'off';
+  const timeout = Math.round(Number(row.timeoutMs) || 1500);
+  return {
+    enabled: Boolean(row.enabled),
+    mode,
+    ...(String(row.applicationModelId || '').trim() ? { applicationModelId: String(row.applicationModelId).trim() } : {}),
+    timeoutMs: Math.min(10_000, Math.max(200, timeout)),
+    failurePolicy: row.failurePolicy === 'deny' ? 'deny' : 'allow',
+    guardTools: row.guardTools !== false,
+    agentTool: row.agentTool !== false,
+    mcpEnabled: Boolean(row.mcpEnabled),
+  };
+}
+
 function emptySettings(): ModelSettings {
-  return { version: 3, providerInstances: [], models: [], activeChatModelId: null, activeEmbeddingModelId: null, employeeDefaultModelIds: {}, capabilityBindings: [], agentCapabilityAssignments: [] };
+  return { version: 3, providerInstances: [], models: [], activeChatModelId: null, activeEmbeddingModelId: null, employeeDefaultModelIds: {}, capabilityBindings: [], agentCapabilityAssignments: [], decisionRuntime: defaultDecisionRuntime() };
 }
 
 export function providerCanBuiltinWebSearch(provider: ProviderId) {
@@ -445,7 +468,71 @@ export function sanitizeModelSettings(value: ModelSettings): ModelSettings {
   const agentCapabilityAssignments = (value.agentCapabilityAssignments ?? []).filter((assignment) =>
     assignment.agentId && modelCapabilities.includes(assignment.capability),
   );
-  return { version: 3, providerInstances: instances, models, activeChatModelId, activeEmbeddingModelId, employeeDefaultModelIds, capabilityBindings, agentCapabilityAssignments };
+  const decisionModelId = value.decisionRuntime?.applicationModelId;
+  const decisionRuntime = {
+    ...normalizeDecisionPolicy(value.decisionRuntime),
+    ...(decisionModelId && models.some((item) => item.id === decisionModelId && item.capability === 'decision')
+      ? { applicationModelId: decisionModelId }
+      : { applicationModelId: capabilityBindings.find((item) => item.capability === 'decision' && item.enabled)?.modelId }),
+  };
+  return {
+    version: 3,
+    providerInstances: instances,
+    models,
+    activeChatModelId,
+    activeEmbeddingModelId,
+    employeeDefaultModelIds,
+    capabilityBindings,
+    agentCapabilityAssignments,
+    decisionRuntime,
+  };
+}
+
+/** Resolve the persisted guard policy + selected application model into one immutable run snapshot. */
+export function resolveDecisionRuntime(settingsValue = settings.value): DecisionRuntimeConfig | undefined {
+  const policy = settingsValue.decisionRuntime;
+  if (!policy) return undefined;
+  const selectedId = policy.applicationModelId
+    ?? settingsValue.capabilityBindings.find((item) => item.capability === 'decision' && item.enabled)?.modelId;
+  const model = settingsValue.models.find((item) => item.id === selectedId && item.capability === 'decision');
+  const provider = model ? settingsValue.providerInstances.find((item) => item.id === model.providerInstanceId) : undefined;
+  if (!model || !provider || !provider.baseUrl.trim()) return undefined;
+  return {
+    ...policy,
+    applicationModelId: model.id,
+    provider: provider.name.trim() || provider.type,
+    protocol: model.decisionProtocol ?? 'system-one-v1',
+    baseUrl: effectiveProviderBaseUrl(provider),
+    apiKey: provider.apiKey,
+    model: model.modelId,
+  };
+}
+
+function migrateLegacyDecisionModel(value: ModelSettings, legacy: unknown): ModelSettings {
+  const row = legacy && typeof legacy === 'object' ? legacy as Record<string, unknown> : {};
+  if (value.models.some((item) => item.capability === 'decision') || !String(row.baseUrl || '').trim()) return value;
+  const provider: ProviderInstance = {
+    id: newId(),
+    type: 'openai-compatible',
+    name: String(row.provider || 'JEV').trim() || 'JEV',
+    baseUrl: String(row.baseUrl),
+    apiKey: String(row.apiKey || ''),
+    disableThinking: false,
+  };
+  const model: ConfiguredModel = {
+    id: newId(),
+    providerInstanceId: provider.id,
+    capability: 'decision',
+    modelId: String(row.model || 'jev-latest'),
+    decisionProtocol: 'system-one-v1',
+  };
+  return {
+    ...value,
+    providerInstances: [...value.providerInstances, provider],
+    models: [...value.models, model],
+    capabilityBindings: [...value.capabilityBindings.filter((item) => item.capability !== 'decision'), { capability: 'decision', modelId: model.id, enabled: true, updatedAt: new Date().toISOString() }],
+    decisionRuntime: { ...normalizeDecisionPolicy(row), applicationModelId: model.id },
+  };
 }
 
 export function resolveConfiguredModel(model: ConfiguredModel, instances = settings.value.providerInstances): ProviderConfig | undefined {
@@ -581,6 +668,7 @@ function normalize(value: unknown): ModelSettings {
           imageProtocol: item.capability === 'image' && imageGenerationProtocols.includes(imageProtocol)
             ? imageProtocol
             : undefined,
+          decisionProtocol: item.capability === 'decision' ? ('system-one-v1' as const) : undefined,
           meta: item.meta && typeof item.meta === 'object'
             ? {
                 dimension: Number((item.meta as { dimension?: unknown }).dimension) || undefined,
@@ -597,7 +685,7 @@ function normalize(value: unknown): ModelSettings {
         };
       })
       .filter((item) => item.id && item.modelId && instanceIds.has(item.providerInstanceId));
-    return sanitizeModelSettings({
+    const normalized = {
       version: 3,
       providerInstances: instances,
       models,
@@ -620,7 +708,9 @@ function normalize(value: unknown): ModelSettings {
             updatedAt: String(item.updatedAt || new Date().toISOString()),
           }))
         : [],
-    });
+      decisionRuntime: normalizeDecisionPolicy(raw.decisionRuntime),
+    } satisfies ModelSettings;
+    return sanitizeModelSettings(migrateLegacyDecisionModel(normalized, raw.decisionRuntime));
   }
   return migrateFromV1(raw as Parameters<typeof migrateFromV1>[0]);
 }
@@ -903,16 +993,16 @@ export function useModelConfig() {
     return Boolean(binding && settings.value.models.some((item) => item.id === binding.modelId && item.capability === capability));
   };
 
-  const modelCapabilitiesForAgent = (agentId: string) => settings.value.agentCapabilityAssignments
-    .filter((assignment) => assignment.agentId === agentId && assignment.mode !== 'disabled')
-    .map((assignment) => {
-      const binding = settings.value.capabilityBindings.find((item) => item.capability === assignment.capability && item.enabled);
-      const model = binding ? settings.value.models.find((item) => item.id === binding.modelId && item.capability === assignment.capability) : undefined;
+  const modelCapabilitiesForAgent = (_agentId: string, enabled = true) => enabled
+    ? settings.value.capabilityBindings
+    .filter((binding) => binding.enabled && binding.capability !== 'chat' && binding.capability !== 'decision')
+    .map((binding) => {
+      const model = settings.value.models.find((item) => item.id === binding.modelId && item.capability === binding.capability);
       const provider = model ? settings.value.providerInstances.find((item) => item.id === model.providerInstanceId) : undefined;
       if (!binding || !model || !provider || !providerInstanceReady(provider) || !provider.baseUrl.trim()) return null;
       return {
         id: model.id,
-        capability: assignment.capability,
+        capability: binding.capability,
         provider: provider.type,
         providerLabel: provider.name,
         baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
@@ -924,10 +1014,11 @@ export function useModelConfig() {
         imageProtocol: model.capability === 'image'
           ? (model.imageProtocol ?? inferImageGenerationProtocol(provider.type, model.modelId))
           : undefined,
-        mode: assignment.mode,
+        mode: 'auto' as const,
       };
     })
-    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : [];
 
   return {
     settings,

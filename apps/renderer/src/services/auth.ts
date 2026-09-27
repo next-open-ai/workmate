@@ -1,4 +1,4 @@
-const apiBase = () => (window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '');
+const apiBase = () => (window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '');
 
 export interface AuthUser {
   id: string;

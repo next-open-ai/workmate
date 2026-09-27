@@ -12,7 +12,7 @@ import { requestParentChannelSecrets, getChannelSecrets } from './parent.js';
  * are requested once from the parent (main) process over fork IPC.
  */
 async function main(): Promise<void> {
-  const apiBaseUrl = process.env.WORKMATE_API_URL ?? 'http://127.0.0.1:4328/api/orch';
+  const apiBaseUrl = process.env.WORKMATE_API_URL ?? 'http://127.0.0.1:47832/api/orch';
   const fileConfig = loadConfigFile(process.env.WORKMATE_GATEWAY_CONFIG);
   const kvConfig = await loadConfigFromKv(apiBaseUrl);
   await requestParentChannelSecrets();

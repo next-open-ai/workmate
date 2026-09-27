@@ -3,7 +3,7 @@ import { requestParentSecrets } from './modules/orchestration/secrets.js';
 import { ensureSharedAgentscopeRuntime, stopSharedAgentscopeRuntime, resolveAgentEngine } from '@workmate/agent-core';
 
 async function bootstrap() {
-  const port = Number(process.env.WORKMATE_API_PORT ?? 4328);
+  const port = Number(process.env.WORKMATE_API_PORT ?? 47832);
   const host = process.env.WORKMATE_API_HOST || '127.0.0.1';
   const engine = resolveAgentEngine();
   const warmAgentscope = process.env.WORKMATE_AGENTSCOPE_ENABLED === '1' || engine === 'agentscope';

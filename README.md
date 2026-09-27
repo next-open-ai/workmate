@@ -126,7 +126,7 @@ pnpm concurrency:regression
 pnpm agentscope:smoke
 ```
 
-默认本地服务端口为 `4328`（`workmate`），刻意与 `opcai` / `easyai` 的默认 `4318` 区分，避免并行开发时端口冲突。
+默认本地服务端口为 `47832`（`workmate`），刻意与 `opcai` / `easyai` 的默认 `4318` 区分，避免并行开发时端口冲突。
 默认数据目录为 `~/.workmate`。
 
 在“设置 → 模型”配置 Provider 之前不会存储/使用任何模型密钥。无头/CI 冒烟脚本见 `scripts/*-smoke.mjs` 与设计文档。

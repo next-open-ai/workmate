@@ -41,7 +41,7 @@ RUN apt-get update \
 ENV NODE_ENV=production \
     WORKMATE_DATA_DIR=/opt/workmate-data \
     WORKMATE_API_HOST=0.0.0.0 \
-    WORKMATE_API_PORT=4318 \
+    WORKMATE_API_PORT=47832 \
     WORKMATE_AGENT_ENGINE=agentscope
 
 WORKDIR /opt/workmate
@@ -51,7 +51,7 @@ COPY --from=builder /opt/workmate /opt/workmate
 RUN mkdir -p /opt/workmate-data \
   && chmod +x bin/workmate.mjs
 
-EXPOSE 4318
+EXPOSE 47832
 VOLUME ["/opt/workmate-data"]
 
 CMD ["node", "bin/workmate.mjs", "start"]

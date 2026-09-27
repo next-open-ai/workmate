@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict';
 
-const port = process.env.WORKMATE_API_PORT || '4328';
+const port = process.env.WORKMATE_API_PORT || '47832';
 const base = `http://127.0.0.1:${port}/api/orch`;
 
 async function json(pathname, init) {

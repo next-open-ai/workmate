@@ -4,7 +4,7 @@
  * forks the gateway when any channel is enabled.
  *
  * Usage (env vars):
- *   WORKMATE_API_PORT=4328 \
+ *   WORKMATE_API_PORT=47832 \
  *   WORKMATE_TG_BOT_TOKEN="123:ABC" \
  *   WORKMATE_GATEWAY_ALLOW="telegram:user:111111,telegram:chat:-100222222" \
  *   WORKMATE_DEFAULT_EMPLOYEE=general \
@@ -13,7 +13,7 @@
  * Reads token from WORKMATE_TG_BOT_TOKEN_FILE when the token itself is set there
  * instead (avoids pasting secrets into shell history).
  */
-const port = process.env.WORKMATE_API_PORT || '4328';
+const port = process.env.WORKMATE_API_PORT || '47832';
 const base = `http://127.0.0.1:${port}/api/orch`;
 
 import { readFileSync } from 'node:fs';

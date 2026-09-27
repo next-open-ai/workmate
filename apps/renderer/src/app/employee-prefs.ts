@@ -29,6 +29,8 @@ export interface EmployeeRuntimePrefs {
    * `null` = inherit deployment defaultEngine from runtime-settings.
    */
   engine: 'pi' | 'agentscope' | 'dsh' | null;
+  /** Expose all configured non-chat application models to this employee. */
+  useApplicationModels: boolean;
 }
 
 export const DEFAULT_MAX_STEPS = 50;
@@ -56,6 +58,7 @@ export const defaultEmployeeRuntimePrefs = (employeeId?: string): EmployeeRuntim
   knowledgeProvider: 'off',
   knowledgeBaseIds: [],
   engine: null,
+  useApplicationModels: true,
 });
 
 const key = 'workspace.employee-runtime-prefs';
@@ -116,6 +119,7 @@ function normalizeOne(value: unknown): EmployeeRuntimePrefs {
     knowledgeProvider: normalizeKnowledgeProvider(raw.knowledgeProvider),
     knowledgeBaseIds,
     engine: normalizeEngine(raw.engine),
+    useApplicationModels: raw.useApplicationModels !== false,
   };
 }
 

@@ -85,3 +85,6 @@ export async function summarizeSessionMemory(input: {
   return summarizeSessionMemoryImpl(input);
 }
 export { storeAudioInput } from './audio-input.js';
+export { createModelCapabilityTools } from './model-capability-runtime.js';
+export { testVisionCapabilityDataUrl } from './vision-capability.js';
+export { evaluateDecision, createDecisionAgentTool, guardAgentTools } from './decision-runtime.js';

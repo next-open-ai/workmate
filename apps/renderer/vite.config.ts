@@ -7,5 +7,5 @@ export default defineConfig({
   // are required; Vite's default /assets/... paths produce a blank window.
   base: './',
   plugins: [vue(), tailwindcss()],
-  server: { proxy: { '/api': 'http://127.0.0.1:4328' } },
+  server: { proxy: { '/api': 'http://127.0.0.1:47832' } },
 });

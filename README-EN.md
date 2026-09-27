@@ -88,7 +88,7 @@ pnpm dsh:regression
 pnpm concurrency:regression
 ```
 
-Default local API port: `4328`.  
+Default local API port: `47832`.
 Default data directory: `~/.workmate`.
 
 ## Runtime shapes

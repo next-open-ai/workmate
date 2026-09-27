@@ -18,7 +18,7 @@ const {
 /**
  * Force-quit / crash leaves Chromium `exit_type=Crashed`, and the next launch
  * blocks the main thread on a modal "restore pages?" NSAlert — so startApi
- * never runs and Vite proxies to a dead :4328. Clear the flag before ready.
+ * never runs and Vite proxies to a dead :47832. Clear the flag before ready.
  */
 function clearChromiumCrashRestorePrompt() {
   const userData = app.getPath('userData');
@@ -152,7 +152,7 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-const apiPort = Number(process.env.WORKMATE_API_PORT || 4328);
+const apiPort = Number(process.env.WORKMATE_API_PORT || 47832);
 /** Shared with the forked API so main-process KV can authenticate as system admin. */
 const apiInternalToken = String(process.env.WORKMATE_INTERNAL_TOKEN || randomBytes(24).toString('hex'));
 let mainWindow;
@@ -164,7 +164,7 @@ const databaseFile = () => path.join(storageRoot(), 'workmate.sqlite');
 /** @type {Map<string, string>} */
 const previewRoots = new Map();
 
-// A second packaged launch used to start another API on 4328, fail with
+// A second packaged launch used to start another API on 47832, fail with
 // EADDRINUSE, and leave a visually live but non-functional window.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -573,6 +573,9 @@ function readModelConfig() {
           ? safeStorage.decryptString(Buffer.from(provider.apiSecret, 'base64'))
           : provider.apiSecret || '',
       }));
+      if (config.decisionRuntime?.apiKey && safeStorage.isEncryptionAvailable()) {
+        config.decisionRuntime.apiKey = safeStorage.decryptString(Buffer.from(config.decisionRuntime.apiKey, 'base64'));
+      }
       return config;
     }
     if (Array.isArray(config.providers)) {
@@ -634,6 +637,9 @@ function writeModelConfig(value) {
         : {},
       capabilityBindings: Array.isArray(value?.capabilityBindings) ? value.capabilityBindings : [],
       agentCapabilityAssignments: Array.isArray(value?.agentCapabilityAssignments) ? value.agentCapabilityAssignments : [],
+      decisionRuntime: value?.decisionRuntime && typeof value.decisionRuntime === 'object'
+        ? { ...value.decisionRuntime, apiKey: String(value.decisionRuntime.apiKey || '') }
+        : undefined,
     };
     const persisted = {
       ...config,
@@ -646,6 +652,11 @@ function writeModelConfig(value) {
           ? safeStorage.encryptString(provider.apiSecret).toString('base64')
           : provider.apiSecret,
       })),
+      decisionRuntime: config.decisionRuntime
+        ? { ...config.decisionRuntime, apiKey: config.decisionRuntime.apiKey && safeStorage.isEncryptionAvailable()
+          ? safeStorage.encryptString(config.decisionRuntime.apiKey).toString('base64')
+          : config.decisionRuntime.apiKey }
+        : undefined,
     };
     setStoredValue('model-settings', JSON.stringify(persisted));
     pushSecretsToApi();
@@ -1265,7 +1276,7 @@ function enrichDesktopPathEnv(base = process.env) {
 /**
  * Prefer a real Node binary in unpackaged/dev runs. Electron's
  * `child_process.fork(api)` (Electron-as-Node) often exits before listen on
- * macOS, leaving Vite proxying to a dead 4328. Packaged builds still spawn via
+ * macOS, leaving Vite proxying to a dead 47832. Packaged builds still spawn via
  * `process.execPath` + ELECTRON_RUN_AS_NODE.
  */
 function resolveApiExec() {
@@ -1295,7 +1306,7 @@ function startApi() {
     console.error(`[api] entry missing: ${entry}`);
     return;
   }
-  // Dev supervisor may already own :4328 — do not double-bind.
+  // Dev supervisor may already own :47832 — do not double-bind.
   void isApiHealthy().then((healthy) => {
     if (healthy || process.env.WORKMATE_API_EXTERNAL === '1') {
       if (healthy) console.log(`[api] already listening on ${apiPort}; skip spawn`);
@@ -1512,7 +1523,7 @@ async function createWindow() {
     console.error(`[renderer] failed to load (${code}): ${description} (${validatedUrl})`);
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (rendererRetry >= 20) return;
-    if (!String(validatedUrl || '').includes('127.0.0.1:5173')) return;
+    if (!String(validatedUrl || '').includes('127.0.0.1:47831')) return;
     rendererRetry += 1;
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;

@@ -7,7 +7,7 @@ const options = ref<Array<{ value: string; label: string }>>([]);
 const output = ref<{ html: string; taskId: string; runId: string; resultSourceId: string; source: { rowCount: number }; result: { data: Record<string, unknown> } }>();
 let requestId = '';
 async function call(path: string, body?: unknown) {
-  const base = window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  const base = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
   const response = await fetch(`${base}/api/data/${path}`, { method: body ? 'POST' : 'GET', headers: body ? { 'content-type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
   const data = await response.json(); if (!response.ok) throw new Error(data.message || '操作失败'); return data;
 }

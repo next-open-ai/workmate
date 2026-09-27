@@ -1,6 +1,6 @@
 import type { ChatRunContext, KeyValueStore, ProjectTask } from '@workmate/orchestrator';
 import { ProviderIdSchema, resolveProviderBaseUrl } from '@workmate/contracts';
-import type { ModelCapabilityRuntime } from '@workmate/contracts';
+import type { DecisionGuardPolicy, DecisionRuntimeConfig, ModelCapabilityRuntime } from '@workmate/contracts';
 import { ensureModelSecrets } from './secrets.js';
 
 /**
@@ -51,8 +51,10 @@ interface PrefsRow {
   runTimeoutMs?: number; mcpToolTimeoutMs?: number; mcpIds?: string[];
   knowledgeProvider?: string; knowledgeBaseIds?: string[];
   engine?: string | null;
+  useApplicationModels?: boolean;
 }
 interface ModelSettings {
+  decisionRuntime?: DecisionGuardPolicy & Partial<Pick<DecisionRuntimeConfig, 'provider' | 'protocol' | 'baseUrl' | 'apiKey' | 'model'>>;
   providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; workspaceId?: string; appId?: string; apiSecret?: string; apiKey?: string; disableThinking?: boolean }>;
   models?: Array<{
     supportsVision?: boolean;
@@ -63,6 +65,7 @@ interface ModelSettings {
     voice?: string;
     label?: string;
     imageProtocol?: string;
+    decisionProtocol?: string;
     meta?: { dimension?: number; normalize?: boolean; maxBatch?: number; maxInputChars?: number };
   }>;
   activeChatModelId?: string | null;
@@ -81,21 +84,47 @@ interface ModelSettings {
   }>;
 }
 
-function modelCapabilitiesFor(employeeId: string, raw: unknown): ModelCapabilityRuntime[] {
+function decisionRuntimeFor(raw: unknown): DecisionRuntimeConfig | undefined {
+  const settings = (raw && typeof raw === 'object' ? raw : {}) as ModelSettings;
+  const policy = settings.decisionRuntime;
+  if (!policy) return undefined;
+  const selectedId = policy.applicationModelId
+    ?? settings.capabilityBindings?.find((item) => item.capability === 'decision' && item.enabled !== false)?.modelId;
+  const model = settings.models?.find((item) => item.id === selectedId && item.capability === 'decision');
+  const provider = model ? settings.providerInstances?.find((item) => item.id === model.providerInstanceId) : undefined;
+  if (model?.modelId?.trim() && provider?.baseUrl?.trim() && provider.type && ProviderIdSchema.safeParse(provider.type).success) {
+    return {
+      ...policy,
+      applicationModelId: model.id,
+      provider: provider.name?.trim() || provider.type,
+      protocol: 'system-one-v1',
+      baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+      apiKey: provider.apiKey || '',
+      model: model.modelId.trim(),
+    };
+  }
+  // Read-only compatibility for settings saved by the pre-application-model release.
+  if (policy.baseUrl && policy.model) {
+    return { ...policy, provider: policy.provider || 'jev', protocol: policy.protocol || 'system-one-v1', baseUrl: policy.baseUrl, apiKey: policy.apiKey || '', model: policy.model };
+  }
+  return undefined;
+}
+
+function modelCapabilitiesFor(employeeId: string, raw: unknown, enabled = true): ModelCapabilityRuntime[] {
+  if (!enabled) return [];
   const settings = (raw && typeof raw === 'object' ? raw : {}) as ModelSettings;
   const models = settings.models ?? [];
   const instances = settings.providerInstances ?? [];
   const bindings = settings.capabilityBindings ?? [];
   const supported = new Set(['quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts']);
-  return (settings.agentCapabilityAssignments ?? []).flatMap((assignment) => {
-    const capability = String(assignment.capability || '');
-    const mode = String(assignment.mode || 'disabled');
-    if (assignment.agentId !== employeeId || !supported.has(capability) || (mode !== 'auto' && mode !== 'preferred')) return [];
-    const binding = bindings.find((item) => item.capability === capability && item.enabled !== false)
+  return bindings.flatMap((binding) => {
+    const capability = String(binding.capability || '');
+    if (!supported.has(capability) || binding.enabled === false) return [];
+    const selectedBinding = binding
       ?? (capability === 'embedding' && settings.activeEmbeddingModelId
         ? { capability: 'embedding', modelId: settings.activeEmbeddingModelId, enabled: true }
         : undefined);
-    const model = binding ? models.find((item) => item.id === binding.modelId && item.capability === capability) : undefined;
+    const model = selectedBinding ? models.find((item) => item.id === selectedBinding.modelId && item.capability === capability) : undefined;
     const provider = model ? instances.find((item) => item.id === model.providerInstanceId) : undefined;
     if (!model?.id || !model.modelId?.trim() || !provider?.baseUrl?.trim() || !provider.type || !ProviderIdSchema.safeParse(provider.type).success) return [];
     return [{
@@ -112,7 +141,7 @@ function modelCapabilitiesFor(employeeId: string, raw: unknown): ModelCapability
       ...(capability === 'image' && model.imageProtocol
         ? { imageProtocol: model.imageProtocol as ModelCapabilityRuntime['imageProtocol'] }
         : {}),
-      mode: mode as 'auto' | 'preferred',
+      mode: 'auto',
     }];
   });
 }
@@ -456,7 +485,8 @@ export async function resolveTaskContext(
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
     mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
     knowledgeBases: await knowledgeBasesFor(store, prefs),
-    modelCapabilities: modelCapabilitiesFor(task.employeeId, secrets.model),
+    modelCapabilities: modelCapabilitiesFor(task.employeeId, secrets.model, prefs.useApplicationModels !== false),
+    ...(decisionRuntimeFor(secrets.model) ? { decisionRuntime: decisionRuntimeFor(secrets.model) } : {}),
     maxSteps,
     runTimeoutMs,
     mcpToolTimeoutMs,

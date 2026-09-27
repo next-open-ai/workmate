@@ -842,7 +842,7 @@ onBeforeUnmount(() => {
         <div class="flex items-start justify-between gap-3">
           <div>
             <h3 class="text-base font-bold">手机扫码对话</h3>
-            <p class="mt-1 text-xs leading-5 text-[var(--muted)]">独立轻量界面，与当前对话同步。请确保手机与电脑在同一局域网。</p>
+          <p class="mt-1 text-xs leading-5 text-[var(--muted)]">独立轻量界面，与当前对话同步；也可将手机文件传到电脑的下载目录。请确保手机与电脑在同一局域网。</p>
           </div>
           <button class="rounded-lg px-2 py-1 text-xs text-[var(--muted)] hover:bg-[var(--surface-muted)]" type="button" @click="closeMobileShare">关闭</button>
         </div>

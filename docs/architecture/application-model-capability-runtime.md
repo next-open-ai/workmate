@@ -6,7 +6,7 @@
 
 ## 1. 定位与目标
 
-应用模型（Capability Model）负责图片生成、Embedding、ASR、TTS、量子代码等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
+应用模型（Capability Model）负责图片生成、Embedding、ASR、TTS、量子代码、有限问题决策等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
 
 方案目标：
 
@@ -61,13 +61,17 @@ Pi 消费原生 Tool View；AgentScope 使用 Host Tool Transport；DSH 使用�
 
 ## 4. 配置与路由
 
-Provider 配置保存连接信息；模型配置保存模型 ID、能力类型和可选协议；员工配置是否启用以及使用模式：
+Provider 配置保存连接信息；模型配置保存模型 ID、能力类型和可选协议；系统绑定为每类能力选择默认模型。员工侧只提供“使用应用模型”总开关，默认开启：开启时将所有已绑定且配置有效的应用模型以 `auto` 模式提供给智能体，关闭时不提供应用模型。决策模型仍由全局决策守卫策略控制，不混入员工开关。
+
+底层继续兼容以下能力模式契约，供运行级路由和旧数据读取使用；员工 UI 不再要求用户逐类别设置：
 
 | 模式 | 语义 |
 | --- | --- |
 | `disabled` | 不进入本次运行的模型可见目录 |
 | `auto` | 任务匹配时由主控模型调用 |
 | `preferred` | 匹配任务时优先使用，但不替换主控模型 |
+
+旧员工配置中缺少总开关时按“开启”迁移；历史逐能力授权记录保留但不再作为运行时选择来源，便于回滚兼容。
 
 路由输出是单次 Run 的不可变快照，至少包含 `capability/provider/baseUrl/modelId/protocol/mode`。密钥仅在运行时注入，禁止进入领域数据、事件或模型上下文。
 
@@ -164,5 +168,7 @@ prepared
 图片理解（VIS-M2）扩展 `vision` 能力，通过统一 `model_understand_images` Tool Backend 调用。主模型视觉直读与应用模型定向识图分开：前者直接图文输入，后者由平台绑定原始问题、最近必要上下文、Run授权的图片白名单，再向视觉模型发起请求。文字结果只是识图证据，不是原图。配置复用Provider/能力绑定/员工开关，无新增vision厂商类型；本轮Pi单员工闭环，其他引擎图片传输仍待后续适配。详见 [VIS-M2规格](../sdd/features/image-understanding/M2-application-vision.md)。
 
 Workmate 已同步公共契约、统一 Tool Registry/Dispatcher、员工级能力开关、五类应用模型入口、三类图片协议、异步进度、URL 产物自动落盘，以及 Pi、AgentScope、DSH 对同一 Capability Backend 的复用。`invocationId` 已贯穿执行引擎、Orchestrator、SSE 和 Renderer。非实时语音第二阶段已增加阿里百炼、火山引擎和科大讯飞 Adapter，Provider 专有签名、轮询与音频编码仍收敛在 Capability Backend；TTS 模型可绑定默认系统音色或已授权的克隆音色 ID，主控 Agent 不具备创建声纹的权限。
+
+决策模型以 `decision` 应用模型能力登记：Provider 保存地址和密钥，模型目录保存模型 ID 与决策协议，决策守卫只保存启用、观察/强制、失败策略等使用策略并引用应用模型 ID。旧版独立 JEV 连接在加载时迁移为 Provider + 决策模型；运行开始时解析为不可变的 `DecisionRuntimeConfig`。JEV 是首个 `system-one-v1` Adapter，而不是配置域中的特殊模型类型。
 
 当前状态仍为“待验收”，不是“生产验证完成”。尚需使用真实供应商凭据执行图片、Embedding、ASR、TTS、eSight E2E，验证安装态 AgentScope/DSH 的细粒度进度与取消传播，并补齐统一 usage/成本展示及平台 Benchmark。

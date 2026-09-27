@@ -23,6 +23,7 @@ import {
 } from '../../app/model-config';
 import { listProviderModels, testEmbeddingConnection } from '../../services/api.js';
 import { useNotify } from '../../app/notify';
+import ModelTestDialog from './ModelTestDialog.vue';
 
 const props = defineProps<{
   instances: ProviderInstance[];
@@ -56,6 +57,7 @@ const search = ref('');
 const showAllRemoteModels = ref(false);
 const testingEmbeddingId = ref('');
 const embeddingTestMessage = ref<Record<string, { ok: boolean; text: string }>>({});
+const testingModel = ref<ConfiguredModel | null>(null);
 function boundModelId(capability: ModelCapability) {
   return props.capabilityBindings.find((item) => item.capability === capability && item.enabled)?.modelId ?? null;
 }
@@ -144,6 +146,7 @@ function addModel(modelId: string, makeDefault = true) {
     capability: draftCapability.value,
     modelId: trimmed,
     imageProtocol: draftCapability.value === 'image' && draftImageProtocol.value ? draftImageProtocol.value : undefined,
+    decisionProtocol: draftCapability.value === 'decision' ? 'system-one-v1' : undefined,
     supportsBuiltinWebSearch: draftCapability.value === 'chat' && instance.type === 'qwen' ? true : undefined,
   };
   const next = [...props.models, entry];
@@ -346,6 +349,10 @@ function modelHealthHelp(model: ConfiguredModel) {
 function clearModelHealth(model: ConfiguredModel) {
   patchModel(model.id, { health: undefined });
 }
+
+function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary: string }) {
+  patchModel(model.id, { health: { status: result.ok ? 'available' : classifyCapabilityFailure(result.summary), checkedAt: new Date().toISOString(), summary: result.summary.slice(0, 500) } });
+}
 </script>
 
 <template>
@@ -412,9 +419,13 @@ function clearModelHealth(model: ConfiguredModel) {
             <input :checked="boundModelId(model.capability) === model.id" :name="`default-${model.capability}-model`" type="radio" @change="setDefaultCapability(model.capability, model.id)" />
             <span class="text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
           </label>
-          <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
+          <div class="flex items-center gap-1">
+            <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]" type="button" @click="testingModel = model">测试</button>
+            <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
+          </div>
         </div>
         <p v-if="model.capability === 'vision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">用于主模型不能看图时的定向识别；请选择确实支持图片输入的模型，设为默认后在员工应用模型能力中开启“图片理解”。不会替换主模型。</p>
+        <p v-else-if="model.capability === 'decision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">有限问题决策模型，不进入聊天主模型选择器。设为默认后，可在“决策守卫”中选择并用于 Tool 执行前安检和主模型按需判断。</p>
         <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-4">
           <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
             <span>Dimension</span>
@@ -630,4 +641,5 @@ function clearModelHealth(model: ConfiguredModel) {
       </article>
     </div>
   </div>
+  <ModelTestDialog v-if="testingModel && instanceById[testingModel.providerInstanceId]" :model="testingModel" :instance="instanceById[testingModel.providerInstanceId]" @close="testingModel = null" @tested="recordModelTest(testingModel!, $event)" />
 </template>

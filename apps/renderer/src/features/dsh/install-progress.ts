@@ -64,7 +64,7 @@ export const dshInstallPhaseLabel = computed(() => {
 });
 
 function apiBase() {
-  return window.location.protocol === 'file:' ? 'http://127.0.0.1:4328' : '';
+  return window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
 }
 
 function resetProgress(nextSource: 'manual' | 'startup') {

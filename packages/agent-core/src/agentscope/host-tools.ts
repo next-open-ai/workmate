@@ -6,6 +6,7 @@ import { createPreviewServerTools } from '../preview-server.js';
 import { resolveAgentWorkspaceRoot, resolveWorkspaceMode } from '../workspace-mode.js';
 import { createModelCapabilityTools, MODEL_CAPABILITY_BY_TOOL } from '../model-capability-runtime.js';
 import { createUnifiedToolSession, registrationsFromTools } from '../unified-tool-runtime.js';
+import { createDecisionAgentTool, guardAgentTools } from '../decision-runtime.js';
 
 export type HostToolCall = {
   id: string;
@@ -147,7 +148,7 @@ async function executeTool(call: HostToolCall, tool: AgentTool): Promise<HostToo
 }
 
 export async function prepareAgentscopeHostTools(
-  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath' | 'conversationId' | 'modelCapabilities'> & { runId: string },
+  request: Pick<ChatRequest, 'mcpConnections' | 'mcpToolTimeoutMs' | 'workspaceAccess' | 'projectWorkspacePath' | 'conversationId' | 'modelCapabilities' | 'decisionRuntime'> & { runId: string },
 ): Promise<AgentscopeHostToolSession> {
   const mcp = await loadMcpToolset(request.mcpConnections, { toolTimeoutMs: request.mcpToolTimeoutMs });
   const workspaceRoot = resolveAgentWorkspaceRoot({ runId: request.runId, projectWorkspacePath: request.projectWorkspacePath });
@@ -155,9 +156,13 @@ export async function prepareAgentscopeHostTools(
     configs: request.modelCapabilities,
     workspaceRoot,
   });
+  const mcpTools = guardAgentTools(mcp.tools, request.decisionRuntime);
+  const guardedModelCapabilityTools = guardAgentTools(modelCapabilityTools, request.decisionRuntime);
+  const decisionTools = createDecisionAgentTool(request.decisionRuntime);
   const unified = createUnifiedToolSession([
-    ...registrationsFromTools(mcp.tools, { category: 'mcp' }),
-    ...registrationsFromTools(modelCapabilityTools, { category: 'model-capability', capabilities: MODEL_CAPABILITY_BY_TOOL }),
+    ...registrationsFromTools(mcpTools, { category: 'mcp' }),
+    ...registrationsFromTools(guardedModelCapabilityTools, { category: 'model-capability', capabilities: MODEL_CAPABILITY_BY_TOOL }),
+    ...registrationsFromTools(decisionTools, { category: 'platform' }),
   ]);
   const unifiedDescriptors: HostedMcpToolDescriptor[] = unified.descriptors.map((item) => ({
     name: item.name,
@@ -169,10 +174,11 @@ export async function prepareAgentscopeHostTools(
   return {
     runtimePatch: {
       ...(unifiedDescriptors.length ? { mcpTools: unifiedDescriptors } : {}),
-      ...((mcp.instructions || modelCapabilityTools.length) ? {
+      ...((mcp.instructions || modelCapabilityTools.length || decisionTools.length) ? {
         mcpInstructions: [
           mcp.instructions,
           modelCapabilityTools.length ? 'Authorized application-model tools are host-provided. Use only when the task matches their descriptions.' : '',
+          decisionTools.length ? 'A host-provided decision tool is available for uncertainty and risk checks.' : '',
         ].filter(Boolean).join('\n\n'),
       } : {}),
     },

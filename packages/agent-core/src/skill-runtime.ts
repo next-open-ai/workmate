@@ -904,7 +904,7 @@ export function createSkillExecutionTools(input: {
         if (!canWriteWorkspace) return writeDenied();
         const targetRel = safeRelative(relative || 'output/index.html');
         if (!/\.html?$/i.test(targetRel)) return { ok: false as const, error: 'Export target must be an HTML file.' };
-        const origin = (process.env.WORKMATE_API_ORIGIN?.trim() || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '4328'}`).replace(/\/$/, '');
+        const origin = (process.env.WORKMATE_API_ORIGIN?.trim() || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '47832'}`).replace(/\/$/, '');
         try {
           const response = await fetch(`${origin}/api/data-apps/${encodeURIComponent(appId)}/site?token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(30_000) });
           if (!response.ok) return { ok: false as const, status: response.status, error: `Current site export failed with HTTP ${response.status}.` };
@@ -952,7 +952,7 @@ export function createSkillExecutionTools(input: {
         }
         const origin = (
           process.env.WORKMATE_API_ORIGIN?.trim()
-          || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '4328'}`
+          || `http://127.0.0.1:${process.env.WORKMATE_API_PORT?.trim() || process.env.PORT?.trim() || '47832'}`
         ).replace(/\/$/, '');
         const target = `${origin}/api/data-apps/${encodeURIComponent(appId)}/custom-site?token=${encodeURIComponent(token)}`;
         try {

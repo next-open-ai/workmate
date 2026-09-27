@@ -1,7 +1,7 @@
 import type { TaskTemplate, TemplateTask, TemplateTaskInput, TemplateTaskDetail, TemplateTaskRun, TaskResult, TaskTemplateConfiguration, TaskTemplateDefinition, TaskSkillDescriptor, TaskTemplateTrial, TaskExportFormat } from '@workmate/contracts';
 export type { TaskTemplate, TemplateTask, TemplateTaskDetail, TemplateTaskRun, TaskResult };
 export type { TaskTemplateConfiguration, TaskTemplateDefinition, TaskSkillDescriptor, TaskTemplateTrial, TaskExportFormat };
-const base = () => window.location.protocol === 'file:' ? 'http://127.0.0.1:4328/api' : '/api';
+const base = () => window.location.protocol === 'file:' ? 'http://127.0.0.1:47832/api' : '/api';
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(`${base()}${path}`, {
     method, headers: body === undefined ? undefined : { 'content-type': 'application/json' },

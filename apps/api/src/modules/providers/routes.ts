@@ -1,5 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { resolveProviderBaseUrl } from '@workmate/contracts';
+import { createModelCapabilityTools, evaluateDecision, testVisionCapabilityDataUrl } from '@workmate/agent-core';
+import { DecisionRuntimeConfigSchema } from '@workmate/contracts';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -244,6 +249,88 @@ async function pullOllamaModel(body: unknown) {
 }
 
 export const providerRoutes: FastifyPluginAsync = async (app) => {
+  app.post('/providers/test-decision', async (request, reply) => {
+    const parsed = DecisionRuntimeConfigSchema.safeParse(asRecord(request.body));
+    if (!parsed.success) return reply.code(400).send({ ok: false, message: parsed.error.issues[0]?.message || '决策模型配置无效。' });
+    const result = await evaluateDecision({ ...parsed.data, enabled: true, mode: 'observe' }, { request: 'Workmate decision connection test' }, { healthy: { type: 'noul', instructions: 'Is this a valid decision-model test request?' } });
+    return reply.code(result.ok && !result.error ? 200 : 400).send(result);
+  });
+  app.post('/providers/test-model-capability', { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
+    const value = asRecord(request.body);
+    const capability = String(value.capability || '');
+    if (!['chat', 'vision', 'image', 'tts', 'asr', 'embedding', 'quantum-code', 'decision'].includes(capability)) return reply.code(400).send({ message: '不支持该模型能力测试。' });
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'workmate-model-test-'));
+    const startedAt = Date.now();
+    try {
+      const baseUrl = resolveProviderBaseUrl({ provider: String(value.type || ''), baseUrl: String(value.baseUrl || ''), workspaceId: String(value.workspaceId || '') });
+      const config = {
+        id: 'model-test', capability, mode: 'auto',
+        provider: String(value.type || 'openai-compatible'), baseUrl,
+        apiKey: String(value.apiKey || ''), apiSecret: String(value.apiSecret || ''), appId: String(value.appId || ''),
+        modelId: String(value.model || ''), voice: String(value.voice || ''), imageProtocol: value.imageProtocol || undefined,
+      } as any;
+      if (capability === 'decision') {
+        const result = await evaluateDecision({
+          enabled: true,
+          mode: 'observe',
+          provider: String(value.providerLabel || value.type || 'decision'),
+          protocol: 'system-one-v1',
+          baseUrl,
+          apiKey: String(value.apiKey || ''),
+          model: String(value.model || ''),
+          timeoutMs: 10_000,
+          failurePolicy: 'deny',
+          guardTools: true,
+          agentTool: true,
+          mcpEnabled: false,
+        }, { request: String(value.prompt || 'Should this low-risk connection test be allowed?') }, { healthy: { type: 'noul', instructions: 'Return whether the request is safe to continue.' } });
+        if (!result.ok || result.error) throw new Error(result.error || '决策模型未返回有效判断。');
+        return { ok: true, latencyMs: Date.now() - startedAt, result: { ...result, content: JSON.stringify(result.answers ?? result, null, 2) } };
+      }
+      if (capability === 'vision') {
+        if (!String(value.imageDataUrl || '').startsWith('data:image/')) throw new Error('请先选择一张测试图片。');
+        const result = await testVisionCapabilityDataUrl(config, String(value.prompt || '请简要描述图片内容。'), String(value.imageDataUrl));
+        return { ok: true, latencyMs: Date.now() - startedAt, result: { ...result, content: result.analysis } };
+      }
+      if (capability === 'chat') {
+        const content = String(value.prompt || '请用一句话介绍你自己。');
+        const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', ...(value.apiKey ? { authorization: `Bearer ${String(value.apiKey)}` } : {}) }, body: JSON.stringify({ model: String(value.model || ''), messages: [{ role: 'user', content }], max_tokens: 300 }), signal: AbortSignal.timeout(120_000) });
+        const raw = await response.text();
+        let data: any; try { data = JSON.parse(raw); } catch { data = null; }
+        if (!response.ok) throw new Error(String(data?.error?.message || data?.message || raw.slice(0, 500) || `HTTP ${response.status}`));
+        const output = String(data?.choices?.[0]?.message?.content || '').trim();
+        if (!output) throw new Error('模型没有返回文本内容。');
+        return { ok: true, latencyMs: Date.now() - startedAt, result: { content: output, usage: data?.usage ?? null } };
+      }
+      const tool = createModelCapabilityTools({ workspaceRoot, configs: [config] })[0];
+      if (!tool) throw new Error('无法创建该模型的测试工具。');
+      if (capability === 'asr') {
+        const bytes = Buffer.from(String(value.audioBase64 || ''), 'base64');
+        if (!bytes.byteLength) throw new Error('请先选择一段测试音频。');
+        const extension = String(value.audioExtension || 'wav').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'wav';
+        await mkdir(path.join(workspaceRoot, 'input'), { recursive: true });
+        await writeFile(path.join(workspaceRoot, `input/sample.${extension}`), bytes);
+      }
+      const input = capability === 'image' ? { prompt: String(value.prompt || '一只放在木桌上的青花瓷杯，柔和自然光，产品摄影'), size: String(value.size || '1024x1024') }
+        : capability === 'tts' ? { text: String(value.prompt || '你好，这是 Workmate 语音模型测试。'), ...(value.voice ? { voice: String(value.voice) } : {}), format: 'mp3' }
+          : capability === 'asr' ? { path: `input/sample.${String(value.audioExtension || 'wav').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'wav'}`, outputFormat: 'text' }
+          : capability === 'embedding' ? { texts: [String(value.prompt || 'Workmate 模型测试')] }
+            : { task: String(value.prompt || '请给出一个创建 Bell 态的最小 Qiskit 示例。') };
+      const result = (await tool.execute('model-test', input, undefined)).details as any;
+      if (result?.ok === false) throw new Error(String(result.error || '模型返回失败。'));
+      let media: { mimeType: string; base64: string } | undefined;
+      if (result?.path && (capability === 'image' || capability === 'tts')) {
+        const bytes = await readFile(path.join(workspaceRoot, String(result.path)));
+        media = { mimeType: capability === 'image' ? `image/${path.extname(result.path).slice(1).replace('jpg', 'jpeg')}` : String(result.mimeType || 'audio/mpeg'), base64: bytes.toString('base64') };
+      }
+      return { ok: true, latencyMs: Date.now() - startedAt, result, media };
+    } catch (error) {
+      const cause = (error as { cause?: { code?: unknown; message?: unknown } })?.cause;
+      const message = [error instanceof Error ? error.message : String(error), cause?.code, cause?.message].filter(Boolean).map(String).join(' / ');
+      return reply.code(400).send({ ok: false, latencyMs: Date.now() - startedAt, message });
+    } finally { await rm(workspaceRoot, { recursive: true, force: true }); }
+  });
+
   app.post('/providers/test', async (request, reply) => {
     try {
       return await testProviderConnection(providerInput(request.body));

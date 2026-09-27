@@ -29,7 +29,37 @@ function databaseFile() {
 }
 
 function apiListenPort() {
-  return Number(process.env.WORKMATE_API_PORT || 4328);
+  return Number(process.env.WORKMATE_API_PORT || 47832);
+}
+
+const MOBILE_DESKTOP_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+
+function desktopUploadDirectory() {
+  const candidates = [path.join(os.homedir(), 'Downloads'), path.join(os.homedir(), 'Documents')];
+  for (const candidate of candidates) {
+    try {
+      fs.mkdirSync(candidate, { recursive: true, mode: 0o700 });
+      fs.accessSync(candidate, fs.constants.W_OK);
+      return candidate;
+    } catch { /* try the next standard user directory */ }
+  }
+  throw new Error('电脑的下载和文档目录均不可写。');
+}
+
+function safeUploadName(value: unknown) {
+  const base = path.basename(String(value || 'file')).replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_').trim();
+  const cleaned = base.replace(/^\.+$/, '').slice(0, 180);
+  return cleaned || `mobile-file-${Date.now()}`;
+}
+
+function uniqueUploadPath(directory: string, fileName: string) {
+  const extension = path.extname(fileName);
+  const stem = path.basename(fileName, extension);
+  for (let index = 0; index < 10_000; index += 1) {
+    const candidate = path.join(directory, index ? `${stem} (${index})${extension}` : fileName);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error('同名文件过多，请修改文件名后重试。');
 }
 
 function listLanIPv4Addresses() {
@@ -166,6 +196,8 @@ function mobileChatHtml(token: string) {
 .top h1{margin:0;font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .top p{margin:2px 0 0;font-size:11px;color:var(--muted)}
 .new{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:12px;height:36px;padding:0 12px;font-size:12px;font-weight:700;white-space:nowrap}
+.uploadToggle{border:0;background:transparent;color:#aab7d2;border-radius:10px;height:36px;padding:0 8px;font-size:12px;font-weight:700;white-space:nowrap}.uploadToggle:hover{background:var(--panel);color:var(--text)}
+.uploadPanel{margin:10px 14px 0;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 16px 36px #0004}.uploadHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.uploadHead strong{font-size:14px}.uploadHead p{margin:2px 0 0;color:var(--muted);font-size:11px}.uploadClose{border:0;background:transparent;color:var(--muted);font-size:20px;line-height:1}.pick{display:flex;align-items:center;justify-content:center;margin-top:12px;min-height:46px;border:1px dashed #4f6388;border-radius:12px;background:#0f1727;color:#cbd7ef;font-size:13px;font-weight:700}.pick input{position:absolute;opacity:0;pointer-events:none}.uploadFile{margin-top:9px;color:var(--muted);font-size:11px;word-break:break-all}.uploadAction{width:100%;height:40px;margin-top:10px;border:0;border-radius:11px;background:var(--accent);color:#fff;font-weight:700}.uploadAction:disabled{opacity:.42}.uploadBar{height:5px;margin-top:10px;overflow:hidden;border-radius:99px;background:#26324a}.uploadBar i{display:block;width:0;height:100%;background:linear-gradient(90deg,#3d7eff,#22c1c3);transition:width .2s}.uploadStatus{min-height:18px;margin-top:8px;color:var(--muted);font-size:11px}.uploadStatus.ok{color:#5ee0a0}.uploadStatus.bad{color:#fda4af}
 .list{flex:1;overflow:auto;padding:16px 14px 12px;display:flex;flex-direction:column;gap:10px}
 .bubble{max-width:88%;padding:12px 14px;border-radius:18px;white-space:pre-wrap;word-break:break-word;font-size:15px}
 .bubble.user{align-self:flex-end;background:var(--user);border-bottom-right-radius:6px}
@@ -189,9 +221,18 @@ button.send,button.stop{border:0;border-radius:14px;padding:0 16px;height:44px;f
       <h1 id="title">Workmate</h1>
       <p id="meta">手机端轻量对话 · 与电脑同步</p>
     </div>
+    <button class="uploadToggle" id="uploadToggle" type="button">传文件</button>
     <button class="new" id="newSession" type="button">新对话</button>
   </header>
   <div id="err" class="err" hidden></div>
+  <section id="uploadPanel" class="uploadPanel" hidden>
+    <div class="uploadHead"><div><strong>传文件到电脑</strong><p>默认保存到电脑的“下载”目录</p></div><button id="uploadClose" class="uploadClose" type="button" aria-label="关闭">×</button></div>
+    <label class="pick" for="uploadFile">选择手机中的文件<input id="uploadFile" type="file"></label>
+    <div id="uploadName" class="uploadFile">支持任意文件，最大 20 MB</div>
+    <button id="uploadSend" class="uploadAction" type="button" disabled>上传到电脑</button>
+    <div class="uploadBar"><i id="uploadProgress"></i></div>
+    <div id="uploadStatus" class="uploadStatus">等待选择文件</div>
+  </section>
   <main id="list" class="list"></main>
   <form class="composer" id="form">
     <textarea id="input" rows="1" placeholder="说点什么…" enterkeyhint="send"></textarea>
@@ -210,8 +251,17 @@ const stop=document.getElementById('stop');
 const err=document.getElementById('err');
 const form=document.getElementById('form');
 const newSession=document.getElementById('newSession');
+const uploadToggle=document.getElementById('uploadToggle');
+const uploadPanel=document.getElementById('uploadPanel');
+const uploadClose=document.getElementById('uploadClose');
+const uploadFile=document.getElementById('uploadFile');
+const uploadName=document.getElementById('uploadName');
+const uploadSend=document.getElementById('uploadSend');
+const uploadProgress=document.getElementById('uploadProgress');
+const uploadStatus=document.getElementById('uploadStatus');
 let busy=false;
 let lastFingerprint='';
+let selectedUpload=null;
 
 function showError(message){err.hidden=!message;err.textContent=message||'';}
 function scrollBottom(){list.scrollTop=list.scrollHeight;}
@@ -305,6 +355,39 @@ newSession.addEventListener('click',async()=>{
     newSession.disabled=false;
   }
 });
+
+uploadToggle.addEventListener('click',()=>{uploadPanel.hidden=!uploadPanel.hidden;if(!uploadPanel.hidden)uploadFile.focus();});
+uploadClose.addEventListener('click',()=>{uploadPanel.hidden=true;});
+uploadFile.addEventListener('change',()=>{
+  selectedUpload=uploadFile.files&&uploadFile.files[0]||null;
+  uploadSend.disabled=!selectedUpload;
+  uploadSend.textContent='上传到电脑';
+  uploadProgress.style.width='0';
+  uploadStatus.className='uploadStatus';
+  uploadStatus.textContent=selectedUpload?'文件已就绪':'等待选择文件';
+  uploadName.textContent=selectedUpload?selectedUpload.name+' · '+Math.max(1,Math.ceil(selectedUpload.size/1024))+' KB':'支持任意文件，最大 20 MB';
+});
+uploadSend.addEventListener('click',()=>{
+  if(!selectedUpload)return;
+  if(selectedUpload.size>20971520){uploadStatus.className='uploadStatus bad';uploadStatus.textContent='文件超过 20 MB';return;}
+  uploadSend.disabled=true;uploadProgress.style.width='12%';uploadStatus.className='uploadStatus';uploadStatus.textContent='正在读取文件…';
+  const reader=new FileReader();
+  reader.onerror=()=>uploadFailed('读取文件失败');
+  reader.onprogress=(event)=>{if(event.lengthComputable)uploadProgress.style.width=(12+event.loaded/event.total*28)+'%';};
+  reader.onload=async()=>{
+    uploadProgress.style.width='48%';uploadStatus.textContent='正在传送到电脑…';
+    try{
+      const contentBase64=String(reader.result||'').split(',',2)[1]||'';
+      const response=await fetch('/api/chat-mobile/'+encodeURIComponent(token)+'/upload',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:selectedUpload.name,contentBase64})});
+      const body=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(body.message||'上传失败');
+      uploadProgress.style.width='100%';uploadStatus.className='uploadStatus ok';uploadStatus.textContent='已保存到 '+body.location;
+      selectedUpload=null;uploadFile.value='';uploadSend.disabled=true;uploadSend.textContent='上传到电脑';uploadName.textContent='可继续选择其他文件';
+    }catch(error){uploadFailed(error.message||'上传失败');}
+  };
+  reader.readAsDataURL(selectedUpload);
+});
+function uploadFailed(message){uploadSend.disabled=false;uploadProgress.style.width='0';uploadStatus.className='uploadStatus bad';uploadStatus.textContent=message;}
 
 input.addEventListener('keydown',(event)=>{
   if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();form.requestSubmit();}
@@ -445,6 +528,31 @@ export const publicChatMobileRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true, ...result };
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : '发送失败。' });
+    }
+  });
+
+  app.post('/chat-mobile/:token/upload', { bodyLimit: 28 * 1024 * 1024 }, async (request, reply) => {
+    const { token } = request.params as { token: string };
+    const link = await resolveLink(token);
+    if (!link) return reply.code(410).send({ message: '链接已过期，请在电脑上重新生成。' });
+    const session = await getOrchestrator().chat.getChatSession(link.sessionId);
+    if (!session || !canWriteOwnedResource(session, linkPrincipal(link), { allowLegacyUnowned: true })) {
+      return reply.code(404).send({ message: '对话不存在或无权上传。' });
+    }
+    const body = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {};
+    const contentBase64 = String(body.contentBase64 || '');
+    if (!contentBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(contentBase64)) return reply.code(400).send({ message: '文件内容无效。' });
+    const bytes = Buffer.from(contentBase64, 'base64');
+    if (!bytes.length) return reply.code(400).send({ message: '不能上传空文件。' });
+    if (bytes.length > MOBILE_DESKTOP_UPLOAD_MAX_BYTES) return reply.code(413).send({ message: '文件超过 20 MB。' });
+    try {
+      const directory = desktopUploadDirectory();
+      const target = uniqueUploadPath(directory, safeUploadName(body.name));
+      fs.writeFileSync(target, bytes, { flag: 'wx', mode: 0o600 });
+      const folderLabel = path.basename(directory) === 'Documents' ? '文档' : '下载';
+      return { ok: true, name: path.basename(target), sizeBytes: bytes.length, location: `${folderLabel}/${path.basename(target)}` };
+    } catch (error) {
+      return reply.code(500).send({ message: error instanceof Error ? error.message : '保存文件失败。' });
     }
   });
 
