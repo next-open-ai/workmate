@@ -10,6 +10,7 @@ import {
 } from '../../app/kb-config';
 import { resolveActiveEmbeddingConfig, toModelPayload, useModelConfig } from '../../app/model-config';
 import { useNotify } from '../../app/notify';
+import OntologyWorkbench from './OntologyWorkbench.vue';
 import {
   deleteKnowledgeChunk,
   deleteKnowledgeDocument,
@@ -32,7 +33,7 @@ const notify = useNotify();
 const { bases, load, upsert, remove, setEnabled, setDocumentCount, setIndexState, isReady, enabledProviders, isProviderEnabled, providerDefaults, resolveCredentials } = useKnowledgeConfig();
 const { activeConfig, configured, settings: modelSettings, load: loadModels } = useModelConfig();
 
-type DetailTab = 'documents' | 'chunks' | 'search' | 'settings';
+type DetailTab = 'documents' | 'chunks' | 'search' | 'ontology' | 'settings';
 type ProviderFilter = 'all' | KnowledgeProviderId;
 
 const providerFilter = ref<ProviderFilter>('all');
@@ -103,7 +104,7 @@ const systemEmbedding = computed(() => resolveActiveEmbeddingConfig(modelSetting
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
   supportsManage.value
-    ? ['documents', 'chunks', 'search', 'settings']
+    ? ['documents', 'chunks', 'search', 'ontology', 'settings']
     : ['search', 'settings']
 ));
 const ingestFileBase64 = ref('');
@@ -777,7 +778,7 @@ function embeddingSourceSummary(item: KnowledgeBase) {
               :class="['rounded-lg px-3 py-2 text-xs font-semibold transition', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']"
               @click="detailTab = tab"
             >
-              {{ t(`knowledge.tab.${tab}`) }}
+              {{ tab === 'ontology' ? '本体与审核' : t(`knowledge.tab.${tab}`) }}
             </button>
           </div>
         </article>
@@ -868,6 +869,8 @@ function embeddingSourceSummary(item: KnowledgeBase) {
           </ul>
           <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
+
+        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 class="text-base font-bold">{{ t('knowledge.settingsTitle') }}</h3>

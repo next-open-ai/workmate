@@ -9,7 +9,22 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft GitHub Release if needed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" --draft --generate-notes --title "${GITHUB_REF_NAME}"
+          fi
+
   package:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -88,45 +103,39 @@ jobs:
       - name: Report and enforce package-size budget
         run: node scripts/report-package-size.mjs apps/desktop/release ${{ matrix.max_package_mb }}
       - name: Collect final installers only
-        # Artifact actions ignore dot-prefixed paths by default. Keep this
-        # directory visible so the final installers are always discovered.
+        # 只收集最终安装器，避免把 unpacked 目录和中间文件上传到 Release。
         run: node scripts/collect-release-artifacts.mjs apps/desktop/release release-assets-final ${{ matrix.expected_extension }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          # Do not upload mac/win/linux-unpacked directories: they contain the
-          # raw Electron application and are not user-downloadable installers.
-          path: release-assets-final/**
-          if-no-files-found: error
+      - name: Upload final installer directly to draft Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" release-assets-final/* --clobber
 
   publish:
     needs: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v7
-        with: { path: release-assets }
-      - name: Prepare release assets and SHA-256 checksums
+      - name: Download Release installers and prepare SHA-256 checksums
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           mkdir publish-assets
-          find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \) -exec cp {} publish-assets/ \;
+          gh release download "${GITHUB_REF_NAME}" --dir publish-assets --pattern '*.dmg' --pattern '*.exe'
           # 2 个安装包：macOS Apple Silicon .dmg、Windows x64 .exe（Intel macOS 暂停）
           test "$(find publish-assets -type f | wc -l)" -eq 2
           cd publish-assets
           shasum -a 256 * > checksums-sha256.txt
-      - name: Create GitHub Release and upload final installers
+      - name: Upload checksums and publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          # The publish job only downloads artifacts and does not checkout the
-          # repository, so gh cannot infer a remote from .git.
           GH_REPO: ${{ github.repository }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" publish-assets/* --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" publish-assets/* --generate-notes
-          fi
+          gh release upload "${GITHUB_REF_NAME}" publish-assets/checksums-sha256.txt --clobber
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
 
   publish_npm:
     needs: package

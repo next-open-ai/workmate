@@ -668,6 +668,20 @@ export async function searchKnowledge(input: {
   }>('/api/knowledge/search', input);
 }
 
+export type OntologyWorkflowPayload = {
+  draft: { version: number; nodes: unknown[]; edges: unknown[] };
+  published?: { version: number; nodes: unknown[]; edges: unknown[] };
+  candidates: Array<{ id: string; kind: 'node' | 'edge'; node?: Record<string, unknown>; edge?: Record<string, unknown>; evidence: Array<{ documentId: string; chunkId?: string; quote: string; source?: string }>; confidence: number; status: string; reviewNote?: string }>;
+  updatedAt: number;
+};
+
+export const readOntologyWorkflow = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/workflow/read', { knowledgeBase });
+export const saveOntologyDraft = (knowledgeBase: KnowledgeBasePayload, graph: unknown) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/save', { knowledgeBase, graph });
+export const publishOntologyDraft = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/publish', { knowledgeBase });
+export const importOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidates: unknown[]) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/import', { knowledgeBase, candidates });
+export const reviewOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidateIds: string[], decision: 'accepted' | 'rejected', note?: string) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/review', { knowledgeBase, candidateIds, decision, note });
+export const commitOntologyCandidates = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload & { committed?: number } }>('/api/knowledge/ontology/candidates/commit', { knowledgeBase });
+
 export async function listBailianPipelines(input: {
   apiKey: string;
   baseUrl?: string;

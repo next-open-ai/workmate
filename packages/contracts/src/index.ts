@@ -445,6 +445,45 @@ export const OntologyQueryRequestSchema = z.object({
 });
 export type OntologyQueryRequest = z.infer<typeof OntologyQueryRequestSchema>;
 
+export const OntologyEvidenceSchema = z.object({
+  documentId: z.string().min(1).max(240),
+  chunkId: z.string().min(1).max(240).optional(),
+  title: z.string().max(500).optional(),
+  quote: z.string().min(1).max(4000),
+  source: z.string().max(1000).optional(),
+});
+export type OntologyEvidence = z.infer<typeof OntologyEvidenceSchema>;
+export const OntologyCandidateSchema = z.object({
+  id: z.string().min(1).max(240),
+  kind: z.enum(['node', 'edge']),
+  node: OntologyNodeSchema.optional(),
+  edge: OntologyEdgeSchema.optional(),
+  evidence: z.array(OntologyEvidenceSchema).min(1).max(20),
+  confidence: z.number().min(0).max(1).default(0.5),
+  status: z.enum(['pending', 'accepted', 'rejected', 'committed']).default('pending'),
+  reviewedAt: z.number().int().positive().optional(),
+  reviewNote: z.string().max(1000).optional(),
+}).superRefine((value, ctx) => {
+  if (value.kind === 'node' && !value.node) ctx.addIssue({ code: 'custom', path: ['node'], message: 'Node candidate requires node.' });
+  if (value.kind === 'edge' && !value.edge) ctx.addIssue({ code: 'custom', path: ['edge'], message: 'Edge candidate requires edge.' });
+});
+export type OntologyCandidate = z.infer<typeof OntologyCandidateSchema>;
+export const OntologyWorkflowSchema = z.object({
+  draft: OntologyGraphSchema.default({ version: 1, nodes: [], edges: [] }),
+  published: OntologyGraphSchema.optional(),
+  candidates: z.array(OntologyCandidateSchema).default([]),
+  updatedAt: z.number().int().positive(),
+});
+export type OntologyWorkflow = z.infer<typeof OntologyWorkflowSchema>;
+export const OntologyWorkflowRequestSchema = z.object({ knowledgeBase: KnowledgeBaseRuntimeSchema });
+export const OntologyDraftSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ graph: OntologyGraphSchema });
+export const OntologyCandidateImportRequestSchema = OntologyWorkflowRequestSchema.extend({ candidates: z.array(OntologyCandidateSchema).min(1).max(1000) });
+export const OntologyReviewRequestSchema = OntologyWorkflowRequestSchema.extend({
+  candidateIds: z.array(z.string().min(1)).min(1).max(1000),
+  decision: z.enum(['accepted', 'rejected']),
+  note: z.string().max(1000).optional(),
+});
+
 export const BailianCreateKnowledgeRequestSchema = z.object({
   accessKeyId: z.string().min(1).max(120),
   accessKeySecret: z.string().min(1).max(120),

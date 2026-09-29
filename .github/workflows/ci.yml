@@ -79,9 +79,4 @@ jobs:
           find apps/desktop/release -type f -name "*.${{ matrix.expected_extension }}" -print -quit | grep -q .
       - name: Report and enforce package-size budget
         run: node scripts/report-package-size.mjs apps/desktop/release ${{ matrix.max_package_mb }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: desktop-package-${{ matrix.artifact }}
-          path: apps/desktop/release/**
-          if-no-files-found: warn
+      # PR 构建只做可构建性与体积校验，不保存临时安装包，避免占用 Actions Artifact 配额。
