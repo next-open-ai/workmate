@@ -8,7 +8,7 @@ import {
   type KnowledgeBase,
   type KnowledgeProviderId,
 } from '../../app/kb-config';
-import { resolveActiveEmbeddingConfig, toModelPayload, useModelConfig } from '../../app/model-config';
+import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById, toModelPayload, useModelConfig } from '../../app/model-config';
 import { useNotify } from '../../app/notify';
 import OntologyWorkbench from './OntologyWorkbench.vue';
 import {
@@ -46,6 +46,13 @@ const loadingDocs = ref(false);
 const loadingChunks = ref(false);
 const ingestOpen = ref(false);
 const ingestBusy = ref(false);
+const ingestMode = ref<'file' | 'text'>('file');
+const ingestStage = ref<'idle' | 'reading' | 'ready' | 'processing' | 'success' | 'error'>('idle');
+const ingestError = ref('');
+const ingestResult = ref('');
+const ingestFileSize = ref(0);
+const ingestDragActive = ref(false);
+const ingestFileInput = ref<HTMLInputElement | null>(null);
 const ingestTitle = ref('');
 const ingestContent = ref('');
 const ingestSource = ref('');
@@ -72,7 +79,8 @@ const draft = ref({
   workspaceId: '',
   accessKeyId: '',
   accessKeySecret: '',
-  embeddingModel: '',
+  embeddingMode: 'system' as 'system' | 'model',
+  embeddingModelConfigId: '',
 });
 const bailianPipelines = ref<Array<{ id: string; name: string; workspaceId: string; docNum: number; categoryId?: string }>>([]);
 const loadingPipelines = ref(false);
@@ -100,6 +108,13 @@ const filteredBases = computed(() => {
 const selected = computed(() => bases.value.find((item) => item.id === selectedId.value) ?? null);
 const isLocal = computed(() => selected.value?.provider === 'lancedb');
 const systemEmbedding = computed(() => resolveActiveEmbeddingConfig(modelSettings.value));
+const embeddingModels = computed(() => modelSettings.value.models
+  .filter((item) => item.capability === 'embedding')
+  .map((item) => {
+    const resolved = resolveEmbeddingConfigById(item.id, modelSettings.value);
+    return resolved ? { ...resolved, label: item.label || resolved.modelId } : null;
+  })
+  .filter((item): item is NonNullable<typeof item> => Boolean(item)));
 /** Providers that support document/chunk CRUD + upload through the unified knowledge API. */
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
@@ -111,6 +126,20 @@ const ingestFileBase64 = ref('');
 const ingestFileName = ref('');
 const lastJobId = ref('');
 const lastJobStatus = ref('');
+const ingestCanSubmit = computed(() => Boolean(
+  ingestTitle.value.trim()
+  && (ingestContent.value.trim() || ingestFileBase64.value.trim())
+  && !ingestBusy.value
+  && ingestStage.value !== 'success',
+));
+const ingestProgress = computed(() => ({
+  idle: 0,
+  reading: 18,
+  ready: 34,
+  processing: 76,
+  success: 100,
+  error: ingestFileName.value || ingestContent.value.trim() ? 34 : 0,
+}[ingestStage.value]));
 
 onMounted(async () => {
   await Promise.all([load(), loadModels()]);
@@ -142,6 +171,7 @@ function meta(provider: KnowledgeProviderId) {
 
 function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
   const creds = resolveCredentials(item);
+  const resolvedEmbedding = resolvedEmbeddingFor(item);
   return {
     id: item.id,
     name: item.name,
@@ -156,10 +186,12 @@ function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
     workspaceId: creds.workspaceId,
     accessKeyId: creds.accessKeyId,
     accessKeySecret: creds.accessKeySecret,
-    embeddingBaseUrl: item.embeddingBaseUrl || undefined,
-    embeddingApiKey: item.embeddingApiKey || undefined,
-    embeddingModel: item.embeddingModel || undefined,
-    embeddingMeta: item.embeddingMeta,
+    embeddingBaseUrl: resolvedEmbedding?.baseUrl || item.embeddingBaseUrl || undefined,
+    embeddingApiKey: resolvedEmbedding?.apiKey || item.embeddingApiKey || undefined,
+    embeddingModel: resolvedEmbedding?.modelId || item.embeddingModel || undefined,
+    embeddingMode: item.embeddingMode,
+    embeddingModelConfigId: item.embeddingModelConfigId || undefined,
+    embeddingMeta: resolvedEmbedding?.meta || item.embeddingMeta,
     indexState: item.indexState,
   };
 }
@@ -203,7 +235,8 @@ function resetDraft() {
     workspaceId: '',
     accessKeyId: '',
     accessKeySecret: '',
-    embeddingModel: '',
+    embeddingMode: 'system',
+    embeddingModelConfigId: '',
   };
   bailianPipelines.value = [];
   editingId.value = null;
@@ -228,9 +261,6 @@ function applyProviderDefaults(provider: KnowledgeProviderId) {
   draft.value.workspaceId = '';
   draft.value.accessKeyId = '';
   draft.value.accessKeySecret = '';
-  if ((provider === 'lancedb' || provider === 'qdrant' || provider === 'pinecone') && !draft.value.embeddingModel.trim()) {
-    draft.value.embeddingModel = systemEmbedding.value?.modelId || '';
-  }
 }
 
 function onDraftProviderChange() {
@@ -251,7 +281,8 @@ function openEdit(item: KnowledgeBase) {
     workspaceId: item.workspaceId || '',
     accessKeyId: item.accessKeyId || '',
     accessKeySecret: item.accessKeySecret || '',
-    embeddingModel: item.embeddingModel || '',
+    embeddingMode: item.embeddingMode || 'system',
+    embeddingModelConfigId: item.embeddingModelConfigId || '',
   };
   bailianPipelines.value = [];
   formOpen.value = true;
@@ -268,12 +299,13 @@ async function save() {
     const existing = editingId.value
       ? bases.value.find((item) => item.id === editingId.value)
       : undefined;
-    const inheritedEmbedding = (draft.value.provider === 'lancedb' || draft.value.provider === 'qdrant' || draft.value.provider === 'pinecone')
-      ? systemEmbedding.value
+    const usesEmbedding = draft.value.provider === 'lancedb' || draft.value.provider === 'qdrant' || draft.value.provider === 'pinecone';
+    const selectedEmbedding = usesEmbedding
+      ? (draft.value.embeddingMode === 'model'
+          ? resolveEmbeddingConfigById(draft.value.embeddingModelConfigId, modelSettings.value)
+          : systemEmbedding.value)
       : null;
-    const manualEmbeddingModel = draft.value.embeddingModel.trim();
-    const resolvedEmbeddingModel = manualEmbeddingModel || inheritedEmbedding?.modelId || '';
-    const keepExistingEmbedding = Boolean(existing && manualEmbeddingModel && existing.embeddingModel === manualEmbeddingModel);
+    if (usesEmbedding && !selectedEmbedding) throw new Error(draft.value.embeddingMode === 'model' ? '请选择一个可用的 Embedding 模型。' : '系统默认 Embedding 尚未配置，请先在设置中配置。');
     const saved = await upsert({
       id: editingId.value || undefined,
       name: draft.value.name,
@@ -287,16 +319,12 @@ async function save() {
       workspaceId: draft.value.workspaceId,
       accessKeyId: draft.value.accessKeyId,
       accessKeySecret: draft.value.accessKeySecret,
-      embeddingBaseUrl: keepExistingEmbedding
-        ? (existing?.embeddingBaseUrl || '')
-        : (!manualEmbeddingModel ? (inheritedEmbedding?.baseUrl || '') : ''),
-      embeddingApiKey: keepExistingEmbedding
-        ? (existing?.embeddingApiKey || '')
-        : (!manualEmbeddingModel ? (inheritedEmbedding?.apiKey || '') : ''),
-      embeddingModel: resolvedEmbeddingModel,
-      embeddingMeta: keepExistingEmbedding
-        ? existing?.embeddingMeta
-        : (!manualEmbeddingModel ? inheritedEmbedding?.meta : undefined),
+      embeddingMode: usesEmbedding ? draft.value.embeddingMode : undefined,
+      embeddingModelConfigId: usesEmbedding && draft.value.embeddingMode === 'model' ? draft.value.embeddingModelConfigId : undefined,
+      embeddingBaseUrl: selectedEmbedding?.baseUrl || '',
+      embeddingApiKey: selectedEmbedding?.apiKey || '',
+      embeddingModel: selectedEmbedding?.modelId || '',
+      embeddingMeta: selectedEmbedding?.meta,
       documentCount: editingId.value
         ? bases.value.find((item) => item.id === editingId.value)?.documentCount
         : 0,
@@ -387,7 +415,35 @@ function openIngest() {
   ingestSource.value = '';
   ingestFileBase64.value = '';
   ingestFileName.value = '';
+  ingestFileSize.value = 0;
+  ingestMode.value = 'file';
+  ingestStage.value = 'idle';
+  ingestError.value = '';
+  ingestResult.value = '';
+  ingestDragActive.value = false;
   ingestOpen.value = true;
+}
+
+function closeIngest() {
+  if (ingestBusy.value) return;
+  ingestOpen.value = false;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function resetIngestFile() {
+  ingestFileBase64.value = '';
+  ingestFileName.value = '';
+  ingestFileSize.value = 0;
+  ingestSource.value = '';
+  if (ingestMode.value === 'file') ingestContent.value = '';
+  ingestStage.value = 'idle';
+  ingestError.value = '';
+  if (ingestFileInput.value) ingestFileInput.value.value = '';
 }
 
 function fileToBase64(file: File) {
@@ -403,48 +459,86 @@ function fileToBase64(file: File) {
   });
 }
 
-async function onPickFile(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
+async function prepareIngestFile(file?: File) {
   if (!file) return;
+  ingestMode.value = 'file';
+  ingestStage.value = 'reading';
+  ingestError.value = '';
+  ingestResult.value = '';
   const maxBytes = selected.value?.provider === 'bailian' ? 8_000_000 : 2_000_000;
   if (file.size > maxBytes) {
-    notify.error(new Error(t('knowledge.fileTooLarge')), 'notify.saveFailed');
+    ingestStage.value = 'error';
+    ingestError.value = t('knowledge.fileTooLarge');
     return;
   }
-  ingestTitle.value = ingestTitle.value.trim() || file.name.replace(/\.[^.]+$/, '');
-  ingestSource.value = file.name;
-  ingestFileName.value = file.name;
-  if (selected.value?.provider === 'bailian' && !/\.(txt|md|markdown|csv|json)$/i.test(file.name)) {
-    ingestFileBase64.value = await fileToBase64(file);
-    ingestContent.value = '';
-  } else {
-    const textContent = await file.text();
-    ingestContent.value = textContent;
-    if (selected.value?.provider === 'bailian') {
+  try {
+    ingestTitle.value = file.name.replace(/\.[^.]+$/, '');
+    ingestSource.value = file.name;
+    ingestFileName.value = file.name;
+    ingestFileSize.value = file.size;
+    if (!/\.(txt|md|markdown|csv|json)$/i.test(file.name)) {
+      if (selected.value?.provider !== 'bailian' && !/\.(pdf|docx)$/i.test(file.name)) {
+        throw new Error('本地知识库支持 TXT、Markdown、CSV、JSON、PDF 和 DOCX。');
+      }
       ingestFileBase64.value = await fileToBase64(file);
+      ingestContent.value = '';
     } else {
-      ingestFileBase64.value = '';
+      const textContent = await file.text();
+      ingestContent.value = textContent;
+      ingestFileBase64.value = selected.value?.provider === 'bailian' ? await fileToBase64(file) : '';
     }
+    ingestStage.value = 'ready';
+  } catch (cause) {
+    ingestStage.value = 'error';
+    ingestError.value = cause instanceof Error ? cause.message : String(cause);
   }
-  (event.target as HTMLInputElement).value = '';
+}
+
+async function onPickFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  await prepareIngestFile(input.files?.[0]);
+  input.value = '';
+}
+
+async function onDropFile(event: DragEvent) {
+  ingestDragActive.value = false;
+  await prepareIngestFile(event.dataTransfer?.files?.[0]);
+}
+
+function setIngestMode(mode: 'file' | 'text') {
+  if (ingestBusy.value || ingestMode.value === mode) return;
+  ingestMode.value = mode;
+  ingestError.value = '';
+  ingestResult.value = '';
+  if (mode === 'text') resetIngestFile();
+  else {
+    ingestContent.value = '';
+    ingestStage.value = 'idle';
+  }
 }
 
 async function runIngest() {
   if (!selected.value) return;
   const isBailian = selected.value.provider === 'bailian';
-  if (!isBailian && !configured.value) {
-    notify.error(new Error(t('knowledge.embeddingRequired')), 'notify.saveFailed');
+  if (!isBailian && !resolvedEmbeddingFor(selected.value) && !selected.value.embeddingModel?.trim()) {
+    ingestStage.value = 'error';
+    ingestError.value = t('knowledge.embeddingRequired');
     return;
   }
   if (isBailian && !selected.value.categoryId?.trim()) {
-    notify.error(new Error(t('knowledge.bailianNeedCategory')), 'notify.saveFailed');
+    ingestStage.value = 'error';
+    ingestError.value = t('knowledge.bailianNeedCategory');
     return;
   }
   if (!ingestContent.value.trim() && !ingestFileBase64.value.trim()) {
-    notify.error(new Error(t('knowledge.contentRequired')), 'notify.saveFailed');
+    ingestStage.value = 'error';
+    ingestError.value = t('knowledge.contentRequired');
     return;
   }
   ingestBusy.value = true;
+  ingestStage.value = 'processing';
+  ingestError.value = '';
+  ingestResult.value = '';
   try {
     const result = await ingestKnowledgeDocument({
       knowledgeBase: toPayload(selected.value),
@@ -465,10 +559,15 @@ async function runIngest() {
     }
     await setDocumentCount(selected.value.id, (selected.value.documentCount || 0) + Math.max(1, result.chunks || 0));
     notify.success(result.jobId ? 'notify.kbIngestQueued' : 'notify.kbIngested');
-    ingestOpen.value = false;
+    ingestStage.value = 'success';
+    ingestResult.value = result.jobId
+      ? `文件已上传，云端任务 ${result.jobId} 正在处理。`
+      : `导入完成，已生成 ${result.chunks || 0} 个知识分片并写入索引。`;
     detailTab.value = 'documents';
     await refreshDetail();
   } catch (cause) {
+    ingestStage.value = 'error';
+    ingestError.value = cause instanceof Error ? cause.message : String(cause);
     notify.error(cause, 'notify.saveFailed');
   } finally {
     ingestBusy.value = false;
@@ -651,6 +750,12 @@ function summaryLine(item: KnowledgeBase) {
 }
 
 function embeddingSourceSummary(item: KnowledgeBase) {
+  const resolved = item.embeddingMode === 'model' && item.embeddingModelConfigId
+    ? resolveEmbeddingConfigById(item.embeddingModelConfigId, modelSettings.value)
+    : item.embeddingMode === 'system'
+      ? systemEmbedding.value
+      : null;
+  if (resolved) return `${resolved.providerLabel} · ${resolved.modelId}${item.embeddingMode === 'system' ? '（系统默认）' : '（知识库指定）'}`;
   if (item.embeddingModel?.trim()) {
     if (item.embeddingBaseUrl?.trim()) return `${item.embeddingModel} · ${item.embeddingBaseUrl}`;
     return item.embeddingModel;
@@ -659,6 +764,12 @@ function embeddingSourceSummary(item: KnowledgeBase) {
     return `${systemEmbedding.value.modelId}（系统默认）`;
   }
   return '未配置';
+}
+
+function resolvedEmbeddingFor(item: KnowledgeBase) {
+  if (item.embeddingMode === 'model' && item.embeddingModelConfigId) return resolveEmbeddingConfigById(item.embeddingModelConfigId, modelSettings.value);
+  if (item.embeddingMode === 'system') return systemEmbedding.value;
+  return null;
 }
 </script>
 
@@ -870,7 +981,7 @@ function embeddingSourceSummary(item: KnowledgeBase) {
           <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
 
-        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" />
+        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 class="text-base font-bold">{{ t('knowledge.settingsTitle') }}</h3>
@@ -905,7 +1016,8 @@ function embeddingSourceSummary(item: KnowledgeBase) {
             <div v-if="selected.provider === 'lancedb' || selected.provider === 'qdrant' || selected.provider === 'pinecone'" class="rounded-xl bg-[var(--surface-muted)] px-4 py-3 sm:col-span-2">
               <dt class="text-[11px] font-bold uppercase tracking-wide text-[var(--muted)]">Embedding</dt>
               <dd class="mt-1">{{ embeddingSourceSummary(selected) }}</dd>
-              <dd v-if="selected.embeddingMeta?.dimension" class="mt-1 text-xs text-[var(--muted)]">dimension: {{ selected.embeddingMeta.dimension }}</dd>
+              <dd v-if="resolvedEmbeddingFor(selected)?.meta?.dimension || selected.embeddingMeta?.dimension" class="mt-1 text-xs text-[var(--muted)]">dimension: {{ resolvedEmbeddingFor(selected)?.meta?.dimension || selected.embeddingMeta?.dimension }}</dd>
+              <dd class="mt-1 text-xs text-[var(--muted)]">模式：{{ selected.embeddingMode === 'model' ? '知识库指定模型' : selected.embeddingMode === 'system' ? '继承系统默认模型' : '旧版固定配置' }}</dd>
             </div>
           </dl>
           <p v-if="!supportsManage" class="mt-4 rounded-xl border border-dashed border-[var(--border)] px-4 py-3 text-sm text-[var(--muted)]">{{ t('knowledge.cloudManageHint') }}</p>
@@ -918,9 +1030,9 @@ function embeddingSourceSummary(item: KnowledgeBase) {
       </div>
     </div>
 
-    <div v-if="formOpen" class="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" @click.self="closeForm">
-      <form class="max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl" @submit.prevent="save">
-        <h3 class="text-lg font-bold">{{ editingId ? t('knowledge.edit') : t('knowledge.add') }}</h3>
+    <div v-if="formOpen" class="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="presentation">
+      <form class="max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="knowledge-form-title" @submit.prevent="save">
+        <h3 id="knowledge-form-title" class="text-lg font-bold">{{ editingId ? t('knowledge.edit') : t('knowledge.add') }}</h3>
         <p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.formHelp') }}</p>
         <div class="mt-4 grid gap-3">
           <label class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.name') }}<input v-model="draft.name" required class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal text-[var(--text)]" /></label>
@@ -967,10 +1079,21 @@ function embeddingSourceSummary(item: KnowledgeBase) {
             </template>
             <label v-else class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.externalId') }}<input v-model="draft.externalId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('knowledge.externalIdHint')" /></label>
           </template>
-          <label v-if="draft.provider === 'lancedb' || draft.provider === 'qdrant' || draft.provider === 'pinecone'" class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.embeddingModel') }}<input v-model="draft.embeddingModel" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('knowledge.embeddingModelHint')" /></label>
-          <p v-if="(draft.provider === 'lancedb' || draft.provider === 'qdrant' || draft.provider === 'pinecone') && !draft.embeddingModel.trim()" class="rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-[11px] font-normal text-[var(--muted)]">
-            {{ systemEmbedding?.modelId ? `当前将继承系统 Embedding：${systemEmbedding.modelId}${systemEmbedding.meta?.dimension ? ` · ${systemEmbedding.meta.dimension}d` : ''}` : '当前没有系统级 Embedding 默认项，建议先去设置页注册并设为默认。' }}
-          </p>
+          <div v-if="draft.provider === 'lancedb' || draft.provider === 'qdrant' || draft.provider === 'pinecone'" class="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-3">
+            <div>
+              <p class="text-xs font-semibold text-[var(--text)]">向量模型</p>
+              <p class="mt-1 text-[11px] font-normal leading-relaxed text-[var(--muted)]">选择系统默认模型，或为当前知识库指定一个已经在“设置 → 模型”中配置好的 Embedding 模型。</p>
+            </div>
+            <label class="flex cursor-pointer items-start gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-xs">
+              <input v-model="draft.embeddingMode" class="mt-0.5" type="radio" value="system" />
+              <span><strong class="block text-[var(--text)]">继承系统默认模型</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">{{ systemEmbedding ? `${systemEmbedding.providerLabel} · ${systemEmbedding.modelId}${systemEmbedding.meta?.dimension ? ` · ${systemEmbedding.meta.dimension}d` : ''}` : '尚未配置系统默认 Embedding' }}</span></span>
+            </label>
+            <label class="flex cursor-pointer items-start gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-xs">
+              <input v-model="draft.embeddingMode" class="mt-0.5" type="radio" value="model" />
+              <span class="min-w-0 flex-1"><strong class="block text-[var(--text)]">为此知识库指定模型</strong><select v-model="draft.embeddingModelConfigId" class="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm font-normal" :disabled="draft.embeddingMode !== 'model'" required><option value="" disabled>请选择已配置的 Embedding 模型</option><option v-for="item in embeddingModels" :key="item.configuredModelId" :value="item.configuredModelId">{{ item.providerLabel }} · {{ item.label }}{{ item.meta?.dimension ? ` · ${item.meta.dimension}d` : '' }}</option></select></span>
+            </label>
+            <p v-if="!embeddingModels.length" class="rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-[11px] font-normal text-[var(--muted)]">当前没有可用的 Embedding 模型。<button type="button" class="ml-1 font-semibold text-[var(--accent)]" @click="emit('openSettings')">前往设置</button></p>
+          </div>
           <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
         </div>
         <div class="mt-5 flex justify-end gap-2">
@@ -980,20 +1103,107 @@ function embeddingSourceSummary(item: KnowledgeBase) {
       </form>
     </div>
 
-    <div v-if="ingestOpen" class="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" @click.self="ingestOpen = false">
-      <form class="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl" @submit.prevent="runIngest">
-        <h3 class="text-lg font-bold">{{ t('knowledge.upload') }}</h3>
-        <p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.uploadHelp') }}</p>
-        <div class="mt-4 grid gap-3">
-          <label class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.docTitle') }}<input v-model="ingestTitle" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal text-[var(--text)]" /></label>
-          <label class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.file') }}<input type="file" class="text-sm font-normal" @change="onPickFile" /></label>
-          <p v-if="ingestFileName" class="text-[11px] text-[var(--muted)]">{{ ingestFileName }}</p>
-          <label class="grid gap-1 text-xs font-semibold text-[var(--muted)]">{{ t('knowledge.docContent') }}<textarea v-model="ingestContent" rows="12" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal text-[var(--text)]" :placeholder="selected?.provider === 'bailian' ? t('knowledge.bailianContentHint') : ''" /></label>
+    <div v-if="ingestOpen" class="fixed inset-0 z-40 grid place-items-center bg-slate-950/45 p-4 backdrop-blur-[2px]" @click.self="closeIngest">
+      <form class="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-3xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl" @submit.prevent="runIngest">
+        <header class="flex items-start justify-between gap-4 border-b border-[var(--border)] px-6 py-5">
+          <div class="flex min-w-0 items-start gap-3">
+            <span class="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-[var(--accent)]/10 text-xl text-[var(--accent)]">↥</span>
+            <div class="min-w-0">
+              <h3 class="text-lg font-bold text-[var(--text)]">{{ t('knowledge.upload') }}</h3>
+              <p class="mt-1 text-xs leading-relaxed text-[var(--muted)]">{{ t('knowledge.uploadHelp') }}</p>
+              <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-[var(--muted)]">
+                <span class="rounded-full bg-[var(--surface-muted)] px-2.5 py-1">{{ selected?.name }}</span>
+                <span v-if="selected && resolvedEmbeddingFor(selected)" class="rounded-full bg-[var(--surface-muted)] px-2.5 py-1">{{ resolvedEmbeddingFor(selected)?.providerLabel }} · {{ resolvedEmbeddingFor(selected)?.modelId }}</span>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-lg text-[var(--muted)] hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="ingestBusy" aria-label="关闭" @click="closeIngest">×</button>
+        </header>
+
+        <div class="px-6 py-5">
+          <div class="mb-5 overflow-hidden rounded-full bg-[var(--surface-muted)]">
+            <div class="h-1.5 rounded-full bg-[var(--accent)] transition-all duration-500" :class="ingestStage === 'processing' ? 'animate-pulse' : ''" :style="{ width: `${ingestProgress}%` }" />
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 text-center text-[11px]">
+            <div :class="ingestProgress >= 18 ? 'text-[var(--accent)]' : 'text-[var(--muted)]'"><span class="mx-auto mb-1 grid h-6 w-6 place-items-center rounded-full border border-current font-bold">1</span>{{ t('knowledge.ingestStepFile') }}</div>
+            <div :class="ingestProgress >= 76 ? 'text-[var(--accent)]' : 'text-[var(--muted)]'"><span class="mx-auto mb-1 grid h-6 w-6 place-items-center rounded-full border border-current font-bold">2</span>{{ t('knowledge.ingestStepProcess') }}</div>
+            <div :class="ingestProgress === 100 ? 'text-emerald-600' : 'text-[var(--muted)]'"><span class="mx-auto mb-1 grid h-6 w-6 place-items-center rounded-full border border-current font-bold">3</span>{{ t('knowledge.ingestStepDone') }}</div>
+          </div>
+
+          <div v-if="ingestStage !== 'success'" class="mt-5">
+            <div class="inline-flex rounded-xl bg-[var(--surface-muted)] p-1 text-xs font-semibold">
+              <button type="button" class="rounded-lg px-3 py-2 transition" :class="ingestMode === 'file' ? 'bg-[var(--surface)] text-[var(--accent)] shadow-sm' : 'text-[var(--muted)]'" :disabled="ingestBusy" @click="setIngestMode('file')">{{ t('knowledge.ingestModeFile') }}</button>
+              <button type="button" class="rounded-lg px-3 py-2 transition" :class="ingestMode === 'text' ? 'bg-[var(--surface)] text-[var(--accent)] shadow-sm' : 'text-[var(--muted)]'" :disabled="ingestBusy" @click="setIngestMode('text')">{{ t('knowledge.ingestModeText') }}</button>
+            </div>
+
+            <div class="mt-4 grid gap-4">
+              <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+                {{ t('knowledge.docTitle') }}
+                <input v-model="ingestTitle" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3.5 py-3 text-sm font-normal text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/10" :disabled="ingestBusy" />
+              </label>
+
+              <div v-if="ingestMode === 'file'" class="grid gap-3">
+                <input ref="ingestFileInput" type="file" :accept="selected?.provider === 'lancedb' ? '.txt,.md,.markdown,.csv,.json,.pdf,.docx' : undefined" class="hidden" @change="onPickFile" />
+                <button
+                  v-if="!ingestFileName"
+                  type="button"
+                  class="group grid min-h-40 place-items-center rounded-2xl border-2 border-dashed px-5 py-7 text-center transition"
+                  :class="ingestDragActive ? 'border-[var(--accent)] bg-[var(--accent)]/5' : 'border-[var(--border)] bg-[var(--surface-muted)]/35 hover:border-[var(--accent)] hover:bg-[var(--accent)]/5'"
+                  :disabled="ingestBusy"
+                  @click="ingestFileInput?.click()"
+                  @dragenter.prevent="ingestDragActive = true"
+                  @dragover.prevent="ingestDragActive = true"
+                  @dragleave.prevent="ingestDragActive = false"
+                  @drop.prevent="onDropFile"
+                >
+                  <span>
+                    <span class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[var(--accent)]/10 text-2xl text-[var(--accent)] transition group-hover:scale-105">＋</span>
+                    <strong class="mt-3 block text-sm text-[var(--text)]">{{ t('knowledge.ingestDropTitle') }}</strong>
+                    <span class="mt-1.5 block text-xs leading-relaxed text-[var(--muted)]">{{ selected?.provider === 'lancedb' ? t('knowledge.ingestLocalFormats') : t('knowledge.bailianContentHint') }}</span>
+                  </span>
+                </button>
+
+                <div v-else class="flex items-center gap-3 rounded-2xl border p-4" :class="ingestStage === 'error' ? 'border-rose-200 bg-rose-50/70 dark:border-rose-900 dark:bg-rose-950/20' : 'border-emerald-200 bg-emerald-50/70 dark:border-emerald-900 dark:bg-emerald-950/20'">
+                  <span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-lg font-bold" :class="ingestStage === 'error' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300'">{{ ingestStage === 'error' ? '!' : '✓' }}</span>
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate text-sm font-semibold text-[var(--text)]">{{ ingestFileName }}</p>
+                    <p class="mt-1 text-xs text-[var(--muted)]">{{ formatFileSize(ingestFileSize) }} · {{ ingestStage === 'reading' ? t('knowledge.ingestReading') : ingestStage === 'error' ? t('knowledge.ingestFailedTitle') : t('knowledge.ingestReady') }}</p>
+                  </div>
+                  <button type="button" class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold" :disabled="ingestBusy" @click="resetIngestFile">{{ t('knowledge.ingestReplace') }}</button>
+                </div>
+              </div>
+
+              <label v-else class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+                {{ t('knowledge.docContent') }}
+                <textarea v-model="ingestContent" rows="10" class="resize-y rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3.5 py-3 text-sm font-normal leading-relaxed text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/10" :disabled="ingestBusy" :placeholder="t('knowledge.ingestTextPlaceholder')" />
+                <span class="text-right font-normal">{{ ingestContent.length.toLocaleString() }} {{ t('knowledge.ingestChars') }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div v-if="ingestStage === 'processing'" class="mt-5 flex items-start gap-3 rounded-2xl border border-blue-200 bg-blue-50/70 p-4 text-blue-800 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-200" aria-live="polite">
+            <span class="mt-0.5 h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-current border-r-transparent" />
+            <div><p class="text-sm font-semibold">{{ t('knowledge.ingestProcessingTitle') }}</p><p class="mt-1 text-xs leading-relaxed opacity-80">{{ t('knowledge.ingestProcessingHelp') }}</p></div>
+          </div>
+          <div v-else-if="ingestStage === 'success'" class="mt-5 flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-5 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-emerald-200" aria-live="polite">
+            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-emerald-100 text-lg font-bold dark:bg-emerald-900/50">✓</span>
+            <div><p class="text-sm font-semibold">{{ t('knowledge.ingestSuccessTitle') }}</p><p class="mt-1 text-xs leading-relaxed opacity-85">{{ ingestResult }}</p></div>
+          </div>
+          <div v-else-if="ingestError" class="mt-5 rounded-2xl border border-rose-200 bg-rose-50/70 p-4 text-rose-800 dark:border-rose-900 dark:bg-rose-950/20 dark:text-rose-200" role="alert">
+            <p class="text-sm font-semibold">{{ t('knowledge.ingestFailedTitle') }}</p>
+            <p class="mt-1 break-words text-xs leading-relaxed">{{ ingestError }}</p>
+          </div>
         </div>
-        <div class="mt-5 flex justify-end gap-2">
-          <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="ingestOpen = false">{{ t('common.close') }}</button>
-          <button type="submit" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" :disabled="ingestBusy">{{ ingestBusy ? t('knowledge.indexing') : t('knowledge.index') }}</button>
-        </div>
+
+        <footer class="flex items-center justify-between gap-3 border-t border-[var(--border)] bg-[var(--surface-muted)]/30 px-6 py-4">
+          <p class="hidden text-[11px] text-[var(--muted)] sm:block">{{ t('knowledge.ingestPrivacy') }}</p>
+          <div class="ml-auto flex gap-2">
+            <button v-if="ingestStage !== 'success'" type="button" class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-xs font-semibold disabled:opacity-40" :disabled="ingestBusy" @click="closeIngest">{{ t('common.close') }}</button>
+            <button v-if="ingestStage !== 'success'" type="submit" class="rounded-xl bg-[var(--accent)] px-4 py-2.5 text-xs font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-45" :disabled="!ingestCanSubmit">{{ ingestBusy ? t('knowledge.indexing') : t('knowledge.index') }}</button>
+            <button v-else type="button" class="rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white" @click="closeIngest">{{ t('knowledge.ingestFinish') }}</button>
+          </div>
+        </footer>
       </form>
     </div>
   </section>

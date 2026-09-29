@@ -8,7 +8,7 @@
  * convention as services/api.ts.
  */
 
-import type { ChatImageAttachment } from '@workmate/contracts';
+import type { ChatFileAttachment, ChatImageAttachment } from '@workmate/contracts';
 
 const apiBase = () =>
   window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
@@ -56,6 +56,8 @@ export interface ServerRunActivity {
   toolName: string;
   summary: string;
   status: 'running' | 'completed' | 'failed';
+  startedAt?: number;
+  durationMs?: number;
   at: number;
 }
 
@@ -450,6 +452,7 @@ export async function resolveTaskApproval(input: {
 
 export interface ServerChatMessage {
   attachments?: ChatImageAttachment[];
+  fileAttachments?: ChatFileAttachment[];
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -511,8 +514,31 @@ export async function deleteChatSession(id: string): Promise<void> {
  * Send a chat message. `context` is optional: the server assembles the run
  * context for the session's employee (domain KV + keyring) when omitted.
  */
-export async function sendChatMessage(id: string, input: { content: string; attachments?: ChatImageAttachment[]; employeeId?: string; context?: Record<string, unknown> }): Promise<{ runId: string; turnId: string; attemptNo: number }> {
+export async function sendChatMessage(id: string, input: { content: string; attachments?: ChatImageAttachment[]; fileAttachments?: ChatFileAttachment[]; employeeId?: string; context?: Record<string, unknown> }): Promise<{ runId: string; turnId: string; attemptNo: number }> {
   return request(`/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function uploadChatFile(sessionId: string, file: File): Promise<{ attachment: ChatFileAttachment; warning?: string }> {
+  const response = await fetch(`${apiBase()}/api/orch/sessions/${encodeURIComponent(sessionId)}/files`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', 'x-workmate-file-name': encodeURIComponent(file.name) },
+    body: file,
+  });
+  const body = await response.json().catch(() => ({})) as { attachment?: ChatFileAttachment; warning?: string; message?: string };
+  if (!response.ok || !body.attachment) throw new Error(body.message || `附件上传失败：${response.status}`);
+  return { attachment: body.attachment, warning: body.warning };
+}
+
+export async function deleteChatFile(sessionId: string, fileId: string): Promise<void> {
+  await request(`/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+}
+
+export async function getChatAttachmentStats(): Promise<{ bytes: number; count: number; limitBytes: number; warning: boolean }> {
+  return request('/attachments/stats');
+}
+
+export async function cleanupChatAttachments(dryRun = false): Promise<{ count: number; bytes: number; dryRun: boolean }> {
+  return request('/attachments/cleanup', { method: 'POST', body: JSON.stringify({ dryRun }) });
 }
 
 export async function uploadChatImage(sessionId: string, file: File): Promise<ChatImageAttachment> {

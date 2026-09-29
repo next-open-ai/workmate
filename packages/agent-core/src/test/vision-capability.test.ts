@@ -8,7 +8,14 @@ import type { ModelCapabilityRuntime } from '@workmate/contracts';
 import { saveChatImage, assertVisionSupported } from '../image-input.js';
 import { createModelCapabilityToolSession } from '../model-capability-runtime.js';
 import { toPiHistoryMessages } from '../pi-runtime.js';
-import { effectiveVisionModelId, testVisionCapabilityDataUrl } from '../vision-capability.js';
+import { effectiveVisionModelId, formatVisionDuration, formatVisionInputSize, testVisionCapabilityDataUrl } from '../vision-capability.js';
+
+test('APPMODEL-TIME-T05 formats vision phase timing and input size for status updates', () => {
+  assert.equal(formatVisionDuration(8), '8 毫秒');
+  assert.equal(formatVisionDuration(1_250), '1.3 秒');
+  assert.equal(formatVisionDuration(64_187), '1 分 4 秒');
+  assert.equal(formatVisionInputSize(311_972), '305 KB');
+});
 
 test('VIS-M2-T5 normalizes dated Qwen vision snapshots only for MaaS deployment endpoints', () => {
   assert.equal(effectiveVisionModelId({ provider: 'qwen', baseUrl: 'https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', modelId: 'qwen3-vl-flash-2026-01-22' }), 'qwen3-vl-flash');
@@ -64,6 +71,9 @@ test('VIS-M2-T1 targeted vision uses trusted question, scoped images, cache and 
     assert.equal(payloads[0].max_tokens ?? payloads[0].max_completion_tokens, 2048);
     assert.ok(JSON.stringify(payloads[0]).includes(png));
     assert.ok(!JSON.stringify(result).includes(png));
+    assert.equal(typeof (result.output as any).timing.readDurationMs, 'number');
+    assert.equal(typeof (result.output as any).timing.modelDurationMs, 'number');
+    assert.equal(typeof (result.output as any).timing.totalDurationMs, 'number');
     assert.equal((await invoke({ focus: '检查地址和状态码' })).status, 'succeeded');
     assert.equal(payloads.length, 1);
     await invoke({ focus: '检查其他文字' }); assert.equal(payloads.length, 2);

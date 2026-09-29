@@ -47,6 +47,7 @@ export interface ChatScheduleState {
 }
 export interface Message {
   attachments?: import('@workmate/contracts').ChatImageAttachment[];
+  fileAttachments?: import('@workmate/contracts').ChatFileAttachment[];
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -367,6 +368,7 @@ export function useWorkspace() {
         const cancelledText = run?.status === 'cancelled' ? `⏹ ${run.error || '已中止'}` : '';
         const base: Message = {
           attachments: message.attachments,
+          fileAttachments: message.fileAttachments,
           id: message.id,
           role: message.role,
           content: message.content || liveText || failedText || cancelledText || old?.content || '',
@@ -617,6 +619,7 @@ export function useWorkspace() {
       const result = await orch.sendChatMessage(sessionId, {
         content: text,
         attachments: userMessage.attachments,
+        fileAttachments: userMessage.fileAttachments,
         employeeId: conversation.employeeId,
         context,
       });
@@ -1016,7 +1019,7 @@ export function useWorkspace() {
       void writeStored('workspace.default-employee', currentEmployeeId.value);
     }
   };
-  const addMessage = async (content: string, model: ProviderConfig, options: { attachments?: import('@workmate/contracts').ChatImageAttachment[]; employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
+  const addMessage = async (content: string, model: ProviderConfig, options: { attachments?: import('@workmate/contracts').ChatImageAttachment[]; fileAttachments?: import('@workmate/contracts').ChatFileAttachment[]; employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
     const text = content.trim(); if (!text) return undefined;
     const hasImages = Boolean(options.attachments?.length || activeConversation.value?.messages.some((message) => message.attachments?.length));
     if (hasImages && (options.autoSchedule || options.collaboratorIds?.length)) throw new Error('含图片的会话暂只支持单员工对话，请关闭自动调度并移除协作者。');
@@ -1033,7 +1036,7 @@ export function useWorkspace() {
       conversation = { id: crypto.randomUUID(), title: text.slice(0, 28), employeeId: currentEmployeeId.value, messages: [], updatedAt: Date.now() };
       conversations.value.unshift(conversation); activeConversationId.value = conversation.id;
     }
-    conversation.messages.push({ id: crypto.randomUUID(), role: 'user', content: text, attachments: options.attachments });
+    conversation.messages.push({ id: crypto.randomUUID(), role: 'user', content: text, attachments: options.attachments, fileAttachments: options.fileAttachments });
     const userMessage = conversation.messages[conversation.messages.length - 1];
     conversation.updatedAt = Date.now();
     conversations.value = [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt);

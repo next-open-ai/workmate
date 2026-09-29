@@ -75,6 +75,22 @@ test('buildSessionModelMessages injects summary pair + uncovered only', () => {
   );
 });
 
+test('ATT-TEST-3 adds bounded extracted attachment context only to model messages', () => {
+  const attachmentContext = '<attachment name="brief.md" kind="document">\n# Brief\nRevenue increased.\n</attachment>';
+  const session = sessionWith([{
+    id: 'file-turn', role: 'user', content: '请总结附件', createdAt: 1,
+    fileAttachments: [{
+      id: '00000000-0000-4000-8000-000000000001', name: 'brief.md', mimeType: 'text/markdown',
+      size: 32, kind: 'document', status: 'ready', summary: '已读取 32 个字符', createdAt: 1,
+    }],
+    attachmentContext,
+  }]);
+  const result = buildSessionModelMessages(session);
+  assert.match(result[0]?.content || '', /Revenue increased/);
+  assert.equal(session.messages[0]?.content, '请总结附件');
+  assert.equal(session.messages[0]?.fileAttachments?.[0]?.name, 'brief.md');
+});
+
 test('shouldRollSessionMemory respects budget and force window', () => {
   const short = [{ id: 'a', role: 'user' as const, content: 'hi', createdAt: 1 }];
   assert.equal(shouldRollSessionMemory({ summary: '', uncovered: short }), false);

@@ -24,6 +24,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@sinclair/typebox": "^0.34.41",
     "apache-arrow": "18.1.0",
+    "sql.js": "^1.14.2",
     "ws": "^8.18.0",
     "zod": "^3.24.4"
   },

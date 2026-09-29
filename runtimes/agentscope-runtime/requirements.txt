@@ -1,2 +1,4 @@
 agentscope>=1.0.0
 websockets>=12.0,<16
+markitdown[pdf,docx]>=0.1.3,<0.2
+docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3

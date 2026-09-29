@@ -12,7 +12,9 @@ export * from './context-sanitize.js';
 export * from './context-compaction.js';
 export * from './search-runtime.js';
 export * from './knowledge-runtime.js';
+export * from './document-parser.js';
 export * from './ontology-runtime.js';
+export * from './ontology-extraction.js';
 export * from './experience/index.js';
 export * from './pi-model.js';
 export * from './image-input.js';
@@ -84,7 +86,7 @@ export async function summarizeSessionMemory(input: {
 }): Promise<string | null> {
   return summarizeSessionMemoryImpl(input);
 }
-export { storeAudioInput } from './audio-input.js';
+export { storeAudioInput, deleteAudioInput } from './audio-input.js';
 export { createModelCapabilityTools } from './model-capability-runtime.js';
 export { testVisionCapabilityDataUrl } from './vision-capability.js';
 export { evaluateDecision, createDecisionAgentTool, guardAgentTools } from './decision-runtime.js';

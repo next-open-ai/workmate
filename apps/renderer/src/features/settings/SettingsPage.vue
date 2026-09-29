@@ -13,6 +13,7 @@ import LocalEmbeddingSettingsCard from './LocalEmbeddingSettingsCard.vue';
 import UsageStatsPanel from './UsageStatsPanel.vue';
 import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
+import PptxEnhancedSettingsCard from './PptxEnhancedSettingsCard.vue';
 import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse } from '../../services/api';
 import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
@@ -25,6 +26,7 @@ import {
   type AutoScheduleConfig,
 } from '../../app/auto-schedule-config';
 import { useNotify } from '../../app/notify';
+import { cleanupChatAttachments, getChatAttachmentStats } from '../../services/orchestration';
 
 const props = defineProps<{
   employees: Employee[];
@@ -84,6 +86,21 @@ const ENGINE_OPTIONS = [
   { id: 'dsh' as const, label: 'dsh（编码 Harness）' },
 ];
 const runtimeStatus = ref<RuntimeStatusResponse | null>(null);
+const attachmentStats = ref<{ bytes: number; count: number; limitBytes: number; warning: boolean } | null>(null);
+const attachmentCleanupBusy = ref(false);
+const attachmentCleanupPreview = ref('');
+function attachmentBytes(value: number) { return value < 1024 * 1024 ? `${Math.round(value / 1024)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`; }
+async function loadAttachmentStats() { attachmentStats.value = await getChatAttachmentStats().catch(() => null); }
+async function previewAttachmentCleanup() {
+  attachmentCleanupBusy.value = true;
+  try { const result = await cleanupChatAttachments(true); attachmentCleanupPreview.value = `可清理 ${result.count} 个过期附件，共 ${attachmentBytes(result.bytes)}`; }
+  finally { attachmentCleanupBusy.value = false; }
+}
+async function runAttachmentCleanup() {
+  attachmentCleanupBusy.value = true;
+  try { const result = await cleanupChatAttachments(false); attachmentCleanupPreview.value = `已清理 ${result.count} 个附件，释放 ${attachmentBytes(result.bytes)}`; await loadAttachmentStats(); }
+  finally { attachmentCleanupBusy.value = false; }
+}
 const runtimeStatusLoading = ref(false);
 const runtimeStatusAutoRefresh = ref(true);
 const runtimeStatusPending = ref(false);
@@ -126,6 +143,7 @@ onMounted(() => {
   void loadKnowledgeProviders();
   void loadRuntimeSettings();
   void loadRuntimeStatus();
+  void loadAttachmentStats();
   void (async () => {
     await loadAutoScheduleConfig();
     autoScheduleDraft.value = { ...autoScheduleStored.value };
@@ -730,6 +748,18 @@ function handleDefaultEmployeeChange(event: Event) {
           <option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employeeDisplayName(employee, t) }}</option>
         </select>
       </label>
+      <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 class="text-[16px] font-bold">对话临时附件</h3>
+            <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">附件默认仅属于对话，不会自动进入资产库或知识库。未发送文件保留 24 小时，已发送文件保留 30 天；删除对话时同步删除。</p>
+          </div>
+          <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-right"><strong class="block text-sm">{{ attachmentStats ? attachmentBytes(attachmentStats.bytes) : '—' }} / {{ attachmentStats ? attachmentBytes(attachmentStats.limitBytes) : '2 GB' }}</strong><small class="text-[10px] text-[var(--muted)]">{{ attachmentStats?.count ?? 0 }} 个附件</small></div>
+        </div>
+        <div class="mt-4 h-2 overflow-hidden rounded-full bg-[var(--surface)]"><div class="h-full rounded-full bg-[var(--accent)] transition-all" :style="{ width: `${Math.min(100, (attachmentStats?.bytes || 0) / (attachmentStats?.limitBytes || 1) * 100)}%` }" /></div>
+        <div class="mt-4 flex flex-wrap items-center gap-2"><button class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold" type="button" :disabled="attachmentCleanupBusy" @click="previewAttachmentCleanup">预览清理</button><button class="rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50" type="button" :disabled="attachmentCleanupBusy" @click="runAttachmentCleanup">清理过期附件</button><span class="text-xs text-[var(--muted)]">{{ attachmentCleanupPreview }}</span></div>
+      </div>
+      <PptxEnhancedSettingsCard :is-admin="isAdmin" />
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>

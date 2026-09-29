@@ -75,6 +75,9 @@ importers:
       fastify:
         specifier: ^5.3.0
         version: 5.12.1
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
       sql.js:
         specifier: ^1.14.2
         version: 1.14.2
@@ -126,6 +129,9 @@ importers:
       '@workmate/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      cytoscape:
+        specifier: 3.34.3
+        version: 3.34.3
       monaco-editor:
         specifier: ^0.52.2
         version: 0.52.2
@@ -187,6 +193,9 @@ importers:
       apache-arrow:
         specifier: 18.1.0
         version: 18.1.0
+      sql.js:
+        specifier: ^1.14.2
+        version: 1.14.2
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -1996,6 +2005,10 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
+
+  cytoscape@3.34.3:
+    resolution: {integrity: sha512-yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ==}
+    engines: {node: '>=0.10'}
 
   data-uri-to-buffer@4.0.1:
     resolution: {integrity: sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A==}
@@ -5794,6 +5807,8 @@ snapshots:
       which: 2.0.2
 
   csstype@3.2.3: {}
+
+  cytoscape@3.34.3: {}
 
   data-uri-to-buffer@4.0.1: {}
 

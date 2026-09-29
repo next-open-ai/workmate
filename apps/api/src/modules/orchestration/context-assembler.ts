@@ -394,9 +394,12 @@ async function mcpConnectionsFor(
   return out.slice(0, 12);
 }
 
-async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow): Promise<ChatRunContext['knowledgeBases']> {
+async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow, modelSettingsRaw: unknown): Promise<ChatRunContext['knowledgeBases']> {
   const provider = prefs.knowledgeProvider;
   if (!provider || provider === 'off') return [];
+  const modelSettings = (modelSettingsRaw && typeof modelSettingsRaw === 'object' ? modelSettingsRaw : {}) as ModelSettings;
+  const configuredModels = Array.isArray(modelSettings.models) ? modelSettings.models : [];
+  const providerInstances = Array.isArray(modelSettings.providerInstances) ? modelSettings.providerInstances : [];
   const bases = rows(await kvJson(store, KB_BASES_KEY)) as Array<Record<string, unknown>>;
   const providersRaw = rows(await kvJson(store, KB_PROVIDERS_KEY)) as Array<Record<string, unknown>>;
   const wanted = new Set(prefs.knowledgeBaseIds ?? []);
@@ -407,6 +410,17 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow): Promise
     if (wanted.size > 0 && !wanted.has(id)) continue;
     const providerRow = providersRaw.find((item) => String(item.id ?? '') === provider || String(item.provider ?? '') === provider);
     const apiKey = raw.apiKey ? String(raw.apiKey) : providerRow?.apiKey ? String(providerRow.apiKey) : undefined;
+    const embeddingConfigId = raw.embeddingMode === 'model'
+      ? String(raw.embeddingModelConfigId || '')
+      : raw.embeddingMode === 'system'
+        ? String(modelSettings.activeEmbeddingModelId || '')
+        : '';
+    const embeddingModel = embeddingConfigId
+      ? configuredModels.find((item) => item.id === embeddingConfigId && item.capability === 'embedding')
+      : undefined;
+    const embeddingProvider = embeddingModel
+      ? providerInstances.find((item) => item.id === embeddingModel.providerInstanceId)
+      : undefined;
     out.push({
       id,
       name: String(raw.name ?? id),
@@ -417,11 +431,13 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow): Promise
       ...(raw.baseUrl ? { baseUrl: String(raw.baseUrl) } : {}),
       ...(apiKey ? { apiKey } : {}),
       ...(raw.externalId ? { externalId: String(raw.externalId) } : {}),
-      ...(raw.embeddingBaseUrl ? { embeddingBaseUrl: String(raw.embeddingBaseUrl) } : {}),
-      ...(raw.embeddingApiKey ? { embeddingApiKey: String(raw.embeddingApiKey) } : {}),
-      ...(raw.embeddingModel ? { embeddingModel: String(raw.embeddingModel) } : {}),
-      ...(raw.embeddingMeta && typeof raw.embeddingMeta === 'object'
-        ? { embeddingMeta: raw.embeddingMeta as ChatRunContext['knowledgeBases'][number]['embeddingMeta'] }
+      ...((embeddingProvider?.baseUrl || raw.embeddingBaseUrl) ? { embeddingBaseUrl: String(embeddingProvider?.baseUrl || raw.embeddingBaseUrl) } : {}),
+      ...((embeddingProvider?.apiKey || raw.embeddingApiKey || embeddingProvider?.type === 'ollama') ? { embeddingApiKey: String(embeddingProvider?.apiKey || raw.embeddingApiKey || 'ollama') } : {}),
+      ...((embeddingModel?.modelId || raw.embeddingModel) ? { embeddingModel: String(embeddingModel?.modelId || raw.embeddingModel) } : {}),
+      ...(raw.embeddingMode === 'system' || raw.embeddingMode === 'model' ? { embeddingMode: raw.embeddingMode } : {}),
+      ...(raw.embeddingModelConfigId ? { embeddingModelConfigId: String(raw.embeddingModelConfigId) } : {}),
+      ...((embeddingModel?.meta || raw.embeddingMeta) && typeof (embeddingModel?.meta || raw.embeddingMeta) === 'object'
+        ? { embeddingMeta: (embeddingModel?.meta || raw.embeddingMeta) as ChatRunContext['knowledgeBases'][number]['embeddingMeta'] }
         : {}),
       ...(raw.indexState && typeof raw.indexState === 'object'
         ? { indexState: raw.indexState as ChatRunContext['knowledgeBases'][number]['indexState'] }
@@ -484,7 +500,7 @@ export async function resolveTaskContext(
     skills: await skillRuntimeFor(store, task, tier),
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
     mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
-    knowledgeBases: await knowledgeBasesFor(store, prefs),
+    knowledgeBases: await knowledgeBasesFor(store, prefs, secrets.model),
     modelCapabilities: modelCapabilitiesFor(task.employeeId, secrets.model, prefs.useApplicationModels !== false),
     ...(decisionRuntimeFor(secrets.model) ? { decisionRuntime: decisionRuntimeFor(secrets.model) } : {}),
     maxSteps,

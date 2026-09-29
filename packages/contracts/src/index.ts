@@ -262,6 +262,12 @@ export function resolveProviderBaseUrl(input: { provider: string; baseUrl: strin
   url.hostname = `${workspaceId}.${region}.maas.aliyuncs.com`;
   return url.toString().replace(/\/$/, '');
 }
+export const DEFAULT_EMBEDDING_META = Object.freeze({
+  dimension: 1024,
+  normalize: true,
+  maxBatch: 32,
+  maxInputChars: 8000,
+});
 export const EmbeddingMetaSchema = z.object({
   dimension: z.number().int().positive().max(65_536).optional(),
   normalize: z.boolean().optional(),
@@ -378,18 +384,25 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   embeddingBaseUrl: z.string().url().optional(),
   embeddingApiKey: z.string().optional(),
   embeddingModel: z.string().max(120).optional(),
+  /** How this knowledge base resolves its embedding model. Legacy records omit this field. */
+  embeddingMode: z.enum(['system', 'model']).optional(),
+  /** Configured embedding model id when embeddingMode=model. */
+  embeddingModelConfigId: z.string().max(240).optional(),
   embeddingMeta: EmbeddingMetaSchema.optional(),
   indexState: KnowledgeIndexStateSchema.optional(),
 });
 export type KnowledgeBaseRuntime = z.infer<typeof KnowledgeBaseRuntimeSchema>;
 
+/** Allows an 8 MB source file after Base64 expansion, plus a small safety margin. */
+export const MAX_KNOWLEDGE_FILE_BASE64_CHARS = 12_000_000;
+
 export const KnowledgeIngestRequestSchema = z.object({
   knowledgeBase: KnowledgeBaseRuntimeSchema,
   title: z.string().min(1).max(240),
-  /** Plain-text content (LanceDB). Optional when fileBase64 is provided for Bailian. */
+  /** Plain-text content. Optional when a supported binary document is provided. */
   content: z.string().max(200_000).optional(),
-  /** Base64-encoded file bytes for Bailian lease upload. */
-  fileBase64: z.string().max(8_000_000).optional(),
+  /** Base64-encoded PDF/DOCX bytes for local parsing, or document bytes for Bailian upload. */
+  fileBase64: z.string().max(MAX_KNOWLEDGE_FILE_BASE64_CHARS).optional(),
   fileName: z.string().max(240).optional(),
   source: z.string().max(500).optional(),
   model: ModelConfigSchema.optional(),
@@ -478,6 +491,12 @@ export type OntologyWorkflow = z.infer<typeof OntologyWorkflowSchema>;
 export const OntologyWorkflowRequestSchema = z.object({ knowledgeBase: KnowledgeBaseRuntimeSchema });
 export const OntologyDraftSaveRequestSchema = OntologyWorkflowRequestSchema.extend({ graph: OntologyGraphSchema });
 export const OntologyCandidateImportRequestSchema = OntologyWorkflowRequestSchema.extend({ candidates: z.array(OntologyCandidateSchema).min(1).max(1000) });
+export const OntologyExtractRequestSchema = OntologyWorkflowRequestSchema.extend({
+  documentIds: z.array(z.string().min(1).max(240)).min(1).max(20),
+  instructions: z.string().max(2000).optional(),
+  model: ModelConfigSchema,
+});
+export type OntologyExtractRequest = z.infer<typeof OntologyExtractRequestSchema>;
 export const OntologyReviewRequestSchema = OntologyWorkflowRequestSchema.extend({
   candidateIds: z.array(z.string().min(1)).min(1).max(1000),
   decision: z.enum(['accepted', 'rejected']),
@@ -538,6 +557,18 @@ export const ChatImageAttachmentSchema = z.object({
 });
 export type ChatImageAttachment = z.infer<typeof ChatImageAttachmentSchema>;
 export const ChatImagesSchema = z.array(ChatImageAttachmentSchema).max(4);
+export const ChatFileAttachmentSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(180),
+  mimeType: z.string().min(1).max(120),
+  size: z.number().int().positive().max(25 * 1024 * 1024),
+  kind: z.enum(['document', 'spreadsheet', 'audio']),
+  status: z.enum(['ready', 'degraded']).default('ready'),
+  summary: z.string().max(500).optional(),
+  createdAt: z.number().int().positive(),
+});
+export type ChatFileAttachment = z.infer<typeof ChatFileAttachmentSchema>;
+export const ChatFilesSchema = z.array(ChatFileAttachmentSchema).max(10);
 export const ChatModelMessageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.string().min(1),

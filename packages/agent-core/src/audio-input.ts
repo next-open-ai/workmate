@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, realpath, stat } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, realpath, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -33,4 +33,10 @@ export async function materializeAudioInput(reference: string, workspaceRoot: st
   const relative = `asr-input-${randomUUID()}${path.extname(id)}`;
   await writeFile(path.join(workspaceRoot, relative), await readFile(source), { mode: 0o600, flag: 'wx' });
   return relative;
+}
+
+export async function deleteAudioInput(reference: string) {
+  const id = reference.slice('audio-upload:'.length);
+  if (!reference.startsWith('audio-upload:') || !/^[a-f0-9-]{36}\.[a-z0-9]+$/.test(id)) return;
+  await rm(path.join(inputRoot(), id), { force: true });
 }

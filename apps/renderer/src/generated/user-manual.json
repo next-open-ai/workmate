@@ -1,0 +1,486 @@
+{
+  "source": "docs/guides/user-manual.md",
+  "headings": [
+    {
+      "level": 1,
+      "text": "Workmate 用户手册",
+      "id": "Workmate 用户手册"
+    },
+    {
+      "level": 2,
+      "text": "一、简介",
+      "id": "intro"
+    },
+    {
+      "level": 2,
+      "text": "二、安装与启动",
+      "id": "install"
+    },
+    {
+      "level": 3,
+      "text": "2.1 环境要求",
+      "id": "2.1 环境要求"
+    },
+    {
+      "level": 3,
+      "text": "2.2 三种使用方式",
+      "id": "2.2 三种使用方式"
+    },
+    {
+      "level": 3,
+      "text": "2.3 首次启动后的建议顺序",
+      "id": "2.3 首次启动后的建议顺序"
+    },
+    {
+      "level": 2,
+      "text": "三、登录与首次初始化",
+      "id": "login"
+    },
+    {
+      "level": 2,
+      "text": "四、模型配置",
+      "id": "model-config"
+    },
+    {
+      "level": 3,
+      "text": "4.1 配置 Provider（服务商）",
+      "id": "4.1 配置 Provider（服务商）"
+    },
+    {
+      "level": 4,
+      "text": "4.1.1 推荐：使用“自动配置”准备完整模型能力",
+      "id": "4.1.1 推荐：使用“自动配置”准备完整模型能力"
+    },
+    {
+      "level": 4,
+      "text": "4.1.2 API Key 申请入口与特殊配置",
+      "id": "4.1.2 API Key 申请入口与特殊配置"
+    },
+    {
+      "level": 3,
+      "text": "4.2 添加模型",
+      "id": "4.2 添加模型"
+    },
+    {
+      "level": 3,
+      "text": "4.3 测试模型与健康状态",
+      "id": "4.3 测试模型与健康状态"
+    },
+    {
+      "level": 3,
+      "text": "4.4 设置默认模型与应用模型绑定",
+      "id": "4.4 设置默认模型与应用模型绑定"
+    },
+    {
+      "level": 3,
+      "text": "4.5 决策模型与工具守卫",
+      "id": "4.5 决策模型与工具守卫"
+    },
+    {
+      "level": 3,
+      "text": "4.6 常用服务商参考",
+      "id": "4.6 常用服务商参考"
+    },
+    {
+      "level": 2,
+      "text": "五、对话工作台",
+      "id": "chat"
+    },
+    {
+      "level": 3,
+      "text": "5.1 新建对话",
+      "id": "5.1 新建对话"
+    },
+    {
+      "level": 3,
+      "text": "5.2 对话能力",
+      "id": "5.2 对话能力"
+    },
+    {
+      "level": 3,
+      "text": "5.3 会话管理",
+      "id": "5.3 会话管理"
+    },
+    {
+      "level": 3,
+      "text": "5.4 工具审批",
+      "id": "5.4 工具审批"
+    },
+    {
+      "level": 2,
+      "text": "六、数字员工",
+      "id": "employees"
+    },
+    {
+      "level": 3,
+      "text": "6.1 创建员工",
+      "id": "6.1 创建员工"
+    },
+    {
+      "level": 3,
+      "text": "6.2 编辑与维护",
+      "id": "6.2 编辑与维护"
+    },
+    {
+      "level": 3,
+      "text": "6.3 权限档位说明",
+      "id": "6.3 权限档位说明"
+    },
+    {
+      "level": 2,
+      "text": "七、技能与连接",
+      "id": "capabilities"
+    },
+    {
+      "level": 3,
+      "text": "7.1 技能目录与安装",
+      "id": "7.1 技能目录与安装"
+    },
+    {
+      "level": 3,
+      "text": "7.2 智能创建与修改技能",
+      "id": "7.2 智能创建与修改技能"
+    },
+    {
+      "level": 3,
+      "text": "7.3 MCP 连接器",
+      "id": "7.3 MCP 连接器"
+    },
+    {
+      "level": 3,
+      "text": "7.4 知识库（入口）",
+      "id": "7.4 知识库（入口）"
+    },
+    {
+      "level": 2,
+      "text": "八、知识库",
+      "id": "knowledge"
+    },
+    {
+      "level": 3,
+      "text": "8.1 创建知识库",
+      "id": "8.1 创建知识库"
+    },
+    {
+      "level": 3,
+      "text": "8.2 导入文档",
+      "id": "8.2 导入文档"
+    },
+    {
+      "level": 3,
+      "text": "8.3 检索与问答",
+      "id": "8.3 检索与问答"
+    },
+    {
+      "level": 2,
+      "text": "九、资产库",
+      "id": "assets"
+    },
+    {
+      "level": 3,
+      "text": "9.1 查看与管理",
+      "id": "9.1 查看与管理"
+    },
+    {
+      "level": 3,
+      "text": "9.2 部署与链接",
+      "id": "9.2 部署与链接"
+    },
+    {
+      "level": 2,
+      "text": "十、数据工作台",
+      "id": "data"
+    },
+    {
+      "level": 3,
+      "text": "10.1 接入数据源",
+      "id": "10.1 接入数据源"
+    },
+    {
+      "level": 3,
+      "text": "10.2 生成数据应用",
+      "id": "10.2 生成数据应用"
+    },
+    {
+      "level": 2,
+      "text": "十一、自动化",
+      "id": "automations"
+    },
+    {
+      "level": 3,
+      "text": "11.1 创建自动化",
+      "id": "11.1 创建自动化"
+    },
+    {
+      "level": 3,
+      "text": "11.2 调度与运行",
+      "id": "11.2 调度与运行"
+    },
+    {
+      "level": 3,
+      "text": "11.3 注意事项",
+      "id": "11.3 注意事项"
+    },
+    {
+      "level": 2,
+      "text": "十二、项目",
+      "id": "projects"
+    },
+    {
+      "level": 3,
+      "text": "12.1 创建项目",
+      "id": "12.1 创建项目"
+    },
+    {
+      "level": 3,
+      "text": "12.2 确认与执行",
+      "id": "12.2 确认与执行"
+    },
+    {
+      "level": 3,
+      "text": "12.3 复用资产",
+      "id": "12.3 复用资产"
+    },
+    {
+      "level": 2,
+      "text": "十三、远程办公",
+      "id": "remote"
+    },
+    {
+      "level": 3,
+      "text": "13.1 配置通道",
+      "id": "13.1 配置通道"
+    },
+    {
+      "level": 3,
+      "text": "13.2 使用方式",
+      "id": "13.2 使用方式"
+    },
+    {
+      "level": 3,
+      "text": "13.3 安全建议",
+      "id": "13.3 安全建议"
+    },
+    {
+      "level": 2,
+      "text": "十四、环境检查与 dsh",
+      "id": "env-check"
+    },
+    {
+      "level": 3,
+      "text": "14.1 常见检查项",
+      "id": "14.1 常见检查项"
+    },
+    {
+      "level": 3,
+      "text": "14.2 修复流程",
+      "id": "14.2 修复流程"
+    },
+    {
+      "level": 3,
+      "text": "14.3 安装 dsh",
+      "id": "14.3 安装 dsh"
+    },
+    {
+      "level": 2,
+      "text": "十五、设置",
+      "id": "settings"
+    },
+    {
+      "level": 3,
+      "text": "15.1 标签页速览",
+      "id": "15.1 标签页速览"
+    },
+    {
+      "level": 3,
+      "text": "15.2 常用操作",
+      "id": "15.2 常用操作"
+    },
+    {
+      "level": 2,
+      "text": "十六、常见问题",
+      "id": "faq"
+    }
+  ],
+  "sections": [
+    {
+      "id": "manual-overview",
+      "title": "手册说明",
+      "headingIds": [
+        "Workmate 用户手册"
+      ],
+      "html": "<h1 class=\"manual-h1\" id=\"Workmate 用户手册\">Workmate 用户手册</h1><blockquote class=\"manual-blockquote\"><p>本文档是 Workmate 的官方用户手册，可在应用内「左侧边栏 → 用户手册」随时打开查看。</p><p>若文档与界面不一致，以你当前安装的版本为准；遇到问题也可参考文末的「常见问题」。</p><p></p><p>本手册已同步当前版本的应用模型、模型测试、决策守卫、多媒体资产预览、手机传文件和紧凑账户入口。</p></blockquote><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "intro",
+      "title": "一、简介",
+      "headingIds": [
+        "intro"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"intro\">一、简介</h2><p class=\"manual-p\">Workmate 是一个<strong>本地优先</strong>的「数字员工」AI 工作台。你可以把不同的 <strong>AI 数字员工</strong> 当作团队里的同事来使用：与它们对话、把任务交给它们执行，让它们调用 <strong>技能（Skills）</strong>、检索 <strong>知识库</strong>、访问 <strong>MCP 连接</strong>、使用 <strong>联网搜索</strong>，并管理运行产生的 <strong>资产</strong> 与 <strong>自动化</strong> 任务。</p><p class=\"manual-p\">整套产品由几部分组成：</p><div class=\"manual-table-wrap\"><table class=\"manual-table\"><thead><tr><th>部分</th><th>作用</th></tr></thead><tbody><tr><td>桌面应用（Electron）</td><td>主界面：对话、员工、项目、设置等所有操作入口</td></tr><tr><td>本地 API 服务</td><td>本地运行的任务编排与状态管理</td></tr><tr><td>通道网关</td><td>让外部 IM（Telegram / 飞书）与远程终端可以调度你的员工</td></tr><tr><td>模型服务</td><td>DeepSeek、OpenAI、通义千问、GLM 等云端模型，或本机 Ollama</td></tr></tbody></table></div><blockquote class=\"manual-blockquote\"><p>💡 <strong>记住一个核心流程</strong>：先配置模型（Provider + 模型），再与数字员工对话。启动时如果检测到模型未配置，应用会自动弹出指引，点击「去配置」即可直达设置页。</p></blockquote><p class=\"manual-p\">下图是应用内「用户手册」的阅读界面（左侧目录 + 右侧正文）：</p><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-1-overview.png\" alt=\"手册阅读界面总览\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "install",
+      "title": "二、安装与启动",
+      "headingIds": [
+        "install",
+        "2.1 环境要求",
+        "2.2 三种使用方式",
+        "2.3 首次启动后的建议顺序"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"install\">二、安装与启动</h2><h3 class=\"manual-h3\" id=\"2.1 环境要求\">2.1 环境要求</h3><ul class=\"manual-ul\"><li>操作系统：macOS / Windows / Linux</li><li>Node.js ≥ 22（源码方式运行时）</li><li>Python ≥ 3.10（可选，使用 AgentScope Sidecar 执行引擎时）</li><li>Docker（可选，容器化部署时）</li></ul><h3 class=\"manual-h3\" id=\"2.2 三种使用方式\">2.2 三种使用方式</h3><p class=\"manual-p\"><strong>方式一：桌面安装包（推荐）</strong></p><p class=\"manual-p\">从发布页下载对应平台的安装包并安装。macOS 安装包目前未签名，如果系统阻止启动，请在终端执行：</p><pre class=\"manual-pre\"><code>xattr -cr &quot;/Applications/Workmate.app&quot;</code></pre><p class=\"manual-p\">如果应用尚未拖入 <code class=\"manual-code\">Applications</code>，也可对下载目录中的 <code class=\"manual-code\">.app</code> 执行同样的命令后再打开。</p><p class=\"manual-p\"><strong>方式二：npm / CLI（Web Launcher）</strong></p><pre class=\"manual-pre\"><code>npm install -g @next-open-ai/workmate\nworkmate doctor   # 检查本地环境\nworkmate init     # 初始化配置\nworkmate start    # 启动 Web 版</code></pre><p class=\"manual-p\"><strong>方式三：源码开发</strong></p><pre class=\"manual-pre\"><code>pnpm install\npnpm dev          # 构建 workspace 包，再拉起 Vite + Electron</code></pre><p class=\"manual-p\">源码开发默认使用以下本地端口：</p><ul class=\"manual-ul\"><li>界面：<code class=\"manual-code\">127.0.0.1:47831</code></li><li>API：<code class=\"manual-code\">127.0.0.1:47832</code></li></ul><p class=\"manual-p\">如果通过环境变量覆盖 API 端口，桌面进程、Gateway、反向代理和防火墙规则也应使用同一端口。</p><h3 class=\"manual-h3\" id=\"2.3 首次启动后的建议顺序\">2.3 首次启动后的建议顺序</h3><ol class=\"manual-ol\"><li>完成登录或初始化本地管理员（见 <a class=\"manual-a\" href=\"#login\">登录与首次初始化</a>）。</li><li>配置模型服务商与对话模型（见 <a class=\"manual-a\" href=\"#model-config\">模型配置</a>）。</li><li>运行一次环境检查，按提示补齐缺失项（见 <a class=\"manual-a\" href=\"#env-check\">环境检查与 dsh</a>）。</li><li>开始与数字员工对话（见 <a class=\"manual-a\" href=\"#chat\">对话工作台</a>）。</li></ol><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "login",
+      "title": "三、登录与首次初始化",
+      "headingIds": [
+        "login"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"login\">三、登录与首次初始化</h2><p class=\"manual-p\">Workmate 使用本地账号体系。首次启动时：</p><ol class=\"manual-ol\"><li>打开应用，进入登录页。</li><li>如果是<strong>第一次使用</strong>，页面会显示「初始化本地管理员」：填写组织标识（orgId）、管理员用户名、显示名与密码，点击「初始化完成」。</li><li>之后每次启动只需输入用户名与密码登录。</li></ol><blockquote class=\"manual-blockquote\"><p>管理员可以在「设置 → 用户管理」中新增、编辑或停用其他本地用户，并分配 <code class=\"manual-code\">admin</code> / <code class=\"manual-code\">member</code> 角色。</p></blockquote><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "model-config",
+      "title": "四、模型配置",
+      "headingIds": [
+        "model-config",
+        "4.1 配置 Provider（服务商）",
+        "4.1.1 推荐：使用“自动配置”准备完整模型能力",
+        "4.1.2 API Key 申请入口与特殊配置",
+        "4.2 添加模型",
+        "4.3 测试模型与健康状态",
+        "4.4 设置默认模型与应用模型绑定",
+        "4.5 决策模型与工具守卫",
+        "4.6 常用服务商参考"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"model-config\">四、模型配置</h2><blockquote class=\"manual-blockquote\"><p>模型配置是使用 Workmate 的<strong>前置条件</strong>。缺少服务商或模型时，启动会弹出引导提示；你也可以随时在「设置 → Provider / 模型」中修改。</p></blockquote><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-2-model-config.png\" alt=\"模型配置章节\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><p class=\"manual-p\">*启动引导弹窗中的「📖 查看手册：模型配置」会直接打开手册并定位到本章节。*</p><h3 class=\"manual-h3\" id=\"4.1 配置 Provider（服务商）\">4.1 配置 Provider（服务商）</h3><ol class=\"manual-ol\"><li>打开左侧「设置」，进入 <strong>Provider</strong> 标签页。</li><li>点击「新增服务商」，选择类型并填写：<ul class=\"manual-ul\"><li><strong>服务商类型</strong>：共支持 10 种——OpenAI、Anthropic（Claude）、Google（Gemini）、DeepSeek、GLM（智谱）、通义千问（Qwen）、火山引擎、科大讯飞、Ollama（本机，无需 API Key）、OpenAI 兼容（任意兼容接口，适合企业网关或自建代理）。</li><li><strong>API Key</strong>：云端服务需要填入你从服务商官网申请的密钥；Ollama 不需要。</li><li><strong>Base URL</strong>：一般保持默认；使用代理或兼容接口时按需修改。</li></ul></li><li>点击「测试连通」，看到成功提示后再保存。就绪的服务商显示绿色「已就绪」标签，缺少必填项则显示黄色「待完善」。新增连接时可使用 <strong>Provider 自动配置</strong>，按照内置推荐补齐常用模型和缺失的能力绑定；已有手工配置不会被覆盖。</li><li>保存后仍可随时点「编辑」修改：切换供应商类型时，默认地址与必填项会自动联动；展开编辑面板还可勾选「禁用思考模式」（对部分推理模型生效，可减少思考过程输出）。</li></ol><blockquote class=\"manual-blockquote\"><p>删除某个 Provider 时，与之关联的已配置模型会在保存时一并清理，请谨慎操作。</p></blockquote><h4 class=\"manual-h4\" id=\"4.1.1 推荐：使用“自动配置”准备完整模型能力\">4.1.1 推荐：使用“自动配置”准备完整模型能力</h4><blockquote class=\"manual-blockquote\"><p><strong>推荐优先使用自动配置。</strong> 只保存 Provider 并不代表图片理解、生图、Embedding、语音识别等能力已经可用。“自动配置”会按服务商的可靠预设登记常用模型、补齐缺失的能力绑定，并让当前默认数字员工可以按需调用这些能力，可显著减少漏配和模型类型选错的问题。</p></blockquote><p class=\"manual-p\">有两种使用方式：</p><ol class=\"manual-ol\"><li><strong>新增 Provider 时自动配置</strong>：在“新增服务商”窗口保持“添加后自动采用推荐配置”勾选，保存连接后立即生成推荐配置。</li><li><strong>为已有 Provider 自动配置</strong>：在 Provider 卡片右上角点击“自动配置”。适合以前只配置了对话模型、后来需要补齐图片、向量或语音能力的连接。</li></ol><p class=\"manual-p\">自动配置会执行以下操作：</p><ul class=\"manual-ul\"><li>根据 Provider 类型创建项目内置且经过适配的推荐模型，例如主对话、图片理解、生图、Embedding、ASR 和 TTS。</li><li>在没有默认对话模型或默认向量模型时，设置合理的默认项。</li><li>补齐尚未设置的应用模型能力绑定，并为当前默认数字员工设置“按需使用”。</li><li><strong>保留已有模型和人工选择</strong>：已有默认模型或能力绑定不会被自动替换，再次执行也不会重复创建相同配置。</li><li>不会发起付费推理、不会上传业务数据；真正调用模型前仍可逐项修改。</li></ul><p class=\"manual-p\">完成后页面会显示新增模型数量和已配置的能力。接下来进入“模型”标签页，对准备使用的模型逐项点击“测试”，确认 API Key、额度、地域和模型权限均正常。自动配置生成的是推荐配置，不能替代服务商侧的开通和授权。</p><blockquote class=\"manual-blockquote\"><p>OpenAI 兼容连接没有统一、可信的模型目录，Workmate 不会猜测模型 ID。这类 Provider 会引导你进入“模型”页手工添加上游实际提供的模型。</p></blockquote><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-provider-auto-config.png\" alt=\"Provider 自动配置模型操作说明\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><p class=\"manual-p\">*自动配置的推荐流程：连接信息完整 → 点击自动配置 → 检查生成能力 → 到模型页完成首次测试。图中不包含真实密钥或业务数据。*</p><h4 class=\"manual-h4\" id=\"4.1.2 API Key 申请入口与特殊配置\">4.1.2 API Key 申请入口与特殊配置</h4><p class=\"manual-p\">下面的链接均指向服务商官方控制台或官方说明页。申请密钥前通常需要登录、完成服务开通，并按服务商要求配置付费方式或可用额度。密钥创建后一般只完整显示一次，请立即妥善保存；不要把密钥粘贴到聊天内容、截图、代码仓库或公开日志中。</p><div class=\"manual-table-wrap\"><table class=\"manual-table\"><thead><tr><th>Provider</th><th>官方申请或配置入口</th><th>Workmate 中需要填写</th><th>特殊要求与常见问题</th></tr></thead><tbody><tr><td>OpenAI</td><td><a class=\"manual-a\" href=\"https://platform.openai.com/api-keys\">创建和管理 API Key</a></td><td>API Key；Base URL 通常保持默认</td><td>API 平台与 ChatGPT 订阅分开计费。团队环境建议创建 Project Key，并确认项目有可用额度及目标模型权限。不要填写权限更高的 Admin Key。</td></tr><tr><td>Anthropic（Claude）</td><td><a class=\"manual-a\" href=\"https://console.anthropic.com/settings/keys\">Anthropic Console：API Keys</a></td><td>API Key；Base URL 通常保持默认</td><td>需要在 Console 中为工作区开通 API 使用与计费。组织成员若无法创建密钥，需要管理员授予相应权限。</td></tr><tr><td>Google（Gemini）</td><td><a class=\"manual-a\" href=\"https://aistudio.google.com/api-keys\">Google AI Studio：API Keys</a>；<a class=\"manual-a\" href=\"https://ai.google.dev/gemini-api/docs/api-key\">官方密钥说明</a></td><td>API Key；Base URL 通常保持默认</td><td>密钥绑定 Google Cloud 项目。组织账号可能需要管理员开放 AI Studio，并授予创建密钥、启用 Gemini API 等 IAM 权限；同时确认所在地区受支持。</td></tr><tr><td>DeepSeek</td><td><a class=\"manual-a\" href=\"https://platform.deepseek.com/api_keys\">DeepSeek 开放平台：API Keys</a></td><td>API Key；Base URL 通常保持默认</td><td>登录开放平台、充值或取得可用额度后创建密钥。网页聊天会员权益不等同于 API 额度。</td></tr><tr><td>GLM（智谱）</td><td><a class=\"manual-a\" href=\"https://open.bigmodel.cn/usercenter/apikeys\">智谱开放平台：API Key</a></td><td>API Key；Base URL 通常保持默认</td><td>普通模型调用使用开放平台 API Key；“编程套餐”等专项 Key 可能使用独立额度与端点，不要混用。</td></tr><tr><td>通义千问（Qwen）</td><td><a class=\"manual-a\" href=\"https://bailian.console.aliyun.com/?tab=model#/api-key\">阿里云百炼：API Key</a>；<a class=\"manual-a\" href=\"https://help.aliyun.com/zh/model-studio/get-api-key\">官方获取说明</a>；<a class=\"manual-a\" href=\"https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id\">Workspace ID 获取说明</a></td><td>API Key；按需填写 Workspace ID；Base URL 必须与地域一致</td><td>API Key、模型和 Base URL 都有地域属性，不能跨地域混用。使用子业务空间、知识库、调优模型或要求工作空间专属域名的能力时填写 Workspace ID；可在百炼控制台右上角的业务空间信息中复制。RAM 用户还需被加入目标业务空间并获得相应模型/API 权限。</td></tr><tr><td>火山引擎</td><td><a class=\"manual-a\" href=\"https://console.volcengine.com/ark/apiKey\">火山方舟：API Key 管理</a>；<a class=\"manual-a\" href=\"https://console.volcengine.com/\">火山引擎控制台</a></td><td>当前主要用于语音能力：API Key、App ID；按模型要求配置端点</td><td>先开通对应语音或方舟服务，再从目标应用/项目复制凭证。不同语音产品的 App ID、鉴权方式和可用地域可能不同，应使用与所选模型同一产品下的凭证。</td></tr><tr><td>科大讯飞</td><td><a class=\"manual-a\" href=\"https://console.xfyun.cn/\">讯飞开放平台控制台</a></td><td>当前主要用于语音能力：API Key、API Secret、App ID</td><td>先在控制台创建应用并开通所需的语音识别或语音合成服务，然后从该应用的接口认证信息中复制三项凭证；不同应用或服务的凭证不能随意混用。</td></tr><tr><td>Ollama</td><td><a class=\"manual-a\" href=\"https://ollama.com/download\">Ollama 下载</a>；<a class=\"manual-a\" href=\"https://ollama.com/search\">模型库</a></td><td>不需要 API Key；默认 Base URL 为本机 Ollama 地址</td><td>先安装并启动 Ollama，再执行 <code class=\"manual-code\">ollama pull &lt;模型名&gt;</code> 下载模型。若 Workmate 与 Ollama 不在同一主机，需要填写可访问的地址，并自行限制网络访问范围。</td></tr><tr><td>OpenAI 兼容</td><td>由实际服务商、企业网关或自建服务提供</td><td>Base URL、模型 ID；API Key 是否必填取决于上游</td><td>Base URL 应指向 OpenAI 兼容 API 根路径，通常以 <code class=\"manual-code\">/v1</code> 结尾。确认上游至少兼容项目所使用的模型列表、对话或 Embedding 接口；代理登录密码不能替代 API Key。</td></tr></tbody></table></div><blockquote class=\"manual-blockquote\"><p><strong>通义千问 Workspace ID 怎么填？</strong> 如果只调用默认业务空间内的标准模型，通常可以留空；如果 API Key 属于子业务空间，或调用知识库、调优模型及工作空间隔离资源，应填写该 Key 所属业务空间的 ID。Workmate 会根据所选地域的百炼 Base URL 和 Workspace ID 生成工作空间专属地址。若出现 <code class=\"manual-code\">InvalidApiKey</code>、无模型权限或资源不存在，优先检查 API Key、Workspace ID、地域和 Base URL 是否属于同一业务空间。</p></blockquote><blockquote class=\"manual-blockquote\"><p><strong>密钥安全建议</strong>：为 Workmate 单独创建最小权限密钥，设置预算、额度或 IP 限制；共享电脑上不要使用个人高权限密钥。密钥疑似泄露时，应先在服务商控制台创建替代密钥并验证，再撤销旧密钥。</p></blockquote><h3 class=\"manual-h3\" id=\"4.2 添加模型\">4.2 添加模型</h3><ol class=\"manual-ol\"><li>切到 <strong>模型</strong> 标签页，点击「添加模型」。</li><li>选择已就绪的 Provider，再选择<strong>能力</strong>：<ul class=\"manual-ul\"><li><strong>chat（对话）</strong>：日常对话与任务执行使用。</li><li><strong>quantum-code（量子代码）</strong>：生成受控的量子程序建议。</li><li><strong>image（生图）</strong>：图片生成（如 OpenAI 的 <code class=\"manual-code\">gpt-image-1</code>）。</li><li><strong>vision（图片理解）</strong>：当主对话模型不能看图时，按需识别图片。</li><li><strong>embedding（向量化）</strong>：知识库语义检索使用。</li><li><strong>asr（语音识别）/ tts（语音合成）</strong>：语音相关能力。</li><li><strong>decision（决策判断）</strong>：有限问题分类、评分、路由及工具执行前风险判断。</li></ul></li><li>填写或从下拉候选中选择 <strong>模型 ID</strong>（如 <code class=\"manual-code\">deepseek-chat</code>、<code class=\"manual-code\">gpt-4.1-mini</code>、<code class=\"manual-code\">qwen-plus</code>）。</li><li>多数云端服务商支持「从服务商拉取模型列表」一键导入，比手填更省事。</li><li>保存后，模型会出现在可选项里；新添加的对话 / 向量化模型默认自动成为对应能力的默认模型。</li></ol><blockquote class=\"manual-blockquote\"><p>除主对话模型外，上述专业能力统一称为“应用模型”。模型负责能力，Provider 负责连接与密钥，两者分开管理。</p></blockquote><h3 class=\"manual-h3\" id=\"4.3 测试模型与健康状态\">4.3 测试模型与健康状态</h3><p class=\"manual-p\">每个已配置模型都提供「测试」入口。点击后会打开严格模态窗口，测试期间不能误触遮罩关闭：</p><ul class=\"manual-ul\"><li>对话、Embedding、量子代码和决策模型使用预设最小请求，并显示结构化结果与耗时。</li><li>图片生成提供可编辑的预设提示词，成功后直接显示图片。</li><li>图片理解和语音识别允许上传不超过 2 MB 的测试样本。</li><li>语音合成成功后可以直接播放生成音频。</li><li>长时间测试会显示平滑进度、当前阶段和已耗时；真实结果返回前不会提前显示 100%。</li></ul><p class=\"manual-p\">测试成功或失败都会更新模型的最近健康状态。失败信息会尽量区分配置错误、权限问题、内容安全拒绝、网络异常和服务临时不可用；测试样本与结果仅用于当前窗口，不会写入资产库。</p><h3 class=\"manual-h3\" id=\"4.4 设置默认模型与应用模型绑定\">4.4 设置默认模型与应用模型绑定</h3><ol class=\"manual-ol\"><li><strong>默认对话模型</strong>：在模型列表中找到目标对话模型，点击「设为默认对话模型」。新建对话默认使用它；对话输入栏右侧的下拉框可临时切换本次对话使用的模型（显示为「服务商 · 模型」）。</li><li><strong>默认向量化模型</strong>：embedding 模型通过列表中的单选按钮设为默认，知识库检索会优先使用它。</li><li><strong>应用模型默认绑定</strong>：图片、视觉、语音、向量、量子代码和决策等能力各自选择默认模型，主模型需要时通过工具调用。</li><li>在「数字员工」详情页还可以为单个员工指定专属默认模型（见 <a class=\"manual-a\" href=\"#employees\">数字员工</a> 章节）。</li></ol><h3 class=\"manual-h3\" id=\"4.5 决策模型与工具守卫\">4.5 决策模型与工具守卫</h3><p class=\"manual-p\">决策模型也是应用模型。先在「模型」中登记能力为“决策判断”的模型，再进入「设置 → 决策守卫」选择它：</p><ul class=\"manual-ul\"><li><strong>关闭</strong>：默认状态，不请求决策服务，也不增加任务延迟。</li><li><strong>观察</strong>：执行判断并记录结果，但不拦截工具，适合灰度验证。</li><li><strong>强制</strong>：在工具真正执行前判断风险，高风险或明确拒绝时阻止执行。</li><li><strong>网络失败策略</strong>：通常选择“自动放行”，避免受限地区或服务不可达时拖慢整个系统；安全优先环境可选择“拒绝执行”。</li><li><strong>主模型按需调用</strong>：开启后，主模型可以调用同一决策模型完成分类、评分和路由。</li><li><strong>MCP 对外开放</strong>：当前是预留开关，默认关闭，不会额外启动端口或进程。</li></ul><p class=\"manual-p\">JEV 是首个兼容的决策模型，但配置与运行机制不绑定单一厂商，未来可接入同协议或新增适配器的其他决策模型。</p><h3 class=\"manual-h3\" id=\"4.6 常用服务商参考\">4.6 常用服务商参考</h3><div class=\"manual-table-wrap\"><table class=\"manual-table\"><thead><tr><th>服务商</th><th>典型对话模型</th><th>是否需要 API Key</th><th>备注</th></tr></thead><tbody><tr><td>DeepSeek</td><td><code class=\"manual-code\">deepseek-chat</code></td><td>是</td><td>性价比高</td></tr><tr><td>OpenAI</td><td><code class=\"manual-code\">gpt-4.1-mini</code></td><td>是</td><td>能力全面，另有生图 / 语音模型</td></tr><tr><td>Anthropic</td><td><code class=\"manual-code\">claude-sonnet-4-5</code></td><td>是</td><td>Claude 系列</td></tr><tr><td>Google</td><td><code class=\"manual-code\">gemini-2.5-flash</code></td><td>是</td><td>Gemini 系列</td></tr><tr><td>通义千问</td><td><code class=\"manual-code\">qwen-plus</code></td><td>是</td><td>阿里云百炼</td></tr><tr><td>GLM</td><td><code class=\"manual-code\">glm-4.5-flash</code></td><td>是</td><td>智谱 AI</td></tr><tr><td>Ollama</td><td>本机已拉取的模型名</td><td>否</td><td>本地运行，隐私友好</td></tr><tr><td>OpenAI 兼容</td><td>视服务而定</td><td>视服务而定</td><td>兼容 OpenAI 协议的网关 / 代理</td></tr></tbody></table></div><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "chat",
+      "title": "五、对话工作台",
+      "headingIds": [
+        "chat",
+        "5.1 新建对话",
+        "5.2 对话能力",
+        "5.3 会话管理",
+        "5.4 工具审批"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"chat\">五、对话工作台</h2><p class=\"manual-p\">「对话工作台」是 Workmate 的主界面，用于与数字员工对话、安排任务。</p><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-3-chat.png\" alt=\"对话工作台章节\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><h3 class=\"manual-h3\" id=\"5.1 新建对话\">5.1 新建对话</h3><ol class=\"manual-ol\"><li>点击左侧「新建对话」按钮。</li><li>在顶部选择要对话的数字员工（每个员工的职责与模型偏好不同）。</li><li>在输入框输入内容，回车发送。</li></ol><h3 class=\"manual-h3\" id=\"5.2 对话能力\">5.2 对话能力</h3><ul class=\"manual-ul\"><li><strong>在线搜索</strong>：发送前可勾选「联网搜索」，让员工先检索再回答。</li><li><strong>协作调度</strong>：支持一次邀请多个员工共同完成复杂任务（按需使用）。</li><li><strong>自动化调度</strong>：对话中的任务可交给自动化定时执行（见 <a class=\"manual-a\" href=\"#automations\">自动化</a>）。</li><li><strong>权限档位</strong>：可在对话中调整本次运行的权限级别（只读 / 默认 / 扩展 / 完整）。</li><li><strong>图片输入</strong>：添加图片后，视觉主模型可直接理解；否则由已启用的图片理解应用模型按需识别。</li><li><strong>语音输入</strong>：上传录音后，可调用已启用的语音识别应用模型转写。</li><li><strong>文档与演示附件</strong>：支持 PDF、DOCX、PPTX、PPSX、HTML/HTM、Markdown 和 TXT。PDF/Word/PowerPoint 在本机解析；HTML 会安全提取标题和正文并过滤脚本、样式；演示文稿会按页提取正文、表格文字和演讲者备注，并根据本轮问题选择相关页面。</li><li><strong>表格附件</strong>：支持 XLSX、XLS 和 CSV。系统读取工作表结构和有限行预览，避免把整本大型工作簿塞入模型上下文。</li><li><strong>专业模型工具</strong>：员工会按任务需要调用生图、语音合成、Embedding、量子代码或决策模型，无需手工切换主对话模型。</li></ul><p class=\"manual-p\">附件入口统一位于输入框左下角的回形针菜单，也可以把文件直接拖入输入框。单次最多 10 个附件、4 张图片、1 个音频、3 个演示文稿，总计不超过 50 MB；单个 PPTX/PPSX 最大 25 MB、最多 300 页，HTML/HTM、Markdown 和 TXT 单文件最大 2 MB。界面会显示解析状态、文件类型、页数和摘要。旧版 <code class=\"manual-code\">.ppt</code> 暂不支持，可先在 PowerPoint/WPS 中另存为 <code class=\"manual-code\">.pptx</code>。</p><p class=\"manual-p\">对话附件默认只是临时文件，<strong>不会自动进入资产库、知识库或数据工作台</strong>。消息发送后可在附件卡片中主动选择“保存资产”；表格还可主动选择“导入数据”。知识库导入需要进入知识库并选择目标库、向量模型和分片配置。</p><h3 class=\"manual-h3\" id=\"5.3 会话管理\">5.3 会话管理</h3><ul class=\"manual-ul\"><li><strong>继续/切换会话</strong>：左侧「最近对话」列表点击即可切换；工具审批、运行结果都会同步到服务端。</li><li><strong>清空对话</strong>：点击对话右上角「清空当前对话内容」。</li><li><strong>删除对话</strong>：在最近对话列表中悬停会话条目，点击 <code class=\"manual-code\">×</code> 删除。</li><li><strong>临时附件清理</strong>：未发送附件默认保留 24 小时，已发送附件默认保留 30 天；删除对话会同步删除临时附件。可在「设置 → 通用 → 对话临时附件」查看占用、预览清理并清理过期文件。</li><li><strong>手机扫码继续</strong>：对话页提供二维码，手机扫码后可跨设备继续同一会话。二维码约 8 小时有效，手机与电脑需能通过当前局域网地址互相访问。</li><li><strong>手机传文件到电脑</strong>：扫码页面顶部点击「传文件」，选择文件后上传。文件默认保存到电脑的“下载”目录，不可写时回退到“文档”目录；单文件最大 20 MB，同名文件不会覆盖。</li></ul><h3 class=\"manual-h3\" id=\"5.4 工具审批\">5.4 工具审批</h3><p class=\"manual-p\">数字员工执行过程中如果需要调用敏感工具（写文件、执行脚本、发消息等），对话会停在「等待审批」状态：</p><ol class=\"manual-ol\"><li>查看请求的工具与参数。</li><li>选择「允许一次」/「允许本次运行全部」或「拒绝」。</li><li>批准后任务自动继续执行，无需重新发起。</li></ol><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "employees",
+      "title": "六、数字员工",
+      "headingIds": [
+        "employees",
+        "6.1 创建员工",
+        "6.2 编辑与维护",
+        "6.3 权限档位说明"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"employees\">六、数字员工</h2><p class=\"manual-p\">数字员工是任务的执行主体。每个员工可以有自己的名字、头像、职责说明、默认模型与技能组合。</p><h3 class=\"manual-h3\" id=\"6.1 创建员工\">6.1 创建员工</h3><ol class=\"manual-ol\"><li>打开左侧「数字员工」。</li><li>点击「新建员工」。</li><li>填写名称、头像（可选）、职责描述，选择默认模型与权限档位。</li><li>保存后即可在对话工作台中选择该员工。</li></ol><h3 class=\"manual-h3\" id=\"6.2 编辑与维护\">6.2 编辑与维护</h3><ul class=\"manual-ul\"><li><strong>编辑</strong>：在员工详情页修改资料、模型、权限。</li><li><strong>绑定技能/MCP</strong>：给员工勾选可用的 Skills 与 MCP 连接器，员工执行任务时才有对应能力。</li><li><strong>使用应用模型</strong>：每位员工只需一个总开关。默认开启；开启后自动获得已配置且可用的图片、视觉、语音、向量和其他专业模型，由员工按任务需要选择。关闭后不会向该员工暴露这些能力。</li><li><strong>重置</strong>：恢复该员工的系统默认配置。</li><li><strong>删除</strong>：移除自定义员工；系统预置员工不可删除。</li></ul><h3 class=\"manual-h3\" id=\"6.3 权限档位说明\">6.3 权限档位说明</h3><div class=\"manual-table-wrap\"><table class=\"manual-table\"><thead><tr><th>档位</th><th>说明</th></tr></thead><tbody><tr><td>read-only</td><td>只读：不能写文件、执行脚本、调用外部工具</td></tr><tr><td>default</td><td>默认：常规操作</td></tr><tr><td>extended</td><td>扩展：更多工具权限</td></tr><tr><td>full</td><td>完整：放开大多数敏感操作</td></tr></tbody></table></div><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "capabilities",
+      "title": "七、技能与连接",
+      "headingIds": [
+        "capabilities",
+        "7.1 技能目录与安装",
+        "7.2 智能创建与修改技能",
+        "7.3 MCP 连接器",
+        "7.4 知识库（入口）"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"capabilities\">七、技能与连接</h2><p class=\"manual-p\">「技能与连接」集中管理员工的工具箱：技能（Skills）、MCP 连接器与知识库入口。</p><h3 class=\"manual-h3\" id=\"7.1 技能目录与安装\">7.1 技能目录与安装</h3><ol class=\"manual-ol\"><li>打开「技能与连接」。</li><li>在<strong>技能目录</strong>中浏览或搜索可用技能。</li><li>点击技能查看详情（功能说明、作者、安装量），确认后点击「安装」。</li><li>安装完成后，在「数字员工」详情页勾选该技能即可启用。</li></ol><h3 class=\"manual-h3\" id=\"7.2 智能创建与修改技能\">7.2 智能创建与修改技能</h3><p class=\"manual-p\">如果你会写提示词，可以让 AI 帮你创建或修改技能：</p><ol class=\"manual-ol\"><li>在「技能与连接」中找到「智能创建与修改」入口。</li><li>描述你想要的技能名称与功能，或粘贴现有技能草稿。</li><li>生成后检查、微调并保存，技能会进入你的本地技能库。</li></ol><h3 class=\"manual-h3\" id=\"7.3 MCP 连接器\">7.3 MCP 连接器</h3><p class=\"manual-p\">MCP（Model Context Protocol）让员工能接入外部系统：</p><ol class=\"manual-ol\"><li>打开「MCP 连接器」面板，点击「新增 MCP」。</li><li>选择传输方式（stdio / HTTP / SSE），填写命令或 URL 及鉴权信息。</li><li>保存后测试连接；成功后在员工详情中勾选使用。</li></ol><blockquote class=\"manual-blockquote\"><p>启动时应用会自动探测 MCP 连接状态，并把结果通知给你。</p></blockquote><h3 class=\"manual-h3\" id=\"7.4 知识库（入口）\">7.4 知识库（入口）</h3><p class=\"manual-p\">技能与连接页也提供知识库的快捷管理入口；完整的知识库使用见 <a class=\"manual-a\" href=\"#knowledge\">知识库</a>。</p><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "knowledge",
+      "title": "八、知识库",
+      "headingIds": [
+        "knowledge",
+        "8.1 创建知识库",
+        "8.2 导入文档",
+        "8.3 检索与问答"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"knowledge\">八、知识库</h2><p class=\"manual-p\">知识库让数字员工在回答与执行时能引用你的私有资料。</p><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-4-knowledge.png\" alt=\"知识库章节\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><h3 class=\"manual-h3\" id=\"8.1 创建知识库\">8.1 创建知识库</h3><ol class=\"manual-ol\"><li>打开左侧「知识库」。</li><li>点击「新建知识库」，填写名称与描述。</li><li>选择向量化服务商：云端（如百炼）或本地 Embedding（需要在设置中配置）。</li></ol><h3 class=\"manual-h3\" id=\"8.2 导入文档\">8.2 导入文档</h3><ol class=\"manual-ol\"><li>选中知识库，进入「文档」标签页。</li><li>点击「导入文档」，上传或粘贴内容（文本、Markdown 等）。</li><li>系统自动切分（chunk）并向量化，完成后显示文档与分块统计。</li></ol><h3 class=\"manual-h3\" id=\"8.3 检索与问答\">8.3 检索与问答</h3><ul class=\"manual-ul\"><li>在知识库详情中可执行<strong>检索测试</strong>：输入问题，查看命中的分块与相似度。</li><li>员工对话时如配置了知识库引用，回答会自动带出相关上下文。</li><li>可在「设置 → 知识库」中管理服务商与默认知识库。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "assets",
+      "title": "九、资产库",
+      "headingIds": [
+        "assets",
+        "9.1 查看与管理",
+        "9.2 部署与链接"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"assets\">九、资产库</h2><p class=\"manual-p\">对话和项目运行产生的文件（报告、脚本、图片、网页等）会沉淀到资产库，方便统一管理与复用。</p><h3 class=\"manual-h3\" id=\"9.1 查看与管理\">9.1 查看与管理</h3><ol class=\"manual-ol\"><li>打开左侧「资产库」。</li><li>可按对话、员工或项目筛选资产。</li><li>点击资产可预览内容；悬停后可执行：删除、在浏览器中打开、保存到本地、加入项目等操作。</li></ol><p class=\"manual-p\">对话中的资产卡片会根据媒体类型提供原位预览：</p><ul class=\"manual-ul\"><li>图片显示懒加载缩略图，点击可打开原文件。</li><li>音频显示播放器，支持播放、暂停、进度拖动和音量控制。</li><li>视频显示内嵌播放器，不会自动播放。</li><li>媒体加载失败时自动回退为普通文件卡片，下载和进入资产库仍然可用。</li></ul><h3 class=\"manual-h3\" id=\"9.2 部署与链接\">9.2 部署与链接</h3><ul class=\"manual-ul\"><li><strong>部署预览</strong>：网页类资产支持部署为可访问的预览地址。</li><li><strong>链接到项目</strong>：把资产纳入某个项目的交付目录（见 <a class=\"manual-a\" href=\"#projects\">项目</a>）。</li><li><strong>导出</strong>：保存到本机文件系统。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "data",
+      "title": "十、数据工作台",
+      "headingIds": [
+        "data",
+        "10.1 接入数据源",
+        "10.2 生成数据应用"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"data\">十、数据工作台</h2><p class=\"manual-p\">数据工作台用于导入、连接和查询数据，并生成数据应用。</p><h3 class=\"manual-h3\" id=\"10.1 接入数据源\">10.1 接入数据源</h3><ol class=\"manual-ol\"><li>打开左侧「数据工作台」。</li><li>点击「导入」：<ul class=\"manual-ul\"><li><strong>文件</strong>：上传 CSV / Excel 等数据文件。</li><li><strong>SQLite</strong>：创建本地业务数据库。</li><li><strong>API 数据源</strong>：配置接口地址、请求方式与鉴权，把外部 API 变成可查询的数据源。</li></ul></li><li>数据源会列出数据表，可预览前几行确认结构。</li></ol><h3 class=\"manual-h3\" id=\"10.2 生成数据应用\">10.2 生成数据应用</h3><ol class=\"manual-ol\"><li>选中数据源后，点击「创建数据应用」。</li><li>选择模板（管理后台 / 数据看板 / 查询网站），或直接描述你的想法让 AI 生成。</li><li>应用创建后可继续「优化」：告诉 AI 想调整的地方，实时迭代。</li></ol><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "automations",
+      "title": "十一、自动化",
+      "headingIds": [
+        "automations",
+        "11.1 创建自动化",
+        "11.2 调度与运行",
+        "11.3 注意事项"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"automations\">十一、自动化</h2><p class=\"manual-p\">自动化让任务按计划自动执行，无需人工值守。</p><h3 class=\"manual-h3\" id=\"11.1 创建自动化\">11.1 创建自动化</h3><ol class=\"manual-ol\"><li>打开左侧「自动化」。</li><li>点击「新建自动化」，填写名称、触发方式（定时/手动）与计划（cron 表达式）。</li><li>选择要执行的数字员工与模型，填写任务内容。</li><li>保存后即生效。</li></ol><h3 class=\"manual-h3\" id=\"11.2 调度与运行\">11.2 调度与运行</h3><ul class=\"manual-ul\"><li>自动化会按计划在后台调度，运行记录可在列表中查看（排队中 / 运行中 / 已完成 / 失败 / 已取消）。</li><li>可随时「暂停 / 恢复」或「手动运行一次」。</li><li>运行结果会写入对话，可在对应会话中查看详情。</li></ul><h3 class=\"manual-h3\" id=\"11.3 注意事项\">11.3 注意事项</h3><ul class=\"manual-ul\"><li>自动化执行需要模型可用；如果默认模型缺失，任务会失败并在界面提示。</li><li>在「设置 → 通用」中可以调整并发的 Sidecar 池大小与共享运行数上限。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "projects",
+      "title": "十二、项目",
+      "headingIds": [
+        "projects",
+        "12.1 创建项目",
+        "12.2 确认与执行",
+        "12.3 复用资产"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"projects\">十二、项目</h2><p class=\"manual-p\">项目编排用来管理「多步骤、可确认、可追溯」的复杂交付任务。</p><h3 class=\"manual-h3\" id=\"12.1 创建项目\">12.1 创建项目</h3><ol class=\"manual-ol\"><li>打开左侧「项目」。</li><li>点击「新建项目」，填写名称与目标。</li><li>选择执行的数字员工与模型，点击「生成草稿」。</li><li>系统会产出一份 <strong>Plan（计划 DAG）</strong>：每个节点代表一个步骤，含目标与依赖关系。</li></ol><h3 class=\"manual-h3\" id=\"12.2 确认与执行\">12.2 确认与执行</h3><ol class=\"manual-ol\"><li>检查计划，点击「确认」开始运行。</li><li>运行过程中如需补充或调整要求，使用「变更指令」，系统会以 ChangeSet 增量失效下游节点并尽量保留已完成部分。</li><li>每步完成后的产物会自动沉淀到项目工作区，可在文件树中查看与预览。</li></ol><h3 class=\"manual-h3\" id=\"12.3 复用资产\">12.3 复用资产</h3><ul class=\"manual-ul\"><li>把资产库中的文件「链接到项目」即可纳入项目交付目录。</li><li>项目文件支持在浏览器中打开预览或一键定位到本机目录。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "remote",
+      "title": "十三、远程办公",
+      "headingIds": [
+        "remote",
+        "13.1 配置通道",
+        "13.2 使用方式",
+        "13.3 安全建议"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"remote\">十三、远程办公</h2><p class=\"manual-p\">通过通道网关，你可以让外部 IM 或远程终端调度你的数字员工。</p><h3 class=\"manual-h3\" id=\"13.1 配置通道\">13.1 配置通道</h3><ol class=\"manual-ol\"><li>打开左侧「远程办公」。</li><li>选择要接入的通道：<ul class=\"manual-ul\"><li><strong>Telegram</strong>：填入 Bot Token，配置个人白名单。</li><li><strong>飞书</strong>：填入 App ID / App Secret，配置白名单。</li></ul></li><li>保存后点击「重启网关」使配置生效。</li></ol><h3 class=\"manual-h3\" id=\"13.2 使用方式\">13.2 使用方式</h3><ul class=\"manual-ul\"><li>白名单内的账号可以直接在 IM 中向员工下达任务，消息会经由网关进入本地工作台执行并回传结果。</li><li>远程中继终端可通过出连（WebSocket）方式注册，供远端调度同一批员工。</li><li>网关状态、运行状态与默认员工可在页面中查看和调整。</li></ul><h3 class=\"manual-h3\" id=\"13.3 安全建议\">13.3 安全建议</h3><ul class=\"manual-ul\"><li>白名单务必只添加可信账号。</li><li>密钥保存在系统安全存储中，不会明文出现在配置文件里。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "env-check",
+      "title": "十四、环境检查与 dsh",
+      "headingIds": [
+        "env-check",
+        "14.1 常见检查项",
+        "14.2 修复流程",
+        "14.3 安装 dsh"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"env-check\">十四、环境检查与 dsh</h2><p class=\"manual-p\">Workmate 启动时会自动体检本地环境，缺少组件会弹出提示，你可以在「环境检查」页面查看每一项的「要求 vs 当前」并一键修复。</p><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-5-env-check.png\" alt=\"环境检查与 dsh 章节\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><h3 class=\"manual-h3\" id=\"14.1 常见检查项\">14.1 常见检查项</h3><ul class=\"manual-ul\"><li>运行目录与数据目录可写</li><li>Python 环境（Agent 脚本执行）</li><li>AgentScope Sidecar（可选执行引擎）</li><li><strong>dsh 编码 Harness</strong>（DeepSeek 编码侧车，约 200MB）</li><li>Docker（如需容器化）</li></ul><h3 class=\"manual-h3\" id=\"14.2 修复流程\">14.2 修复流程</h3><ol class=\"manual-ol\"><li>打开「环境检查」页面（启动弹窗中点击「查看详情」，或从设置进入）。</li><li>查看标红（需处理）/ 标黄（建议）的检查项，展开看修复说明。</li><li>点击「一键修复」自动修复白名单项；其余项复制页面给出的主机 / Docker 脚本手动执行。</li><li>修复后点击「重新检查」确认全部通过。</li></ol><h3 class=\"manual-h3\" id=\"14.3 安装 dsh\">14.3 安装 dsh</h3><ul class=\"manual-ul\"><li>首次检测到缺少 dsh 时会弹出安装引导（约 200MB 下载），点击确认后显示实时进度。</li><li>也可以手动在「环境检查」页面或设置中的 dsh 卡片触发安装 / 重装。</li><li>dsh 未安装时，相关预置员工会自动降级为 pi 引擎运行，不会阻塞其他功能。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "settings",
+      "title": "十五、设置",
+      "headingIds": [
+        "settings",
+        "15.1 标签页速览",
+        "15.2 常用操作"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"settings\">十五、设置</h2><p class=\"manual-p\">「设置」集中管理外观、模型、搜索、知识库、账号、用量、环境与通用运行参数。</p><h3 class=\"manual-h3\" id=\"15.1 标签页速览\">15.1 标签页速览</h3><div class=\"manual-table-wrap\"><table class=\"manual-table\"><thead><tr><th>标签页</th><th>内容</th></tr></thead><tbody><tr><td>外观</td><td>主题（亮/暗/午夜/极光/跟随系统）、语言（简体中文 / English）</td></tr><tr><td>Provider</td><td>模型服务商：新增、编辑、测试连通、删除</td></tr><tr><td>模型</td><td>对话模型与应用模型：添加、测试、查看健康状态、绑定默认能力</td></tr><tr><td>决策守卫</td><td>决策模型、开关、观察/强制模式、超时、失败策略和 Tool 前置安检</td></tr><tr><td>搜索</td><td>联网搜索服务商与端点配置</td></tr><tr><td>知识库</td><td>知识库服务商与默认配置</td></tr><tr><td>账号</td><td>修改密码、会话安全设置</td></tr><tr><td>用户</td><td>本地用户管理（仅管理员）</td></tr><tr><td>用量</td><td>主模型与应用模型按实际 Provider、模型和能力分别统计</td></tr><tr><td>环境</td><td>默认数字员工、环境检查入口、dsh 管理</td></tr><tr><td>通用</td><td>执行引擎（pi / agentscope / dsh）、Sidecar 池大小、共享运行数上限、运行时状态</td></tr></tbody></table></div><h3 class=\"manual-h3\" id=\"15.2 常用操作\">15.2 常用操作</h3><ul class=\"manual-ul\"><li><strong>切换主题/语言</strong>：在「外观」中选择，实时生效。</li><li><strong>指定默认员工</strong>：在「环境」中选择默认数字员工，新建对话时优先使用。</li><li><strong>调整执行引擎</strong>：在「通用」中选择默认引擎（进程内 pi / Python Sidecar / dsh），并可在运行时状态面板查看实时状态。</li><li><strong>增强 PPTX 解析</strong>：基础安装已能轻量读取幻灯片正文和备注。管理员可在「通用 → PPTX 增强解析」按需安装组件；安装后上传 PPTX/PPSX 时自动启用，异常时自动回退轻量解析。组件只保存在用户数据目录，可随时移除，安装过程需要联网。</li><li><strong>打开账户与配置</strong>：侧栏左下角默认只显示一行紧凑入口，点击后可查看账号与组织信息、切换外观、进入设置或退出登录；它不会长期占用“最近对话”空间。</li><li><strong>启用决策守卫</strong>：先在“模型”中准备决策应用模型，再到“决策守卫”选择模型和运行模式。网络不稳定或所在地区可能无法访问时建议保持关闭，或使用“观察 + 自动放行”。</li></ul><hr class=\"manual-hr\" />"
+    },
+    {
+      "id": "faq",
+      "title": "十六、常见问题",
+      "headingIds": [
+        "faq"
+      ],
+      "html": "<h2 class=\"manual-h2\" id=\"faq\">十六、常见问题</h2><p class=\"manual-p\"><img class=\"manual-img\" src=\"images/user-manual-6-faq.png\" alt=\"常见问题章节\" width=\"1600\" height=\"1000\" loading=\"lazy\" decoding=\"async\" /></p><p class=\"manual-p\"><strong>Q1：启动时提示「AI 模型还没有准备好」，怎么办？</strong> 点击弹窗中的「去配置」直达设置页，按 <a class=\"manual-a\" href=\"#model-config\">模型配置</a> 章节补齐 Provider 与模型；也可以点击「以后再说」，应用会安静 7 天再提醒。</p><p class=\"manual-p\"><strong>Q2：对话一直停在「等待审批」，任务不往下走？</strong> 这是工具审批机制在保护你。查看请求参数后选择允许或拒绝即可继续（见 <a class=\"manual-a\" href=\"#chat\">工具审批</a>）。</p><p class=\"manual-p\"><strong>Q3：环境检查报错，如何快速定位？</strong> 打开「环境检查」页面，看标红项展开的修复说明；优先使用「一键修复」，其余按脚本手动执行。</p><p class=\"manual-p\"><strong>Q4：数字员工没有反应或报「model missing」？</strong> 说明当前运行的默认模型不可用。到「设置 → 模型」确认默认对话模型已设置且可用。</p><p class=\"manual-p\"><strong>Q5：dsh 相关员工无法使用？</strong> 先在「环境检查」中安装 dsh（约 200MB），安装完成后重启相关对话；未安装期间相关员工会以 pi 引擎运行。</p><p class=\"manual-p\"><strong>Q6：资产/项目文件想保存到本地？</strong> 在「资产库」选中资产点击导出，或在「项目」文件树中定位到本机目录。</p><p class=\"manual-p\"><strong>Q7：如何让外部 IM 也能调用员工？</strong> 到「远程办公」配置 Telegram / 飞书凭证与白名单，重启网关即可（见 <a class=\"manual-a\" href=\"#remote\">远程办公</a>）。</p><p class=\"manual-p\"><strong>Q8：配置了在线搜索但没生效？</strong> 检查「设置 → 搜索」中的服务商端点与密钥是否配置并保存，并在对话发送前勾选「联网搜索」。</p><p class=\"manual-p\"><strong>Q9：模型测试窗口为什么不能点击外部关闭？</strong> 这是为了避免长时间生图、语音或视觉测试被误触中断。测试执行期间关闭按钮也会禁用；成功或失败后可从固定的底部操作区关闭或重新测试。</p><p class=\"manual-p\"><strong>Q10：生成的图片或音频为什么没有预览？</strong> 先确认执行过程已经成功提交资产。媒体卡片会通过当前登录会话加载受保护内容；如果鉴权过期或文件类型无法识别，会回退为普通文件卡片，可尝试重新登录或从资产库下载检查。</p><p class=\"manual-p\"><strong>Q11：生图时间很长，或者第一次失败后又成功，正常吗？</strong> 异步生图通常需要轮询上游任务，耗时会高于普通对话；网络断开、内容安全拒绝或 Provider 临时不可用也可能触发可解释的失败。执行过程会保留请求阶段和错误原因，不会把失败步骤误报为已完成。</p><p class=\"manual-p\"><strong>Q12：启用决策模型后网络不可用，会不会影响所有任务？</strong> 默认不会。决策守卫缺省关闭；启用时默认超时较短并采用“自动放行”，失败后还会短时熔断，避免持续拖慢主流程。只有主动选择“拒绝执行”失败策略时，决策服务不可用才会阻止工具执行。</p>"
+    }
+  ]
+}

@@ -11,8 +11,8 @@ import type {
 import ChatReplyPending from "./ChatReplyPending.vue";
 import ChatImagePreview from './ChatImagePreview.vue';
 import ChatAssetMediaPreview from './ChatAssetMediaPreview.vue';
-import type { ChatImageAttachment } from '@workmate/contracts';
-import { uploadChatImage } from '../../services/orchestration';
+import type { ChatFileAttachment, ChatImageAttachment } from '@workmate/contracts';
+import { deleteChatFile, uploadChatFile, uploadChatImage } from '../../services/orchestration';
 import ChatAutoScheduleRail from "./ChatAutoScheduleRail.vue";
 import { useModelConfig, type ProviderConfig } from "../../app/model-config";
 import type { ToolActivity, ToolApproval } from "../../services/api";
@@ -25,9 +25,8 @@ import { downloadAssetBestEffort, previewAssetUrl } from "../../app/platform-act
 import { useI18n } from "../../app/i18n";
 import { useNotify } from "../../app/notify";
 import { employeeDisplayDescription, employeeDisplayName } from "../../app/employees";
-import { getServerRuntimeConfig, createMobileChatSession, getMobileChatSession, importDataFromAsset } from "../../services/api";
+import { getServerRuntimeConfig, createMobileChatSession, getMobileChatSession, importChatAttachmentToAssets, importDataFromAsset } from "../../services/api";
 import { chatBusy } from "../../app/workspace";
-import { uploadRecording } from '../../services/api';
 import { qrDataUrl } from "../../app/qr-data-url.js";
 import { markdownToHtml } from "../../app/project-files";
 import { shouldPollServerMirror } from '../../app/chat-run-timing.js';
@@ -54,6 +53,7 @@ const props = defineProps<{
     onlineSearch?: boolean,
     autoSchedule?: boolean,
     attachments?: ChatImageAttachment[],
+    fileAttachments?: ChatFileAttachment[],
   ) => Promise<void>;
   abortMessage?: () => void;
   approve: (
@@ -92,12 +92,67 @@ const recordingInput = ref<HTMLInputElement | null>(null);
 const recording = ref<{ reference: string; name: string; size: number } | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
 const images = ref<ChatImageAttachment[]>([]);
+const fileInput = ref<HTMLInputElement | null>(null);
+const files = ref<ChatFileAttachment[]>([]);
+const uploadingFiles = ref(false);
+const attachmentMenuOpen = ref(false);
 const uploadingImages = ref(false);
+const activityClock = ref(Date.now());
+let activityClockTimer: number | undefined;
 const imageSessionId = ref('');
 let imageUploadVersion = 0;
 watch(() => [props.conversation?.id, props.selectedEmployeeId], () => {
-  images.value = []; imageSessionId.value = ''; imageUploadVersion += 1;
+  const pendingFiles = [...files.value]; const pendingSessionId = imageSessionId.value;
+  images.value = []; files.value = []; imageSessionId.value = ''; imageUploadVersion += 1;
+  if (pendingSessionId) pendingFiles.forEach((item) => { void deleteChatFile(pendingSessionId, item.id).catch(() => undefined); });
 });
+const allowedFileExtensions = ['pdf', 'docx', 'pptx', 'ppsx', 'xlsx', 'xls', 'csv', 'html', 'htm', 'md', 'txt', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'webm'];
+async function attachFiles(selected: File[]) {
+  if (inputBusy.value || !selected.length) return;
+  if (files.value.length + selected.length + images.value.length + (recording.value ? 1 : 0) > 10) { notify.error(new Error('每次最多添加 10 个附件。')); return; }
+  const total = selected.reduce((sum, item) => sum + item.size, 0) + files.value.reduce((sum, item) => sum + item.size, 0) + images.value.reduce((sum, item) => sum + item.size, 0) + (recording.value?.size || 0);
+  if (total > 50 * 1024 * 1024) { notify.error(new Error('单次消息附件总大小不能超过 50 MB。')); return; }
+  const unsupported = selected.find((item) => !allowedFileExtensions.includes(item.name.split('.').pop()?.toLowerCase() || ''));
+  if (unsupported) { notify.error(new Error(`不支持 ${unsupported.name}，请选择 PDF、Word、PowerPoint、Excel、CSV、HTML、Markdown 或文本文件。`)); return; }
+  const presentationExtensions = new Set(['pptx', 'ppsx']);
+  const presentationCount = [...files.value, ...selected].filter((item) => presentationExtensions.has(item.name.split('.').pop()?.toLowerCase() || '')).length;
+  if (presentationCount > 3) { notify.error(new Error('每次消息最多添加 3 个演示文稿。')); return; }
+  const audioExtensions = new Set(['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'webm']);
+  const audioCount = [...files.value, ...selected].filter((item) => audioExtensions.has(item.name.split('.').pop()?.toLowerCase() || '')).length;
+  if (audioCount > 1) { notify.error(new Error('每次消息最多添加 1 个音频附件。')); return; }
+  if (audioCount && !recordingReady.value) { notify.error(new Error(recordingHelp.value)); return; }
+  uploadingFiles.value = true;
+  try {
+    const sessionId = await props.ensureServerSession?.();
+    if (!sessionId) throw new Error('请先创建会话。');
+    imageSessionId.value = sessionId;
+    for (const file of selected) {
+      const result = await uploadChatFile(sessionId, file);
+      files.value.push(result.attachment);
+      if (result.warning) notify.pushRaw('warning', result.warning);
+    }
+    if (!draft.value.trim()) draft.value = '请阅读附件并回答我的问题。';
+  } catch (cause) { notify.error(cause); }
+  finally { uploadingFiles.value = false; attachmentMenuOpen.value = false; }
+}
+async function selectFiles(event: Event) { const input = event.target as HTMLInputElement; await attachFiles(Array.from(input.files || [])); input.value = ''; }
+async function removeFile(index: number) {
+  const item = files.value[index]; files.value.splice(index, 1);
+  if (item && imageSessionId.value) await deleteChatFile(imageSessionId.value, item.id).catch(() => undefined);
+}
+function fileKindLabel(item: ChatFileAttachment) {
+  const extension = item.name.split('.').pop()?.toLowerCase();
+  return extension === 'pptx' || extension === 'ppsx' ? '演示' : item.kind === 'spreadsheet' ? '表格' : item.kind === 'audio' ? '音频' : '文档';
+}
+function dropAttachments(event: DragEvent) {
+  const selected = Array.from(event.dataTransfer?.files || []);
+  if (!selected.length) return;
+  event.preventDefault();
+  const pictures = selected.filter((item) => item.type.startsWith('image/'));
+  const documents = selected.filter((item) => !item.type.startsWith('image/'));
+  if (pictures.length) void attachImages(pictures);
+  if (documents.length) void attachFiles(documents);
+}
 async function attachImages(files: File[]) {
   if (inputBusy.value) return;
   if (!visionReady.value) { notify.error(new Error(visionHelp.value)); return; }
@@ -138,16 +193,11 @@ async function selectRecording(event: Event) {
   const element = event.target as HTMLInputElement;
   const file = element.files?.[0];
   if (!file) return;
-  const conversationId = props.conversation?.id;
-  const employeeId = props.selectedEmployeeId;
-  uploadingRecording.value = true;
   try {
-    const uploaded = await uploadRecording(file);
-    if (props.conversation?.id !== conversationId || props.selectedEmployeeId !== employeeId) return;
-    recording.value = uploaded;
+    await attachFiles([file]);
     if (!draft.value.trim()) draft.value = '请将这份录音转成文字，生成可下载的转写文件，并总结要点。';
   } catch (cause) { notify.error(cause); }
-  finally { uploadingRecording.value = false; element.value = ''; }
+  finally { element.value = ''; }
 }
 const mobileShareOpen = ref(false);
 const mobileShareBusy = ref(false);
@@ -157,11 +207,23 @@ const mobileShareError = ref("");
 const mobileShareExpiresAt = ref(0);
 const mobileShareToken = ref("");
 const importingAssetId = ref("");
+const promotingAttachmentId = ref('');
+async function saveAttachmentToAssets(file: ChatFileAttachment, openData = false) {
+  const sessionId = props.conversation?.serverSessionId;
+  if (!sessionId || promotingAttachmentId.value) return;
+  promotingAttachmentId.value = file.id;
+  try {
+    const asset = await importChatAttachmentToAssets(sessionId, file.id);
+    if (openData && asset.id) { await importDataFromAsset(asset.id); emit('openData'); }
+    notify.pushRaw('success', openData ? '已保存到资产库并导入数据工作台' : '已保存到资产库', file.name);
+  } catch (cause) { notify.error(cause); }
+  finally { promotingAttachmentId.value = ''; }
+}
 let mobilePullTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncBusy = false;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
-const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value);
+const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value || uploadingFiles.value);
 const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
 const { get: getEmployeePrefs } = useEmployeeRuntimePrefs();
@@ -255,20 +317,36 @@ function elapsedLabel(elapsedMs?: number) {
   const seconds = Math.round(elapsedMs / 1000);
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
+function isApplicationModelActivity(activity: ToolActivity) {
+  return activity.toolName.startsWith('model:') || activity.toolName.startsWith('model_');
+}
+function activityElapsedLabel(activity: ToolActivity) {
+  if (!isApplicationModelActivity(activity)) return '';
+  const elapsed = activity.durationMs != null
+    ? activity.durationMs
+    : activity.status === 'running'
+      ? Math.max(0, activityClock.value - (activity.startedAt ?? activity.at ?? activityClock.value))
+      : undefined;
+  if (elapsed == null) return '';
+  if (elapsed < 10_000) return `${(elapsed / 1000).toFixed(1)} 秒`;
+  return elapsedLabel(elapsed);
+}
 async function submit() {
-  if (!draft.value.trim() || !props.modelConfigured || inputBusy.value) return;
+  if ((!draft.value.trim() && !files.value.length && !images.value.length && !recording.value) || !props.modelConfigured || inputBusy.value) return;
   const attachedImages = [...images.value];
   if ((attachedImages.length || props.conversation?.messages.some((message) => message.attachments?.length)) && !visionReady.value) {
     notify.error(new Error(visionHelp.value)); return;
   }
   const attachedRecording = recording.value;
-  const text = draft.value + (attachedRecording ? `\n\n录音附件：${attachedRecording.name}\n请调用 model_transcribe_audio，path=${attachedRecording.reference}，outputFormat=text。` : '');
+  const attachedFiles = [...files.value];
+  const text = (draft.value.trim() || '请分析这些附件。') + (attachedRecording ? `\n\n录音附件：${attachedRecording.name}\n请调用 model_transcribe_audio，path=${attachedRecording.reference}，outputFormat=text。` : '');
   const selected = autoSchedule.value ? [] : [...collaboratorIds.value];
   const delivery = collaborationDelivery.value;
   const useAutoSchedule = autoSchedule.value;
   draft.value = "";
   recording.value = null;
   images.value = [];
+  files.value = [];
   if (!useAutoSchedule) {
     collaboratorIds.value = [];
   }
@@ -279,11 +357,12 @@ async function submit() {
   stickToBottom.value = true;
   void nextTick(() => scrollMessagesToBottom(true));
   try {
-    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule, attachedImages);
+    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule, attachedImages, attachedFiles);
   } catch (cause) {
     draft.value = text.split('\n\n录音附件：')[0];
     recording.value = attachedRecording;
     images.value = attachedImages;
+    files.value = attachedFiles;
     notify.error(cause);
   } finally {
     sending.value = false;
@@ -576,6 +655,7 @@ async function refreshRuntimeDefaultEngine() {
 onMounted(() => {
   void refreshRuntimeDefaultEngine();
   ensureServerSync();
+  activityClockTimer = window.setInterval(() => { activityClock.value = Date.now(); }, 250);
 });
 watch(
   () => props.employee.id,
@@ -754,6 +834,8 @@ onBeforeUnmount(() => {
   listResizeObserver = null;
   stopMobilePull();
   stopServerSync();
+  if (activityClockTimer) window.clearInterval(activityClockTimer);
+  activityClockTimer = undefined;
 });
 </script>
 
@@ -943,6 +1025,13 @@ onBeforeUnmount(() => {
             <div v-if="message.attachments?.length" class="mt-2 flex flex-wrap gap-2">
               <ChatImagePreview v-for="(image, index) in message.attachments" :key="image.id" :image="image" :index="index" :session-id="conversation?.serverSessionId" />
             </div>
+            <div v-if="message.fileAttachments?.length" class="mt-2 grid gap-2 sm:grid-cols-2">
+              <div v-for="file in message.fileAttachments" :key="file.id" class="flex min-w-0 items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 shadow-sm">
+                <span class="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[var(--accent-soft)] text-[10px] font-extrabold text-[var(--accent)]">{{ fileKindLabel(file) }}</span>
+                <span class="min-w-0 flex-1"><strong class="block truncate text-xs">{{ file.name }}</strong><small class="block truncate text-[10px] text-[var(--muted)]">{{ file.summary || formatBytes(file.size) }}</small></span>
+                <span v-if="message.role === 'user'" class="flex shrink-0 gap-1"><button class="rounded-lg border border-[var(--border)] px-2 py-1 text-[10px] font-semibold hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40" type="button" :disabled="Boolean(promotingAttachmentId)" @click="saveAttachmentToAssets(file)">保存资产</button><button v-if="file.kind === 'spreadsheet'" class="rounded-lg border border-[var(--border)] px-2 py-1 text-[10px] font-semibold hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40" type="button" :disabled="Boolean(promotingAttachmentId)" @click="saveAttachmentToAssets(file, true)">导入数据</button></span>
+              </div>
+            </div>
             <details
               v-if="message.role === 'assistant' && message.reasoning"
               class="mt-2 overflow-hidden rounded-lg border border-[var(--border)]/80 bg-[var(--surface)]/92 text-[11px] shadow-[0_4px_14px_rgba(15,23,42,0.035)]"
@@ -1101,7 +1190,7 @@ onBeforeUnmount(() => {
                                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
                                 : 'bg-emerald-500/10 text-emerald-600',
                           ]"
-                          >{{ stateLabel(activity) }}</span
+                          >{{ stateLabel(activity) }}<template v-if="activityElapsedLabel(activity)"> · {{ activityElapsedLabel(activity) }}</template></span
                         >
                       </div>
                       <p class="mt-0.5 break-words text-[10px] leading-3.5 text-[var(--muted)]">
@@ -1245,11 +1334,18 @@ onBeforeUnmount(() => {
       <form
         class="relative grid gap-3 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-3 shadow-lg transition focus-within:border-[var(--accent)]/35 focus-within:shadow-xl"
         @submit.prevent="submit"
+        @dragover.prevent
+        @drop="dropAttachments"
       >
-        <div v-if="images.length || recording" class="flex flex-wrap items-center gap-2 border-b border-[var(--border)]/70 pb-3">
+        <div v-if="images.length || files.length || recording" class="grid gap-2 border-b border-[var(--border)]/70 pb-3 sm:grid-cols-2 lg:grid-cols-3">
           <div v-for="(image, index) in images" :key="image.id" class="relative">
             <ChatImagePreview :image="image" :index="index" :session-id="imageSessionId" />
             <button type="button" class="absolute -right-1 -top-1 grid h-5 w-5 place-items-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-xs shadow-sm hover:text-[var(--danger)]" :aria-label="`移除图片 ${image.name}`" :disabled="inputBusy" @click="images.splice(index, 1)">×</button>
+          </div>
+          <div v-for="(file, index) in files" :key="file.id" class="flex min-w-0 items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5">
+            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[var(--accent-soft)] text-[10px] font-bold text-[var(--accent)]">{{ fileKindLabel(file) }}</span>
+            <span class="min-w-0 flex-1"><strong class="block truncate text-xs">{{ file.name }}</strong><small class="block truncate text-[10px] text-[var(--muted)]">{{ file.summary || formatBytes(file.size) }}</small></span>
+            <button type="button" class="grid h-7 w-7 shrink-0 place-items-center rounded-lg hover:bg-[var(--surface)] hover:text-[var(--danger)]" :aria-label="`移除 ${file.name}`" :disabled="inputBusy" @click="removeFile(index)">×</button>
           </div>
           <span v-if="recording" class="inline-flex max-w-full items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-xs">
             <svg aria-hidden="true" class="h-4 w-4 shrink-0 text-[var(--accent)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
@@ -1268,7 +1364,8 @@ onBeforeUnmount(() => {
           @paste="pasteImages"
         ></textarea>
         <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" @change="selectImages" />
-        <input ref="recordingInput" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,.mp4,.mpeg,.mpga" class="hidden" @change="selectRecording" />
+        <input ref="fileInput" type="file" accept=".pdf,.docx,.pptx,.ppsx,.xlsx,.xls,.csv,.html,.htm,.md,.txt" multiple class="hidden" @change="selectFiles" />
+        <input ref="recordingInput" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm" class="hidden" @change="selectRecording" />
         <div
           v-if="mentionMenuOpen"
           class="absolute bottom-[104px] left-4 z-30 w-[280px] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl"
@@ -1336,19 +1433,20 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex flex-wrap items-center gap-2 border-t border-[var(--border)]/70 pt-3">
           <div class="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
-            <div class="group relative">
-              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-35" :disabled="inputBusy || !visionReady || images.length >= 4" aria-label="添加图片" :aria-describedby="'image-upload-help'" @click="imageInput?.click()">
-                <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m4 17 4-4 3 3 3-3 6 5"/></svg>
+            <div class="relative">
+              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:opacity-35" :disabled="inputBusy || !modelConfigured" aria-label="添加附件" @click="attachmentMenuOpen = !attachmentMenuOpen">
+                <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9"/></svg>
               </button>
-              <div id="image-upload-help" role="tooltip" class="pointer-events-none absolute bottom-[calc(100%+9px)] left-0 z-40 hidden w-72 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left text-[11px] leading-4 text-[var(--text)] shadow-xl group-hover:block group-focus-within:block">{{ uploadingImages ? '正在上传图片…' : visionHelp }}</div>
-            </div>
-            <div class="group relative">
-              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-35" :disabled="inputBusy || !modelConfigured || !recordingReady" aria-label="上传录音" :aria-describedby="'recording-upload-help'" @click="recordingInput?.click()">
-                <svg aria-hidden="true" class="h-[18px] w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/></svg>
-              </button>
-              <div id="recording-upload-help" role="tooltip" class="pointer-events-none absolute bottom-[calc(100%+9px)] left-0 z-40 hidden w-72 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left text-[11px] leading-4 text-[var(--text)] shadow-xl group-hover:block group-focus-within:block">{{ uploadingRecording ? '正在上传录音…' : recordingHelp }}</div>
+              <div v-if="attachmentMenuOpen" class="absolute bottom-[calc(100%+10px)] left-0 z-40 w-72 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-2xl">
+                <p class="px-2 pb-2 pt-1 text-[10px] font-semibold uppercase tracking-[.16em] text-[var(--muted)]">添加到当前对话</p>
+                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)]" @click="fileInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">▤</span><span><strong class="block text-xs">文档、演示与表格</strong><small class="text-[10px] text-[var(--muted)]">PDF、Word、PowerPoint、Excel、HTML、Markdown</small></span></button>
+                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!visionReady || images.length >= 4" @click="imageInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">▧</span><span><strong class="block text-xs">图片</strong><small class="text-[10px] text-[var(--muted)]">PNG、JPEG、WebP，最多 4 张</small></span></button>
+                <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-[var(--surface-muted)] disabled:opacity-40" :disabled="!recordingReady" @click="recordingInput?.click(); attachmentMenuOpen = false"><span class="grid h-8 w-8 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">◉</span><span><strong class="block text-xs">音频</strong><small class="text-[10px] text-[var(--muted)]">常用音频格式，最多 1 个</small></span></button>
+                <p class="mx-2 mt-2 border-t border-[var(--border)] pt-2 text-[10px] leading-4 text-[var(--muted)]">附件仅用于当前对话，不会自动进入资产库或知识库。</p>
+              </div>
             </div>
           </div>
+          <span class="ml-auto hidden text-[10px] text-[var(--muted)] md:inline">拖放文件到输入框 · 最多 10 个 / 50 MB</span>
           <span class="hidden h-6 w-px bg-[var(--border)] sm:block" aria-hidden="true" />
           <div class="relative">
             <button

@@ -2,13 +2,14 @@ import path from 'node:path';
 import os from 'node:os';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { getSharedAgentscopeRuntimeStats, saveChatImage, readChatImage, ImageInputError } from '@workmate/agent-core';
-import { ChatImagesSchema } from '@workmate/contracts';
+import { ChatFilesSchema, ChatImagesSchema } from '@workmate/contracts';
 import { JsonFileStore, Orchestrator, createScriptedRunner, type AgentRunner, type OrcEvent } from '@workmate/orchestrator';
 import type { ChatRunContext, ConfirmProjectInput, CreateProjectDraftInput, ProjectTask, ResolveProjectApprovalInput, UpdateProjectAccessInput } from '@workmate/orchestrator';
 import { requireAuth } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource, requireSystemAdmin } from '../auth/ownership.js';
 import { resolveEmployeeMcpConnections, resolveTaskContext } from './context-assembler.js';
 import { applyParentSecrets } from './secrets.js';
+import { chatAttachmentStats, cleanupChatAttachments, deleteChatFile, deleteChatFiles, resolveChatFiles, saveChatFile } from './chat-attachments.js';
 
 /**
  * Orchestration module (M0): hosts the headless orchestrator inside the API
@@ -29,6 +30,10 @@ function dataDir(): string {
 function positiveIntFromEnv(name: string, fallback: number): number {
   const raw = Number(process.env[name] || '');
   return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback;
+}
+
+function publicChatSession<T extends { messages: Array<Record<string, unknown>> }>(session: T) {
+  return { ...session, messages: session.messages.map(({ attachmentContext: _hidden, ...message }) => message) };
 }
 
 /**
@@ -143,6 +148,7 @@ function runtimeStatusSnapshot(orch: Orchestrator) {
 }
 
 export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
+  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 26 * 1024 * 1024 }, (_request, body, done) => done(null, body));
   app.addHook('onClose', async () => {
     await closeOrchestrator();
   });
@@ -232,14 +238,14 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
   app.get('/sessions', async (request) => {
     const auth = requireAuth(request);
     const sessions = await orch.chat.listChatSessions();
-    return { sessions: sessions.filter((item) => canReadOwnedResource(item, auth, { allowLegacyUnowned: true })) };
+    return { sessions: sessions.filter((item) => canReadOwnedResource(item, auth, { allowLegacyUnowned: true })).map((item) => publicChatSession(item as unknown as { messages: Array<Record<string, unknown>> })) };
   });
 
   app.get('/sessions/:sessionId', async (request, reply) => {
     const auth = requireAuth(request);
     const session = await orch.chat.getChatSession(String((request.params as Record<string, string>).sessionId));
     if (!session || !canReadOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
-    return { session };
+    return { session: publicChatSession(session as unknown as { messages: Array<Record<string, unknown>> }) };
   });
 
   app.delete('/sessions/:sessionId', async (request, reply) => {
@@ -248,8 +254,32 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     const session = await orch.chat.getChatSession(sessionId);
     if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
     await orch.chat.deleteChatSession(sessionId);
+    await deleteChatFiles(sessionId);
     return { ok: true };
   });
+
+  app.post('/sessions/:sessionId/files', { bodyLimit: 26 * 1024 * 1024 }, async (request, reply) => {
+    const auth = requireAuth(request); const sessionId = String((request.params as Record<string, string>).sessionId);
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return reply.code(404).send({ message: 'Chat session not found.' });
+    try {
+      const encodedName = String(request.headers['x-workmate-file-name'] || '');
+      const name = decodeURIComponent(encodedName);
+      if (!Buffer.isBuffer(request.body)) throw new Error('附件请求必须使用二进制上传。');
+      return await saveChatFile(sessionId, { name, bytes: request.body });
+    }
+    catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : '附件处理失败。' }); }
+  });
+
+  app.delete('/sessions/:sessionId/files/:fileId', async (request, reply) => {
+    const auth = requireAuth(request); const { sessionId, fileId } = request.params as Record<string, string>;
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return reply.code(404).send({ message: 'Chat session not found.' });
+    await deleteChatFile(sessionId, fileId); return { ok: true };
+  });
+
+  app.get('/attachments/stats', async (request) => { requireAuth(request); return chatAttachmentStats(); });
+  app.post('/attachments/cleanup', async (request) => { requireAuth(request); return cleanupChatAttachments(request.body as { dryRun?: boolean }); });
 
   app.post('/sessions/:sessionId/images', { bodyLimit: 15 * 1024 * 1024 }, async (request, reply) => {
     const auth = requireAuth(request);
@@ -278,14 +308,19 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     const sessionId = String((request.params as Record<string, string>).sessionId);
     const session = await orch.chat.getChatSession(sessionId);
     if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
-    const body = (request.body ?? {}) as { content?: string; employeeId?: string; context?: ChatRunContext; attachments?: unknown };
+    const body = (request.body ?? {}) as { content?: string; employeeId?: string; context?: ChatRunContext; attachments?: unknown; fileAttachments?: unknown };
     if (!body.content) return fail(reply, new Error('content is required.'));
     const images = ChatImagesSchema.safeParse(body.attachments ?? []);
     if (!images.success) return reply.code(400).send({ message: '图片附件无效，每次最多 4 张。' });
+    const files = ChatFilesSchema.safeParse(body.fileAttachments ?? []);
+    if (!files.success) return reply.code(400).send({ message: '文件附件无效，每次最多 10 个。' });
     try {
+      const resolvedFiles = await resolveChatFiles(sessionId, files.data, body.content);
       return await orch.chat.sendUserMessage(sessionId, {
         content: body.content,
         attachments: images.data,
+        fileAttachments: resolvedFiles.attachments,
+        attachmentContext: resolvedFiles.context,
         employeeId: body.employeeId,
         context: body.context,
       });

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
-import { manualHeadings, renderManualHtml } from '../../app/user-manual';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { manualHeadings, manualSections, type ManualSection } from '../../app/user-manual';
 
 /**
  * 「用户手册」页面：把 docs/guides/user-manual.md 渲染为带目录的阅读视图。
@@ -9,10 +9,20 @@ import { manualHeadings, renderManualHtml } from '../../app/user-manual';
 const props = defineProps<{ anchor?: string | null }>();
 const emit = defineEmits<{ 'anchor-consumed': [] }>();
 
-const html = renderManualHtml();
 const headings = manualHeadings();
 const toc = headings.filter((item) => item.level === 2 || item.level === 3);
 const contentRef = ref<HTMLElement | null>(null);
+const sections = ref<ManualSection[]>([]);
+const activeSectionId = ref('');
+const loading = ref(true);
+const activeSection = computed(() => sections.value.find((item) => item.id === activeSectionId.value) ?? sections.value[0]);
+const activeSectionIndex = computed(() => sections.value.findIndex((item) => item.id === activeSection.value?.id));
+const previousSection = computed(() => activeSectionIndex.value > 0 ? sections.value[activeSectionIndex.value - 1] : undefined);
+const nextSection = computed(() => activeSectionIndex.value >= 0 ? sections.value[activeSectionIndex.value + 1] : undefined);
+
+function sectionForHeading(id: string): ManualSection | undefined {
+  return sections.value.find((section) => section.id === id || section.headingIds.includes(id));
+}
 
 function scrollToId(id: string, behavior: ScrollBehavior = 'smooth') {
   const el = document.getElementById(id);
@@ -20,7 +30,15 @@ function scrollToId(id: string, behavior: ScrollBehavior = 'smooth') {
 }
 
 function jumpTo(id: string) {
-  scrollToId(id);
+  const section = sectionForHeading(id);
+  if (!section) return;
+  activeSectionId.value = section.id;
+  void nextTick(() => requestAnimationFrame(() => scrollToId(id, 'auto')));
+}
+
+function openSection(section: ManualSection) {
+  activeSectionId.value = section.id;
+  void nextTick(() => contentRef.value?.closest('.overflow-auto')?.scrollTo({ top: 0, behavior: 'smooth' }));
 }
 
 /** 手册内 `[文字](#锚点)` 跳转拦截：平滑滚动到对应章节而非修改页面 hash。 */
@@ -30,25 +48,31 @@ function onArticleClick(event: MouseEvent) {
   const id = decodeURIComponent((link.getAttribute('href') || '').slice(1));
   if (!id) return;
   event.preventDefault();
-  scrollToId(id);
+  jumpTo(id);
 }
 
 onMounted(() => {
-  const target = props.anchor;
-  if (target) {
-    // 等待 v-html 注入完成后再定位
-    requestAnimationFrame(() => {
-      scrollToId(target, 'auto');
-      emit('anchor-consumed');
-    });
-  }
+  // 先绘制页面框架和骨架，再解析并挂载正文，避免 Windows 上长时间白屏。
+  requestAnimationFrame(() => {
+    window.setTimeout(() => {
+      sections.value = manualSections();
+      const target = props.anchor;
+      activeSectionId.value = sectionForHeading(target || '')?.id ?? sections.value[0]?.id ?? '';
+      loading.value = false;
+      void nextTick(() => requestAnimationFrame(() => {
+        if (target) scrollToId(target, 'auto');
+        if (target) emit('anchor-consumed');
+      }));
+    }, 0);
+  });
 });
 
 watch(
   () => props.anchor,
   (next) => {
     if (!next) return;
-    scrollToId(next);
+    if (loading.value) return;
+    jumpTo(next);
     emit('anchor-consumed');
   },
 );
@@ -82,10 +106,23 @@ watch(
           <div class="sticky top-2 max-h-[calc(100vh-140px)] overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 p-3">
             <p class="px-2 pb-2 text-[11px] font-bold uppercase tracking-[.08em] text-[var(--muted)]">目录</p>
             <ul class="grid gap-0.5">
+              <li v-if="sections[0]?.id === 'manual-overview'">
+                <button
+                  class="w-full rounded-lg px-2 py-1.5 text-left text-[13px] font-semibold transition hover:bg-[var(--surface-muted)]"
+                  :class="activeSection?.id === 'manual-overview' ? 'bg-[var(--surface-muted)] text-[var(--accent)]' : 'text-[var(--text)]'"
+                  type="button"
+                  @click="openSection(sections[0])"
+                >
+                  手册说明
+                </button>
+              </li>
               <li v-for="item in toc" :key="item.id">
                 <button
                   class="w-full truncate rounded-lg px-2 py-1.5 text-left text-[13px] leading-snug text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
-                  :class="item.level === 3 ? 'pl-5 text-xs' : 'font-semibold text-[var(--text)]'"
+                  :class="[
+                    item.level === 3 ? 'pl-5 text-xs' : 'font-semibold text-[var(--text)]',
+                    item.level === 2 && item.id === activeSection?.id ? 'bg-[var(--surface-muted)] text-[var(--accent)]' : '',
+                  ]"
                   type="button"
                   :title="item.text"
                   @click="jumpTo(item.id)"
@@ -98,12 +135,41 @@ watch(
         </nav>
 
         <!-- 正文 -->
+        <div v-if="loading" class="manual-loading min-h-[420px] rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-5 py-6 sm:px-8" aria-live="polite">
+          <div class="h-7 w-48 animate-pulse rounded-lg bg-[var(--surface-muted)]" />
+          <div class="mt-8 grid gap-3">
+            <div class="h-4 w-full animate-pulse rounded bg-[var(--surface-muted)]" />
+            <div class="h-4 w-11/12 animate-pulse rounded bg-[var(--surface-muted)]" />
+            <div class="h-4 w-4/5 animate-pulse rounded bg-[var(--surface-muted)]" />
+          </div>
+          <p class="mt-8 text-sm text-[var(--muted)]">正在准备用户手册…</p>
+        </div>
         <article
+          v-else-if="activeSection"
           ref="contentRef"
           class="manual-prose min-w-0 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]/90 px-5 py-6 shadow-[0_12px_40px_-28px_rgba(15,23,42,0.45)] sm:px-8"
           @click="onArticleClick"
         >
-          <div v-html="html" />
+          <div v-html="activeSection.html" />
+          <footer class="mt-10 flex items-center justify-between gap-3 border-t border-[var(--border)] pt-5">
+            <button
+              v-if="previousSection"
+              type="button"
+              class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--text)]"
+              @click="openSection(previousSection)"
+            >
+              ← {{ previousSection.title }}
+            </button>
+            <span v-else />
+            <button
+              v-if="nextSection"
+              type="button"
+              class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm text-[var(--accent)] transition hover:bg-[var(--surface-muted)]"
+              @click="openSection(nextSection)"
+            >
+              {{ nextSection.title }} →
+            </button>
+          </footer>
         </article>
       </div>
     </div>
@@ -236,8 +302,15 @@ watch(
   border-bottom: none;
 }
 .manual-prose .manual-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 8 / 5;
+  object-fit: contain;
   max-width: 100%;
   border-radius: 12px;
+  content-visibility: auto;
+  contain-intrinsic-size: 1000px 625px;
 }
 .manual-prose .manual-hr {
   margin: 1.75rem 0;

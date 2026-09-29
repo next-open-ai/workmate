@@ -30,6 +30,32 @@ test('same-name tool calls settle by invocation id without duplicating activitie
   }
 });
 
+test('application-model activities persist their elapsed duration', async () => {
+  const runner: AgentRunner = {
+    async start(_request, emit) {
+      const runId = 'capability-timing-run';
+      emit({ type: 'run.started', runId });
+      emit({ type: 'capability.started', runId, invocationId: 'image-1', capability: 'image', modelId: 'image-model', summary: '正在生成图片' });
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      emit({ type: 'capability.completed', runId, invocationId: 'image-1', capability: 'image', modelId: 'image-model', summary: '图片生成完成', ok: true });
+      emit({ type: 'run.completed', runId });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const session = await orch.chat.createChatSession();
+    const { runId } = await orch.chat.sendUserMessage(session.id, { content: 'generate image', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(runId))?.status === 'completed');
+    const activity = (await orch.chat.getRun(runId))?.activities[0];
+    assert.equal(activity?.toolName, 'model:image');
+    assert.equal(activity?.status, 'completed');
+    assert.equal(typeof activity?.startedAt, 'number');
+    assert.ok((activity?.durationMs ?? 0) >= 10);
+  } finally {
+    await orch.close();
+  }
+});
+
 test('two clients share the same durable chat session state', async () => {
   const fake = new FakeRunner();
   // One physical store shared by two orchestrator instances: the desktop UI

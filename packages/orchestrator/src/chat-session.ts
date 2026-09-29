@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { cleanupConversationSessionWorkspaces, deleteChatImages, readChatImage, assertVisionSupported, resolveExecutionBackend, loadExecutionRoutingConfig } from '@workmate/agent-core';
-import { ChatImagesSchema } from '@workmate/contracts';
+import { ChatFilesSchema, ChatImagesSchema } from '@workmate/contracts';
 import type { ChatRequest, ModelConfig } from '@workmate/contracts';
 import type { EventHub, HubListener } from './hub.js';
 import { deleteKey, listJsonIds, readJson, writeJson } from './repo.js';
@@ -56,6 +56,8 @@ export interface ChatSessionServiceOptions {
 export interface SendUserMessageInput {
   content: string;
   attachments?: import('@workmate/contracts').ChatImageAttachment[];
+  fileAttachments?: import('@workmate/contracts').ChatFileAttachment[];
+  attachmentContext?: string;
   /** Resolved runtime context; when omitted the service uses its resolver. */
   context?: ChatRunContext;
   /** Override the session employee recorded with the message. */
@@ -251,11 +253,12 @@ export class ChatSessionService {
     if (!text) throw new Error('Message content is empty.');
 
     const attachments = ChatImagesSchema.parse(input.attachments ?? []);
+    const fileAttachments = ChatFilesSchema.parse(input.fileAttachments ?? []);
     const verifiedAttachments = await Promise.all(attachments.map(async (image) => (await readChatImage(sessionId, image.id)).attachment));
     const turnId = randomUUID();
     const runId = randomUUID();
     const now = Date.now();
-    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, ...(verifiedAttachments.length ? { attachments: verifiedAttachments } : {}), createdAt: now, turnId };
+    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, ...(verifiedAttachments.length ? { attachments: verifiedAttachments } : {}), ...(fileAttachments.length ? { fileAttachments } : {}), ...(input.attachmentContext?.trim() ? { attachmentContext: input.attachmentContext.trim().slice(0, 40_000) } : {}), createdAt: now, turnId };
     const assistantMessage: ChatMessage = { id: randomUUID(), role: 'assistant', content: '', createdAt: now, turnId, runId };
     const attemptNo = 1;
 

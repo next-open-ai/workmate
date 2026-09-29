@@ -79,6 +79,14 @@ export interface RuntimeStatusResponse {
   sidecar: RuntimeSidecarStatus;
 }
 
+export interface PptxEnhancedComponentStatus {
+  state: 'not-installed' | 'ready' | 'broken';
+  installed: boolean;
+  version: string | null;
+  location: string;
+  message?: string;
+}
+
 export async function getHealth(): Promise<HealthStatus> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
   const response = await fetch(`${apiBase}/api/health`);
@@ -246,6 +254,30 @@ export async function saveServerRuntimeConfig(value: unknown) {
   return body as unknown;
 }
 
+export async function getPptxEnhancedComponentStatus(): Promise<PptxEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/pptx-enhanced`);
+  const body = await response.json().catch(() => ({})) as PptxEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `PPTX component status failed: ${response.status}`);
+  return body;
+}
+
+export async function installPptxEnhancedComponent(): Promise<PptxEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/pptx-enhanced/install`, { method: 'POST' });
+  const body = await response.json().catch(() => ({})) as PptxEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `PPTX component install failed: ${response.status}`);
+  return body;
+}
+
+export async function removePptxEnhancedComponent(): Promise<PptxEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/pptx-enhanced`, { method: 'DELETE' });
+  const body = await response.json().catch(() => ({})) as PptxEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `PPTX component removal failed: ${response.status}`);
+  return body;
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatusResponse> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
   const response = await fetch(`${apiBase}/api/orch/runtime/status`);
@@ -329,7 +361,7 @@ export interface RuntimeSkill {
   execution: { allowWorkspaceWrite: boolean; allowScriptExecution: boolean; allowedNetworkHosts: string[]; allowAllNonDestructive: boolean };
 }
 
-export interface ToolActivity { invocationId?: string; progress?: number; toolName: string; summary: string; status: 'running' | 'completed' | 'failed'; }
+export interface ToolActivity { invocationId?: string; progress?: number; toolName: string; summary: string; status: 'running' | 'completed' | 'failed'; startedAt?: number; durationMs?: number; at?: number; }
 export interface CapabilityHealthObservation {
   capability: import('@workmate/contracts').ModelCapability;
   modelId: string;
@@ -347,7 +379,10 @@ export function mergeToolActivity(activities: ToolActivity[], incoming: ToolActi
     : activities.find((item) => !item.invocationId && item.toolName === incoming.toolName && item.status === 'running');
   if (existing) {
     const startedSummary = existing.summary;
+    const startedAt = existing.startedAt ?? existing.at ?? Date.now();
     Object.assign(existing, incoming);
+    existing.startedAt = startedAt;
+    if (incoming.status !== 'running' && existing.durationMs == null) existing.durationMs = Math.max(0, Date.now() - startedAt);
     if (incoming.status !== 'running' && incoming.status !== 'failed') existing.summary = startedSummary;
     else if (incoming.status === 'failed' && startedSummary && incoming.summary && !startedSummary.includes(incoming.summary)) {
       existing.summary = `${startedSummary} — ${incoming.summary}`;
@@ -357,7 +392,12 @@ export function mergeToolActivity(activities: ToolActivity[], incoming: ToolActi
   const duplicate = !incoming.invocationId && activities.find((item) => !item.invocationId
     && item.toolName === incoming.toolName && item.summary === incoming.summary && item.status === incoming.status);
   if (duplicate) return duplicate;
-  const added = { ...incoming };
+  const now = Date.now();
+  const added = {
+    ...incoming,
+    startedAt: incoming.startedAt ?? incoming.at ?? now,
+    ...(incoming.status !== 'running' && incoming.durationMs == null ? { durationMs: 0 } : {}),
+  };
   activities.push(added);
   return added;
 }
@@ -385,6 +425,8 @@ export type KnowledgeBasePayload = {
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  embeddingMode?: 'system' | 'model';
+  embeddingModelConfigId?: string;
   embeddingMeta?: {
     dimension?: number;
     normalize?: boolean;
@@ -675,12 +717,37 @@ export type OntologyWorkflowPayload = {
   updatedAt: number;
 };
 
+export type OntologyQueryPlanPayload = {
+  query: string;
+  matchedNodes: Array<{ id: string; type: string; name: string; aliases?: string[]; properties?: Record<string, unknown>; source?: string; status: string; score: number }>;
+  relatedNodes: Array<{ id: string; type: string; name: string; aliases?: string[]; properties?: Record<string, unknown>; source?: string; status: string }>;
+  edges: Array<{ id: string; subjectId: string; predicate: string; objectId: string; properties?: Record<string, unknown>; source?: string; status: string }>;
+  expandedTerms: string[];
+  filters: Record<string, string>;
+};
+
+export type OntologyHybridSearchPayload = {
+  ok: true;
+  query: string;
+  strategy: 'vector-only' | 'ontology-enhanced';
+  plan: OntologyQueryPlanPayload;
+  results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string }>;
+};
+
 export const readOntologyWorkflow = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/workflow/read', { knowledgeBase });
 export const saveOntologyDraft = (knowledgeBase: KnowledgeBasePayload, graph: unknown) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/save', { knowledgeBase, graph });
 export const publishOntologyDraft = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/publish', { knowledgeBase });
 export const importOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidates: unknown[]) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/import', { knowledgeBase, candidates });
+export const extractOntologyCandidates = (input: {
+  knowledgeBase: KnowledgeBasePayload;
+  documentIds: string[];
+  instructions?: string;
+  model: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string };
+}) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload; generated: number; nodes: number; edges: number; analyzedChunks: number }>('/api/knowledge/ontology/candidates/extract', input);
 export const reviewOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidateIds: string[], decision: 'accepted' | 'rejected', note?: string) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/review', { knowledgeBase, candidateIds, decision, note });
 export const commitOntologyCandidates = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload & { committed?: number } }>('/api/knowledge/ontology/candidates/commit', { knowledgeBase });
+export const queryOntology = (knowledgeBase: KnowledgeBasePayload, query: string, maxHops = 1) => postKnowledge<{ ok: true; plan: OntologyQueryPlanPayload }>('/api/knowledge/ontology/query', { knowledgeBase, query, maxHops });
+export const searchKnowledgeWithOntology = (input: { knowledgeBase: KnowledgeBasePayload; query: string; topK?: number; model?: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string } }) => postKnowledge<OntologyHybridSearchPayload>('/api/knowledge/hybrid-search', input);
 
 export async function listBailianPipelines(input: {
   apiKey: string;
@@ -1313,6 +1380,14 @@ export async function listArchivedAssets() {
   const body = await response.json().catch(() => ([])) as Array<Partial<AssetPayload>> | { message?: string };
   if (!response.ok || !Array.isArray(body)) throw new Error((body as { message?: string }).message || `Assets list failed: ${response.status}`);
   return body.map((item) => normalizeAsset(item));
+}
+
+export async function importChatAttachmentToAssets(sessionId: string, attachmentId: string) {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/assets/import-chat-attachment`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, attachmentId }) });
+  const body = await response.json().catch(() => ({})) as { id?: string; name?: string; message?: string };
+  if (!response.ok) throw new Error(body.message || `保存资产失败：${response.status}`);
+  return body;
 }
 
 export async function archiveWorkspaceArtifact(input: {

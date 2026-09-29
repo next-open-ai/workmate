@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, h, onMounted, onUnmounted, ref, watch } from 'vue';
 import { getHealth } from '../services/api';
 import AppSidebar from './AppSidebar.vue';
 import ChatWorkspace from '../features/chat/ChatWorkspace.vue';
@@ -13,7 +13,6 @@ import AutomationsPage from '../features/automations/AutomationsPage.vue';
 import ProjectsPage from '../features/projects/ProjectsPage.vue';
 import RemoteOfficePage from '../features/remote/RemoteOfficePage.vue';
 import EnvironmentPage from '../features/environment/EnvironmentPage.vue';
-import DocsPage from '../features/docs/DocsPage.vue';
 import { runEnvironmentCheck } from '../services/environment';
 import AppToastHost from '../features/common/AppToastHost.vue';
 import EnvironmentCheckDialog from '../features/common/EnvironmentCheckDialog.vue';
@@ -41,6 +40,24 @@ import { useMcpConfig } from './mcp-config';
 import { useNotify } from './notify';
 import { isDesktopShell, isViewAvailable } from './platform';
 import type { View } from './workspace';
+
+const DocsPage = defineAsyncComponent({
+  loader: () => import('../features/docs/DocsPage.vue'),
+  delay: 0,
+  loadingComponent: () => h('section', { class: 'grid h-full place-items-center bg-[var(--background)] text-sm text-[var(--muted)]' }, [
+    h('div', { class: 'grid justify-items-center gap-3' }, [
+      h('span', { class: 'h-7 w-7 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]' }),
+      h('span', '正在加载用户手册…'),
+    ]),
+  ]),
+  errorComponent: () => h('section', { class: 'grid h-full place-items-center bg-[var(--background)] px-6 text-center' }, [
+    h('div', [
+      h('p', { class: 'font-semibold text-[var(--text)]' }, '用户手册加载失败'),
+      h('p', { class: 'mt-2 text-sm text-[var(--muted)]' }, '请重新进入用户手册；如果问题持续，请重启应用。'),
+    ]),
+  ]),
+  timeout: 15_000,
+});
 
 const { t, loadLocale } = useI18n();
 const {
@@ -343,7 +360,7 @@ async function handleLogout() {
   <div v-else class="flex h-screen min-h-[600px] overflow-hidden bg-[var(--background)] text-[var(--text)]">
     <AppSidebar :collapsed="sidebarCollapsed" :view="view" :conversations="conversations" :active-conversation-id="activeConversation?.id ?? null" :service-ready="serviceReady" :current-user="user" @toggle="toggleSidebar" @navigate="setView" @new-chat="startChat()" @select-conversation="selectConversation" @delete-conversation="deleteConversation" @logout="handleLogout" />
     <main :class="['relative min-w-0 flex-1 bg-[var(--background)]', view === 'chat' || view === 'capabilities' || view === 'knowledge' || view === 'assets' || view === 'data' || view === 'automations' || view === 'projects' ? 'overflow-hidden' : 'overflow-auto']">
-      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" :ensure-server-session="ensureActiveServerSession" :pull-from-server="pullActiveConversationFromServer" :follow-mobile-session="followMobileChatSession" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-data="setView('data')" @open-settings="setView('settings')" />
+      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" :ensure-server-session="ensureActiveServerSession" :pull-from-server="pullActiveConversationFromServer" :follow-mobile-session="followMobileChatSession" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-data="setView('data')" @open-settings="setView('settings')" />
       <EmployeesPage
         v-else-if="view === 'employees'"
         :employees="employees"

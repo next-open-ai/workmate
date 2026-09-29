@@ -4,12 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node ../../scripts/generate-user-manual.mjs",
     "dev": "vite --host 127.0.0.1 --port 47831 --strictPort",
+    "prebuild": "node ../../scripts/generate-user-manual.mjs",
     "build": "vue-tsc -b && vite build",
+    "pretypecheck": "node ../../scripts/generate-user-manual.mjs",
     "typecheck": "vue-tsc -b --noEmit"
   },
   "dependencies": {
     "@workmate/contracts": "workspace:*",
+    "cytoscape": "3.34.3",
     "monaco-editor": "^0.52.2",
     "qrcode": "^1.5.4",
     "vue": "^3.5.13"

@@ -97,7 +97,9 @@ export function markdownToHtml(source: string) {
     if (heading) html.push(`<h${heading[1].length}>${inlineMd(escape(heading[2]))}</h${heading[1].length}>`);
     else if (/^\s*>\s?/.test(raw)) html.push(`<blockquote>${inlineMd(escape(raw.replace(/^\s*>\s?/, '')))}</blockquote>`);
     else if (/^\s*(\*{3,}|-{3,}|_{3,})\s*$/.test(raw)) html.push('<hr/>');
-    else if (!raw.trim()) { if (html.length && html.at(-1) !== '<br/>') html.push('<br/>'); }
+    // Block elements own their vertical rhythm. Emitting a standalone <br> for
+    // Markdown blank lines doubles the space around headings, paragraphs and lists.
+    else if (!raw.trim()) { /* semantic block separation only */ }
     else html.push(`<p>${inlineMd(escape(raw))}</p>`);
   }
   closeList();

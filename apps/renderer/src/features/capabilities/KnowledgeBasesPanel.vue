@@ -13,7 +13,7 @@ import { ingestKnowledgeDocument } from '../../services/api';
 
 const { t } = useI18n();
 const notify = useNotify();
-const { bases, load, upsert, remove, setEnabled, setDocumentCount, isReady } = useKnowledgeConfig();
+const { bases, load, upsert, remove, setEnabled, setDocumentCount, isReady, runtimePayload } = useKnowledgeConfig();
 const { activeConfig, configured, load: loadModels } = useModelConfig();
 
 const editingId = ref<string | null>(null);
@@ -92,6 +92,7 @@ function meta(provider: KnowledgeProviderId) {
 async function save() {
   saving.value = true;
   try {
+    const existing = editingId.value ? bases.value.find((item) => item.id === editingId.value) : undefined;
     const saved = await upsert({
       id: editingId.value || undefined,
       name: draft.value.name,
@@ -102,6 +103,11 @@ async function save() {
       apiKey: draft.value.apiKey,
       externalId: draft.value.externalId,
       embeddingModel: draft.value.embeddingModel,
+      embeddingMode: existing?.embeddingMode,
+      embeddingModelConfigId: existing?.embeddingModelConfigId,
+      embeddingBaseUrl: existing?.embeddingBaseUrl,
+      embeddingApiKey: existing?.embeddingApiKey,
+      embeddingMeta: existing?.embeddingMeta,
     });
     selectedId.value = saved.id;
     notify.success(editingId.value ? 'notify.kbUpdated' : 'notify.kbCreated');
@@ -149,15 +155,10 @@ async function runIngest() {
   }
   ingestBusy.value = true;
   try {
+    const runtimeKnowledgeBase = runtimePayload([ingestTarget.value.id])[0];
+    if (!runtimeKnowledgeBase?.embeddingModel) throw new Error(t('capabilities.kbEmbeddingRequired'));
     const result = await ingestKnowledgeDocument({
-      knowledgeBase: {
-        id: ingestTarget.value.id,
-        name: ingestTarget.value.name,
-        provider: 'lancedb',
-        enabled: true,
-        dataDir: ingestTarget.value.dataDir || undefined,
-        embeddingModel: ingestTarget.value.embeddingModel || undefined,
-      },
+      knowledgeBase: runtimeKnowledgeBase,
       title: ingestTitle.value.trim() || 'document',
       content: ingestContent.value,
       model: toModelPayload(activeConfig.value),

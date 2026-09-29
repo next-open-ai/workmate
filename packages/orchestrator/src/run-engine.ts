@@ -238,7 +238,8 @@ export class RunEngine {
           break;
         }
         case 'tool.started': {
-          const activity: RunActivity = { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', at: Date.now() };
+          const now = Date.now();
+          const activity: RunActivity = { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', startedAt: now, at: now };
           run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity });
           scheduleCheckpoint();
@@ -246,9 +247,10 @@ export class RunEngine {
         }
         case 'tool.progress': {
           const existing = findRunningActivity(run.activities, event);
+          const now = Date.now();
           const activity: RunActivity = existing
-            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: Date.now() })
-            : { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', progress: event.progress, at: Date.now() };
+            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: now })
+            : { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', progress: event.progress, startedAt: now, at: now };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
@@ -256,17 +258,21 @@ export class RunEngine {
         }
         case 'tool.completed': {
           const existing = findRunningActivity(run.activities, event);
+          const now = Date.now();
           // Keep the started summary (often includes args); only flip status.
           const activity: RunActivity = existing
             ? Object.assign(existing, {
                 status: event.ok ? 'completed' : 'failed',
-                at: Date.now(),
+                durationMs: Math.max(0, now - (existing.startedAt ?? existing.at)),
+                at: now,
               })
             : {
                 invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
                 status: event.ok ? 'completed' : 'failed',
-                at: Date.now(),
+                startedAt: now,
+                durationMs: 0,
+                at: now,
               };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
@@ -275,19 +281,23 @@ export class RunEngine {
         }
         case 'tool.failed': {
           const existing = findRunningActivity(run.activities, event);
+          const now = Date.now();
           const activity: RunActivity = existing
             ? Object.assign(existing, {
                 status: 'failed',
                 summary: event.summary && !existing.summary.includes(event.summary)
                   ? `${existing.summary} — ${event.summary}`
                   : (existing.summary || event.summary),
-                at: Date.now(),
+                durationMs: Math.max(0, now - (existing.startedAt ?? existing.at)),
+                at: now,
               })
             : {
                 invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
                 status: 'failed',
-                at: Date.now(),
+                startedAt: now,
+                durationMs: 0,
+                at: now,
               };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
@@ -295,7 +305,8 @@ export class RunEngine {
           break;
         }
         case 'capability.started': {
-          const activity: RunActivity = { invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'running', at: Date.now() };
+          const now = Date.now();
+          const activity: RunActivity = { invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'running', startedAt: now, at: now };
           run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity });
           scheduleCheckpoint();
@@ -304,9 +315,10 @@ export class RunEngine {
         case 'capability.progress': {
           const toolName = `model:${event.capability}`;
           const existing = findRunningActivity(run.activities, { invocationId: event.invocationId, toolName });
+          const now = Date.now();
           const activity: RunActivity = existing
-            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: Date.now() })
-            : { invocationId: event.invocationId, toolName, summary: event.summary, status: 'running', progress: event.progress, at: Date.now() };
+            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: now })
+            : { invocationId: event.invocationId, toolName, summary: event.summary, status: 'running', progress: event.progress, startedAt: now, at: now };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
@@ -317,9 +329,10 @@ export class RunEngine {
           const toolName = `model:${event.capability}`;
           const existing = findRunningActivity(run.activities, { invocationId: event.invocationId, toolName });
           const failed = event.type === 'capability.failed' || (event.type === 'capability.completed' && !event.ok);
+          const now = Date.now();
           const activity: RunActivity = existing
-            ? Object.assign(existing, { status: failed ? 'failed' : 'completed', ...(failed ? { summary: event.summary } : {}), progress: failed ? existing.progress : 100, at: Date.now() })
-            : { invocationId: event.invocationId, toolName, summary: event.summary, status: failed ? 'failed' : 'completed', progress: failed ? undefined : 100, at: Date.now() };
+            ? Object.assign(existing, { status: failed ? 'failed' : 'completed', ...(failed ? { summary: event.summary } : {}), progress: failed ? existing.progress : 100, durationMs: Math.max(0, now - (existing.startedAt ?? existing.at)), at: now })
+            : { invocationId: event.invocationId, toolName, summary: event.summary, status: failed ? 'failed' : 'completed', progress: failed ? undefined : 100, startedAt: now, durationMs: 0, at: now };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
@@ -492,6 +505,7 @@ export class RunEngine {
     // Close any activity rows that never received tool.completed (lost events / parallel same-name).
     for (const activity of run.activities) {
       if (activity.status !== 'running') continue;
+      const now = Date.now();
       if (run.status === 'completed' || run.status === 'waiting-approval') {
         activity.status = 'completed';
         activity.summary = activity.summary.includes('完成') ? activity.summary : `${activity.summary}（已完成）`;
@@ -499,7 +513,8 @@ export class RunEngine {
         activity.status = 'failed';
         activity.summary = activity.summary.includes('中止') ? activity.summary : `${activity.summary}（已中止）`;
       }
-      activity.at = Date.now();
+      activity.durationMs = Math.max(0, now - (activity.startedAt ?? activity.at));
+      activity.at = now;
       publish({ type: 'run.activity', runId, activity: { ...activity } });
     }
     run.finishedAt = Date.now();

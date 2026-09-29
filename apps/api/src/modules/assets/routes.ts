@@ -9,6 +9,7 @@ import { requireAuth } from '../auth/service.js';
 import type { AuthPrincipal } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource } from '../auth/ownership.js';
 import { getOrchestrator } from '../orchestration/routes.js';
+import { readChatFile } from '../orchestration/chat-attachments.js';
 
 const require = createRequire(import.meta.url);
 
@@ -92,6 +93,8 @@ function assetMimeType(name: string) {
     '.pdf': 'application/pdf',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.ppsx': 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
     '.csv': 'text/csv',
     '.json': 'application/json',
     '.txt': 'text/plain',
@@ -214,7 +217,7 @@ export async function storeUploadedDataAsset(input: {
   const name = path.basename(input.name || '数据文件').replace(/[\0/\\]/g, '_').slice(0, 180) || '数据文件';
   const content = input.content;
   if (!content.length) throw new Error('上传的文件为空。');
-  if (content.length > 8 * 1024 * 1024) throw new Error('首期仅支持 8 MB 以内的数据文件。');
+  if (content.length > 25 * 1024 * 1024) throw new Error('资产文件不能超过 25 MB。');
   const db = await database();
   const id = randomUUID();
   const runId = randomUUID();
@@ -522,6 +525,18 @@ export async function resolveAssetSiteBundleRoot(assetId: string): Promise<{
 
 export const assetRoutes: FastifyPluginAsync = async (app) => {
   app.get('/assets', async (request) => listAssets(requireAuth(request)));
+
+  app.post('/assets/import-chat-attachment', async (request, reply) => {
+    const auth = requireAuth(request);
+    const body = request.body as { sessionId?: string; attachmentId?: string };
+    const sessionId = String(body?.sessionId || ''); const attachmentId = String(body?.attachmentId || '');
+    const session = await getOrchestrator().chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return reply.code(404).send({ message: 'Chat session not found.' });
+    try {
+      const file = await readChatFile(sessionId, attachmentId);
+      return await storeUploadedDataAsset({ name: file.attachment.name, content: file.bytes, mimeType: file.attachment.mimeType, auth });
+    } catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : '保存资产失败。' }); }
+  });
 
   app.post('/assets/archive', async (request, reply) => {
     const auth = requireAuth(request);

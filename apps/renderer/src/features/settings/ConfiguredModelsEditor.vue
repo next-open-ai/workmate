@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { suggestedSpeechVoices } from '@workmate/contracts';
+import { DEFAULT_EMBEDDING_META, suggestedSpeechVoices } from '@workmate/contracts';
 import { useI18n } from '../../app/i18n';
 import {
   imageGenerationProtocols,
@@ -145,6 +145,7 @@ function addModel(modelId: string, makeDefault = true) {
     providerInstanceId: instance.id,
     capability: draftCapability.value,
     modelId: trimmed,
+    meta: draftCapability.value === 'embedding' ? { ...DEFAULT_EMBEDDING_META } : undefined,
     imageProtocol: draftCapability.value === 'image' && draftImageProtocol.value ? draftImageProtocol.value : undefined,
     decisionProtocol: draftCapability.value === 'decision' ? 'system-one-v1' : undefined,
     supportsBuiltinWebSearch: draftCapability.value === 'chat' && instance.type === 'qwen' ? true : undefined,
@@ -426,14 +427,14 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
         </div>
         <p v-if="model.capability === 'vision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">用于主模型不能看图时的定向识别；请选择确实支持图片输入的模型，设为默认后在员工应用模型能力中开启“图片理解”。不会替换主模型。</p>
         <p v-else-if="model.capability === 'decision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">有限问题决策模型，不进入聊天主模型选择器。设为默认后，可在“决策守卫”中选择并用于 Tool 执行前安检和主模型按需判断。</p>
-        <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-4">
+        <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-3">
           <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
             <span>Dimension</span>
             <input
               class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
               type="number"
               min="1"
-              :value="model.meta?.dimension ?? ''"
+              :value="model.meta?.dimension ?? DEFAULT_EMBEDDING_META.dimension"
               @input="patchEmbeddingMeta(model, 'dimension', eventInputValue($event))"
             />
           </label>
@@ -443,7 +444,7 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
               class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
               type="number"
               min="1"
-              :value="model.meta?.maxBatch ?? ''"
+              :value="model.meta?.maxBatch ?? DEFAULT_EMBEDDING_META.maxBatch"
               @input="patchEmbeddingMeta(model, 'maxBatch', eventInputValue($event))"
             />
           </label>
@@ -453,19 +454,24 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
               class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2 text-xs font-normal"
               type="number"
               min="1"
-              :value="model.meta?.maxInputChars ?? ''"
+              :value="model.meta?.maxInputChars ?? DEFAULT_EMBEDDING_META.maxInputChars"
               @input="patchEmbeddingMeta(model, 'maxInputChars', eventInputValue($event))"
             />
           </label>
-          <label class="flex items-center gap-2 text-[11px] font-semibold text-[var(--muted)]">
+          <label
+            class="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-[var(--border)]/70 bg-[var(--surface-muted)]/45 px-3 py-2 text-[11px] text-[var(--muted)] sm:col-span-3"
+            title="将向量转换为单位长度，使余弦相似度和点积检索结果更稳定。知识库语义检索通常建议开启。"
+          >
             <input
               type="checkbox"
-              :checked="Boolean(model.meta?.normalize)"
+              :checked="model.meta?.normalize ?? DEFAULT_EMBEDDING_META.normalize"
               @change="patchEmbeddingMeta(model, 'normalize', eventChecked($event))"
             />
-            <span>Normalize</span>
+            <span class="font-semibold text-[var(--text)]">向量归一化</span>
+            <span class="grid h-4 w-4 place-items-center rounded-full border border-[var(--border)] text-[10px] font-bold text-[var(--muted)]" aria-label="向量归一化说明">?</span>
+            <span class="min-w-[260px] flex-1 leading-relaxed">将向量转换为单位长度，使余弦相似度和点积检索更稳定，知识库语义检索通常建议开启。</span>
           </label>
-          <div class="sm:col-span-4 flex flex-wrap items-center gap-3">
+          <div class="sm:col-span-3 flex flex-wrap items-center gap-3">
             <button
               class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:border-[var(--accent)] disabled:opacity-50"
               type="button"

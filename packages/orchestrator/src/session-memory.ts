@@ -72,7 +72,7 @@ export function buildSessionModelMessages(
   // Bounded original-image window, independent of the text summary watermark.
   const recentImageIds = new Set(visible.flatMap((message) => message.attachments ?? []).slice(-4).map((image) => image.id));
   const toTurn = (message: ChatMessage): ModelTurn => ({
-    role: message.role, content: message.content + (message.attachments?.some((image) => !recentImageIds.has(image.id))
+    role: message.role, content: message.content + (message.attachmentContext ? `\n\n${message.attachmentContext}` : '') + (message.attachments?.some((image) => !recentImageIds.has(image.id))
       ? '\n[部分早期图片已超出最近4张原图窗口，若需检查其细节，请用户重新上传，不得仅凭之前描述声称看到了原图。]' : ''),
     ...(message.attachments?.length ? { attachments: message.attachments.filter((image) => recentImageIds.has(image.id)) } : {}),
   });

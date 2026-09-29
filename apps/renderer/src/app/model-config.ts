@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
+import { DEFAULT_EMBEDDING_META, resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
 import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, DecisionGuardPolicy, DecisionProtocol, DecisionRuntimeConfig, ImageGenerationProtocol, ModelCapability } from '@workmate/contracts';
 import { getServerModelConfig, saveServerModelConfig, setCapabilityHealthObserver, type CapabilityHealthObservation } from '../services/api.js';
 
@@ -669,14 +669,14 @@ function normalize(value: unknown): ModelSettings {
             ? imageProtocol
             : undefined,
           decisionProtocol: item.capability === 'decision' ? ('system-one-v1' as const) : undefined,
-          meta: item.meta && typeof item.meta === 'object'
+          meta: item.capability === 'embedding'
             ? {
-                dimension: Number((item.meta as { dimension?: unknown }).dimension) || undefined,
-                normalize: typeof (item.meta as { normalize?: unknown }).normalize === 'boolean'
+                dimension: Number((item.meta as { dimension?: unknown } | undefined)?.dimension) || DEFAULT_EMBEDDING_META.dimension,
+                normalize: typeof (item.meta as { normalize?: unknown } | undefined)?.normalize === 'boolean'
                   ? Boolean((item.meta as { normalize?: unknown }).normalize)
-                  : undefined,
-                maxBatch: Number((item.meta as { maxBatch?: unknown }).maxBatch) || undefined,
-                maxInputChars: Number((item.meta as { maxInputChars?: unknown }).maxInputChars) || undefined,
+                  : DEFAULT_EMBEDDING_META.normalize,
+                maxBatch: Number((item.meta as { maxBatch?: unknown } | undefined)?.maxBatch) || DEFAULT_EMBEDDING_META.maxBatch,
+                maxInputChars: Number((item.meta as { maxInputChars?: unknown } | undefined)?.maxInputChars) || DEFAULT_EMBEDDING_META.maxInputChars,
               }
             : undefined,
           supportsBuiltinWebSearch: supportsBuiltinWebSearch || undefined,
@@ -743,13 +743,27 @@ export function resolveActiveEmbeddingConfig(settingsValue = settings.value): {
   label?: string;
   modelId: string;
   provider: ProviderId;
+  providerLabel: string;
   baseUrl: string;
   apiKey: string;
   configuredModelId: string;
   meta?: ConfiguredModel['meta'];
 } | null {
   const id = settingsValue.activeEmbeddingModelId;
-  if (!id) return null;
+  return id ? resolveEmbeddingConfigById(id, settingsValue) : null;
+}
+
+/** Resolve one user-configured embedding model with its provider connection. */
+export function resolveEmbeddingConfigById(id: string, settingsValue = settings.value): {
+  label?: string;
+  modelId: string;
+  provider: ProviderId;
+  providerLabel: string;
+  baseUrl: string;
+  apiKey: string;
+  configuredModelId: string;
+  meta?: ConfiguredModel['meta'];
+} | null {
   const model = settingsValue.models.find((item) => item.id === id && item.capability === 'embedding');
   if (!model) return null;
   const resolved = resolveConfiguredModel(model, settingsValue.providerInstances);
@@ -758,6 +772,7 @@ export function resolveActiveEmbeddingConfig(settingsValue = settings.value): {
     label: model.label,
     modelId: resolved.embeddingModel,
     provider: resolved.provider,
+    providerLabel: resolved.providerLabel,
     baseUrl: resolved.baseUrl,
     apiKey: apiKeyForRequest(resolved),
     configuredModelId: model.id,

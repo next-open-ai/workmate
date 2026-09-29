@@ -1,9 +1,51 @@
 import { createHash, createHmac } from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ModelCapabilityRuntime } from '@workmate/contracts';
 import { speechFetch as fetch, SpeechNetworkError } from './speech-http.js';
 
 type Report = (summary: string, progress?: number) => void;
+
+type MultipartUploadInput = { url: URL; fields: Record<string, string>; bytes: Uint8Array; fileName: string; signal: AbortSignal };
+
+function multipartToken(value: string) {
+  return value.replace(/[\r\n]/g, '').replace(/["\\]/g, '\\$&');
+}
+
+/** Compatibility transport for OSS hosts on which Node fetch/undici resets TLS.
+ * It is used only for temporary object upload, never for paid ASR submission. */
+async function uploadMultipartWithNode(input: MultipartUploadInput): Promise<Response> {
+  const boundary = `----workmate-${crypto.randomUUID()}`;
+  const parts: Buffer[] = [];
+  for (const [name, value] of Object.entries(input.fields)) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${multipartToken(name)}"\r\n\r\n${value}\r\n`, 'utf8'));
+  }
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${multipartToken(input.fileName)}"\r\nContent-Type: application/octet-stream\r\n\r\n`, 'utf8'));
+  parts.push(Buffer.from(input.bytes));
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
+  const body = Buffer.concat(parts);
+  const endpoint = `${input.url.origin}${input.url.pathname}`;
+  return new Promise<Response>((resolve, reject) => {
+    const transport = input.url.protocol === 'https:' ? https : http;
+    const request = transport.request(input.url, { method: 'POST', signal: input.signal, headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': String(body.byteLength) } }, (response) => {
+      const chunks: Buffer[] = []; let size = 0;
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.byteLength;
+        if (size > 1024 * 1024) response.destroy(new Error('DashScope upload response exceeds 1 MB.'));
+        else chunks.push(chunk);
+      });
+      response.on('error', reject);
+      response.on('end', () => {
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(response.headers)) if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+        resolve(new Response(Buffer.concat(chunks), { status: response.statusCode || 500, headers }));
+      });
+    });
+    request.on('error', (error) => reject(new SpeechNetworkError(`语音兼容上传失败：POST ${endpoint} [${String((error as NodeJS.ErrnoException).code || error.name)}]`, 'POST', endpoint, 'upload', 3)));
+    request.end(body);
+  });
+}
 
 export class SpeechProviderHttpError extends Error {
   constructor(message: string, readonly status: number, readonly requestId?: string) { super(message); }
@@ -82,7 +124,7 @@ export async function transcribeDashScope(input: { config: ModelCapabilityRuntim
   throw new Error(`DashScope ASR task ${taskId} timed out.`);
 }
 
-export async function uploadDashScopeAudio(input: { config: ModelCapabilityRuntime; bytes: Uint8Array; extension: string; signal?: AbortSignal; report: Report }) {
+export async function uploadDashScopeAudio(input: { config: ModelCapabilityRuntime; bytes: Uint8Array; extension: string; signal?: AbortSignal; report: Report; compatUpload?: (value: MultipartUploadInput) => Promise<Response> }) {
   const signal = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
   const base = new URL(input.config.baseUrl);
   // Temporary-upload policies use the shared API host, not a workspace inference host.
@@ -99,29 +141,35 @@ export async function uploadDashScopeAudio(input: { config: ModelCapabilityRunti
   }
   const uploadUrl = new URL(String(policy?.upload_host || ''));
   if (uploadUrl.protocol !== 'https:' && !(uploadUrl.protocol === 'http:' && uploadUrl.origin === base.origin && ['127.0.0.1', 'localhost'].includes(uploadUrl.hostname))) throw new Error('Invalid DashScope upload host.');
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     signal.throwIfAborted();
     // A lost response may leave an object behind. A fresh key avoids forbidden
     // overwrite conflicts; neither upload attempt submits a paid ASR task.
     const fileName = `${crypto.randomUUID()}${input.extension}`;
     const key = `${policy.upload_dir}/${fileName}`;
-    const form = new FormData();
+    const fields: Record<string, string> = {};
     for (const [name, value] of Object.entries({ OSSAccessKeyId: policy.oss_access_key_id, Signature: policy.signature, policy: policy.policy, 'x-oss-object-acl': policy.x_oss_object_acl, 'x-oss-forbid-overwrite': policy.x_oss_forbid_overwrite, key, success_action_status: '200' })) {
       if (value === undefined) throw new Error('DashScope returned an incomplete upload policy.');
-      form.set(name, String(value));
+      fields[name] = String(value);
     }
-    form.set('file', new Blob([Buffer.from(input.bytes)]), fileName);
-    input.report(`正在上传录音到阿里临时存储（第${attempt}/2次），尚未提交转写…`, 18);
+    input.report(attempt === maxAttempts ? `默认连接连续中断，正在使用兼容通道上传录音（第${attempt}/${maxAttempts}次）；尚未提交转写…` : `正在上传录音到阿里临时存储（第${attempt}/${maxAttempts}次），尚未提交转写…`, 18);
     let response: Response;
     try {
-      response = await fetch(uploadUrl, { method: 'POST', body: form, signal });
+      if (attempt === maxAttempts) response = await (input.compatUpload ?? uploadMultipartWithNode)({ url: uploadUrl, fields, bytes: input.bytes, fileName, signal });
+      else {
+        const form = new FormData();
+        for (const [name, value] of Object.entries(fields)) form.set(name, value);
+        form.set('file', new Blob([Buffer.from(input.bytes)]), fileName);
+        response = await fetch(uploadUrl, { method: 'POST', body: form, signal });
+      }
     } catch (error) {
       if (!(error instanceof SpeechNetworkError)) throw error;
-      if (attempt === 2 || signal.aborted) {
+      if (attempt === maxAttempts || signal.aborted) {
         input.report(`录音上传失败（已尝试${attempt}次），尚未提交转写。`, 18);
         throw new SpeechNetworkError(error.message, error.method, error.endpoint, 'upload', attempt);
       }
-      input.report('录音上传连接异常，500ms后自动重试一次；尚未提交转写。', 18);
+      input.report(attempt === 1 ? '录音上传连接异常，500ms后使用新临时对象重试；尚未提交转写。' : '默认上传通道再次中断，500ms后切换兼容通道；尚未提交转写。', 18);
       await delay(500, undefined, { signal });
       continue;
     }

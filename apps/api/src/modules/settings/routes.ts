@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { FastifyPluginAsync } from 'fastify';
+import { detectBundledPython, pptxEnhancedComponentRoot, pythonArgv } from '@workmate/agent-core';
 import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '../auth/service.js';
 
 type SettingName =
@@ -18,6 +21,66 @@ type SettingsEnvelope = {
   meta: unknown;
   secrets?: unknown;
 };
+
+const execFileAsync = promisify(execFile);
+const PPTX_COMPONENT_VERSION = 1;
+
+function agentscopeRoot() {
+  return process.env.WORKMATE_AGENTSCOPE_ROOT?.trim() || path.resolve(process.cwd(), 'runtimes', 'agentscope-runtime');
+}
+
+function pptxComponentPaths() {
+  const root = pptxEnhancedComponentRoot();
+  return { root, packages: path.join(root, 'python-packages'), marker: path.join(root, 'installed.json') };
+}
+
+function pptxPython() {
+  return process.env.WORKMATE_AGENTSCOPE_PYTHON?.trim()
+    || detectBundledPython(agentscopeRoot())?.command
+    || (process.platform === 'win32' ? 'python' : 'python3');
+}
+
+async function pptxComponentStatus() {
+  const paths = pptxComponentPaths();
+  if (!fs.existsSync(paths.marker)) {
+    return { state: 'not-installed' as const, installed: false, version: null, location: paths.root };
+  }
+  try {
+    const invocation = pythonArgv(pptxPython(), ['-c', 'from markitdown import MarkItDown; import pptx; MarkItDown(); print(getattr(pptx, "__version__", "unknown"))']);
+    const result = await execFileAsync(invocation.command, invocation.args, {
+      timeout: 15_000,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, PYTHONPATH: [paths.packages, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter), PYTHONIOENCODING: 'utf-8' },
+    });
+    return { state: 'ready' as const, installed: true, version: String(result.stdout || '').trim() || 'unknown', location: paths.root };
+  } catch (error) {
+    return {
+      state: 'broken' as const,
+      installed: true,
+      version: null,
+      location: paths.root,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function installPptxComponent() {
+  const paths = pptxComponentPaths();
+  fs.mkdirSync(paths.packages, { recursive: true, mode: 0o700 });
+  const invocation = pythonArgv(pptxPython(), [
+    '-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'python-pptx>=1.0,<2',
+  ]);
+  try {
+    await execFileAsync(invocation.command, invocation.args, { timeout: 180_000, maxBuffer: 8 * 1024 * 1024, env: process.env });
+    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: PPTX_COMPONENT_VERSION, installedAt: Date.now(), package: 'python-pptx>=1.0,<2' }, null, 2), { mode: 0o600 });
+    const status = await pptxComponentStatus();
+    if (status.state !== 'ready') throw new Error(status.message || '安装完成但组件校验失败。');
+    return status;
+  } catch (error) {
+    fs.rmSync(paths.root, { recursive: true, force: true });
+    throw error;
+  }
+}
 
 function dataDir(): string {
   return process.env.WORKMATE_DATA_DIR || path.join(os.homedir(), '.workmate');
@@ -270,6 +333,8 @@ function splitKnowledgeBases(value: unknown): SettingsEnvelope {
       accessKeyId: String(item.accessKeyId || ''),
       embeddingBaseUrl: String(item.embeddingBaseUrl || ''),
       embeddingModel: String(item.embeddingModel || ''),
+      embeddingMode: item.embeddingMode === 'model' ? 'model' : item.embeddingMode === 'system' ? 'system' : undefined,
+      embeddingModelConfigId: String(item.embeddingModelConfigId || ''),
       ...(item.embeddingMeta && typeof item.embeddingMeta === 'object'
         ? {
             embeddingMeta: {
@@ -481,4 +546,38 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/settings/runtime', async () => mergeRuntimeSettings(readJson('runtime-settings')));
   app.put('/settings/runtime', async (request) => mergeRuntimeSettings(writeJson('runtime-settings', splitRuntimeSettings(request.body ?? {}))));
+
+  app.get('/settings/components/pptx-enhanced', async (request, reply) => {
+    try {
+      ensureAuth(request);
+      requireAuth(request);
+      return await pptxComponentStatus();
+    } catch (error) {
+      return sendAuthError(reply, error);
+    }
+  });
+  app.post('/settings/components/pptx-enhanced/install', async (request, reply) => {
+    try {
+      ensureAuth(request);
+      requireAdmin(request);
+    } catch (error) {
+      return sendAuthError(reply, error);
+    }
+    try {
+      return await installPptxComponent();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(500).send({ message: `PPTX 增强解析组件安装失败：${message}` });
+    }
+  });
+  app.delete('/settings/components/pptx-enhanced', async (request, reply) => {
+    try {
+      ensureAuth(request);
+      requireAdmin(request);
+      fs.rmSync(pptxComponentPaths().root, { recursive: true, force: true });
+      return await pptxComponentStatus();
+    } catch (error) {
+      return sendAuthError(reply, error);
+    }
+  });
 };

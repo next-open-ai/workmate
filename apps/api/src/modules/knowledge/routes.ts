@@ -14,6 +14,7 @@ import {
   OntologyWorkflowRequestSchema,
   OntologyDraftSaveRequestSchema,
   OntologyCandidateImportRequestSchema,
+  OntologyExtractRequestSchema,
   OntologyReviewRequestSchema,
 } from '@workmate/contracts';
 import {
@@ -37,6 +38,7 @@ import {
   saveOntologyDraft,
   publishOntologyDraft,
   importOntologyCandidates,
+  extractOntologyCandidates,
   reviewOntologyCandidates,
   commitOntologyCandidates,
   updateBailianKnowledgeBase,
@@ -44,7 +46,9 @@ import {
 } from '@workmate/agent-core';
 
 export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
-  app.post('/knowledge/ingest', async (request, reply) => {
+  // The UI accepts source files up to 8 MB. Base64 expands those bytes by roughly
+  // one third, so this route needs a larger limit than Fastify's 1 MB default.
+  app.post('/knowledge/ingest', { bodyLimit: 16 * 1024 * 1024 }, async (request, reply) => {
     const parsed = KnowledgeIngestRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ingest request.', issues: parsed.error.issues });
     try {
@@ -92,57 +96,72 @@ export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
   app.post('/knowledge/ontology/replace', async (request, reply) => {
     const parsed = OntologyGraphRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology graph.', issues: parsed.error.issues });
-    try { return writeOntologyGraph(parsed.data.knowledgeBase, parsed.data.graph); }
+    try { return await writeOntologyGraph(parsed.data.knowledgeBase, parsed.data.graph); }
     catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ontology write failed.' }); }
   });
 
   app.post('/knowledge/ontology/query', async (request, reply) => {
     const parsed = OntologyQueryRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology query.', issues: parsed.error.issues });
-    try { return { ok: true, plan: planOntologyQuery(parsed.data.knowledgeBase, parsed.data.query, parsed.data.maxHops) }; }
+    try { return { ok: true, plan: await planOntologyQuery(parsed.data.knowledgeBase, parsed.data.query, parsed.data.maxHops) }; }
     catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ontology query failed.' }); }
   });
 
   app.post('/knowledge/ontology/read', async (request, reply) => {
     const parsed = OntologyQueryRequestSchema.pick({ knowledgeBase: true }).safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology read request.', issues: parsed.error.issues });
-    return { ok: true, graph: readOntologyGraph(parsed.data.knowledgeBase) };
+    return { ok: true, graph: await readOntologyGraph(parsed.data.knowledgeBase) };
   });
 
   app.post('/knowledge/ontology/workflow/read', async (request, reply) => {
     const parsed = OntologyWorkflowRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology workflow request.', issues: parsed.error.issues });
-    return { ok: true, workflow: readOntologyWorkflow(parsed.data.knowledgeBase) };
+    return { ok: true, workflow: await readOntologyWorkflow(parsed.data.knowledgeBase) };
   });
 
   app.post('/knowledge/ontology/draft/save', async (request, reply) => {
     const parsed = OntologyDraftSaveRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology draft.', issues: parsed.error.issues });
-    return { ok: true, workflow: saveOntologyDraft(parsed.data.knowledgeBase, parsed.data.graph) };
+    return { ok: true, workflow: await saveOntologyDraft(parsed.data.knowledgeBase, parsed.data.graph) };
   });
 
   app.post('/knowledge/ontology/draft/publish', async (request, reply) => {
     const parsed = OntologyWorkflowRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology publish request.', issues: parsed.error.issues });
-    return { ok: true, workflow: publishOntologyDraft(parsed.data.knowledgeBase) };
+    return { ok: true, workflow: await publishOntologyDraft(parsed.data.knowledgeBase) };
   });
 
   app.post('/knowledge/ontology/candidates/import', async (request, reply) => {
     const parsed = OntologyCandidateImportRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology candidates.', issues: parsed.error.issues });
-    return { ok: true, workflow: importOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidates) };
+    return { ok: true, workflow: await importOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidates) };
+  });
+
+  app.post('/knowledge/ontology/candidates/extract', async (request, reply) => {
+    const parsed = OntologyExtractRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology extraction request.', issues: parsed.error.issues });
+    try {
+      return { ok: true, ...(await extractOntologyCandidates({
+        kb: parsed.data.knowledgeBase,
+        documentIds: parsed.data.documentIds,
+        instructions: parsed.data.instructions,
+        model: parsed.data.model,
+      })) };
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ontology extraction failed.' });
+    }
   });
 
   app.post('/knowledge/ontology/candidates/review', async (request, reply) => {
     const parsed = OntologyReviewRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology review.', issues: parsed.error.issues });
-    return { ok: true, workflow: reviewOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidateIds, parsed.data.decision, parsed.data.note) };
+    return { ok: true, workflow: await reviewOntologyCandidates(parsed.data.knowledgeBase, parsed.data.candidateIds, parsed.data.decision, parsed.data.note) };
   });
 
   app.post('/knowledge/ontology/candidates/commit', async (request, reply) => {
     const parsed = OntologyWorkflowRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: 'Invalid ontology commit request.', issues: parsed.error.issues });
-    return { ok: true, workflow: commitOntologyCandidates(parsed.data.knowledgeBase) };
+    return { ok: true, workflow: await commitOntologyCandidates(parsed.data.knowledgeBase) };
   });
 
   app.post('/knowledge/bailian/pipelines', async (request, reply) => {

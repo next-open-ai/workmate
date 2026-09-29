@@ -18,6 +18,7 @@ import {
 } from './bailian-openapi.js';
 import { buildEmbeddingSignature, embedOpenAiCompatible } from './embedding-http.js';
 import { graphDocumentHints, planOntologyQuery, type OntologyQueryPlan } from './ontology-runtime.js';
+import { parseLocalDocument } from './document-parser.js';
 
 export type KnowledgeHit = {
   id: string;
@@ -35,6 +36,8 @@ type EmbedConfig = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  maxBatch?: number;
+  maxInputChars?: number;
 };
 
 type LocalChunk = {
@@ -89,7 +92,13 @@ function resolveEmbedConfig(kb: KnowledgeBaseRuntime, model?: ModelConfig): Embe
   const apiKey = kb.embeddingApiKey || model?.embeddingApiKey || model?.apiKey || '';
   if (!baseUrl || !embeddingModel) return null;
   if (!apiKey.trim() && !/ollama/i.test(baseUrl) && model?.provider !== 'ollama' && model?.provider !== 'openai-compatible') return null;
-  return { baseUrl, apiKey: apiKey.trim(), model: embeddingModel };
+  return {
+    baseUrl,
+    apiKey: apiKey.trim(),
+    model: embeddingModel,
+    maxBatch: Math.max(1, Number(kb.embeddingMeta?.maxBatch) || 32),
+    maxInputChars: Math.max(1, Number(kb.embeddingMeta?.maxInputChars) || 8_000),
+  };
 }
 
 async function embedTexts(config: EmbedConfig, inputs: string[]): Promise<number[][]> {
@@ -402,8 +411,17 @@ export async function ingestKnowledge(input: {
   model?: ModelConfig;
 }) {
   if (input.kb.provider === 'lancedb') {
-    const content = String(input.content || '').trim();
-    if (!content) throw new Error('Local knowledge ingest requires text content.');
+    let content = String(input.content || '').trim();
+    if (!content && input.fileBase64?.trim()) {
+      const fileName = String(input.fileName || '').trim();
+      if (!fileName) throw new Error('Local document ingest requires a file name.');
+      const parsed = await parseLocalDocument({
+        fileName,
+        bytes: Buffer.from(input.fileBase64.trim(), 'base64'),
+      });
+      content = parsed.markdown;
+    }
+    if (!content) throw new Error('Local knowledge ingest requires text content or a supported PDF/DOCX file.');
     return ingestLocalKnowledge({
       kb: input.kb,
       title: input.title,
@@ -1100,7 +1118,7 @@ export type HybridKnowledgeSearchResult = {
  * than exclude candidates, so an incomplete graph cannot hide valid evidence.
  */
 export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig): Promise<HybridKnowledgeSearchResult> {
-  const plan = planOntologyQuery(kb, query, 1);
+  const plan = await planOntologyQuery(kb, query, 1);
   const enhancedQuery = [query, ...plan.expandedTerms, ...plan.relatedNodes.map((node) => node.name)].filter(Boolean).join(' ');
   const rawPromise = searchKnowledgeBase(kb, query, Math.min(8, Math.max(topK, topK * 2)), model);
   const enhancedPromise = enhancedQuery === query

@@ -28,6 +28,9 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   attachments?: import('@workmate/contracts').ChatImageAttachment[];
+  fileAttachments?: import('@workmate/contracts').ChatFileAttachment[];
+  /** Server-produced, bounded attachment content for model context only. */
+  attachmentContext?: string;
   createdAt: number;
   /** Turn id — the user message that started the exchange. */
   turnId?: string;
@@ -95,6 +98,8 @@ export interface RunActivity {
   toolName: string;
   summary: string;
   status: 'running' | 'completed' | 'failed';
+  startedAt?: number;
+  durationMs?: number;
   at: number;
 }
 

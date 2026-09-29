@@ -6,6 +6,7 @@ import {
   saveServerKnowledgeBases,
   saveServerKnowledgeProviderConfig,
 } from '../services/api.js';
+import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById } from './model-config';
 
 export const knowledgeProviderIds = ['lancedb', 'bailian', 'dify', 'qdrant', 'pinecone'] as const;
 export type KnowledgeProviderId = (typeof knowledgeProviderIds)[number];
@@ -31,6 +32,8 @@ export interface KnowledgeBase {
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel?: string;
+  embeddingMode?: 'system' | 'model';
+  embeddingModelConfigId?: string;
   embeddingMeta?: {
     dimension?: number;
     normalize?: boolean;
@@ -152,6 +155,8 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
     embeddingBaseUrl: raw.embeddingBaseUrl ? String(raw.embeddingBaseUrl).trim() : '',
     embeddingApiKey: raw.embeddingApiKey ? String(raw.embeddingApiKey) : '',
     embeddingModel: raw.embeddingModel ? String(raw.embeddingModel).trim() : '',
+    embeddingMode: raw.embeddingMode === 'model' ? 'model' : raw.embeddingMode === 'system' ? 'system' : undefined,
+    embeddingModelConfigId: raw.embeddingModelConfigId ? String(raw.embeddingModelConfigId).trim() : '',
     embeddingMeta: raw.embeddingMeta && typeof raw.embeddingMeta === 'object'
       ? {
           dimension: Number((raw.embeddingMeta as { dimension?: unknown }).dimension) || undefined,
@@ -204,6 +209,8 @@ function sameEmbeddingMeta(
 function shouldMarkStale(previous: KnowledgeBase | undefined, next: KnowledgeBase) {
   if (!previous || (previous.documentCount || 0) <= 0) return false;
   return previous.embeddingModel !== next.embeddingModel
+    || previous.embeddingMode !== next.embeddingMode
+    || previous.embeddingModelConfigId !== next.embeddingModelConfigId
     || previous.embeddingBaseUrl !== next.embeddingBaseUrl
     || previous.embeddingApiKey !== next.embeddingApiKey
     || !sameEmbeddingMeta(previous.embeddingMeta, next.embeddingMeta);
@@ -247,6 +254,11 @@ function resolveRuntimeCredentials(item: KnowledgeBase) {
 
 function toRuntime(item: KnowledgeBase) {
   const creds = resolveRuntimeCredentials(item);
+  const selectedEmbedding = item.embeddingMode === 'model' && item.embeddingModelConfigId
+    ? resolveEmbeddingConfigById(item.embeddingModelConfigId)
+    : item.embeddingMode === 'system'
+      ? resolveActiveEmbeddingConfig()
+      : null;
   return {
     id: item.id,
     name: item.name,
@@ -261,10 +273,12 @@ function toRuntime(item: KnowledgeBase) {
     workspaceId: creds.workspaceId,
     accessKeyId: creds.accessKeyId,
     accessKeySecret: creds.accessKeySecret,
-    embeddingBaseUrl: item.embeddingBaseUrl?.trim() || undefined,
-    embeddingApiKey: item.embeddingApiKey?.trim() || undefined,
-    embeddingModel: item.embeddingModel?.trim() || undefined,
-    embeddingMeta: item.embeddingMeta,
+    embeddingBaseUrl: selectedEmbedding?.baseUrl || item.embeddingBaseUrl?.trim() || undefined,
+    embeddingApiKey: selectedEmbedding?.apiKey || item.embeddingApiKey?.trim() || undefined,
+    embeddingModel: selectedEmbedding?.modelId || item.embeddingModel?.trim() || undefined,
+    embeddingMode: item.embeddingMode,
+    embeddingModelConfigId: item.embeddingModelConfigId?.trim() || undefined,
+    embeddingMeta: selectedEmbedding?.meta || item.embeddingMeta,
     indexState: item.indexState,
   };
 }
@@ -399,6 +413,8 @@ export function useKnowledgeConfig() {
       embeddingBaseUrl: String(input.embeddingBaseUrl || '').trim(),
       embeddingApiKey: String(input.embeddingApiKey || ''),
       embeddingModel: String(input.embeddingModel || '').trim(),
+      embeddingMode: input.embeddingMode,
+      embeddingModelConfigId: String(input.embeddingModelConfigId || '').trim(),
       embeddingMeta: input.embeddingMeta ? { ...input.embeddingMeta } : undefined,
       documentCount: Number(input.documentCount) || 0,
       indexState: undefined,
