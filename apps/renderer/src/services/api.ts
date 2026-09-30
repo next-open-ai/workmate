@@ -86,6 +86,7 @@ export interface PptxEnhancedComponentStatus {
   location: string;
   message?: string;
 }
+export type DoclingEnhancedComponentStatus = PptxEnhancedComponentStatus;
 
 export async function getHealth(): Promise<HealthStatus> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
@@ -275,6 +276,28 @@ export async function removePptxEnhancedComponent(): Promise<PptxEnhancedCompone
   const response = await fetch(`${apiBase}/api/settings/components/pptx-enhanced`, { method: 'DELETE' });
   const body = await response.json().catch(() => ({})) as PptxEnhancedComponentStatus & { message?: string };
   if (!response.ok) throw new Error(body.message || `PPTX component removal failed: ${response.status}`);
+  return body;
+}
+
+export async function getDoclingEnhancedComponentStatus(): Promise<DoclingEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/docling-enhanced`);
+  const body = await response.json().catch(() => ({})) as DoclingEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Docling component status failed: ${response.status}`);
+  return body;
+}
+export async function installDoclingEnhancedComponent(): Promise<DoclingEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/docling-enhanced/install`, { method: 'POST' });
+  const body = await response.json().catch(() => ({})) as DoclingEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Docling component install failed: ${response.status}`);
+  return body;
+}
+export async function removeDoclingEnhancedComponent(): Promise<DoclingEnhancedComponentStatus> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/components/docling-enhanced`, { method: 'DELETE' });
+  const body = await response.json().catch(() => ({})) as DoclingEnhancedComponentStatus & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Docling component removal failed: ${response.status}`);
   return body;
 }
 

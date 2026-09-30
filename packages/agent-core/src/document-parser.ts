@@ -24,6 +24,11 @@ export function pptxEnhancedComponentRoot(): string {
   return path.join(dataRoot, 'components', 'pptx-enhanced');
 }
 
+export function doclingEnhancedComponentRoot(): string {
+  const dataRoot = process.env.WORKMATE_DATA_DIR?.trim() || path.join(os.homedir(), '.workmate');
+  return path.join(dataRoot, 'components', 'docling-enhanced');
+}
+
 export async function hasPptxEnhancedParser(): Promise<boolean> {
   try {
     await access(path.join(pptxEnhancedComponentRoot(), 'installed.json'));
@@ -72,8 +77,12 @@ export async function parseLocalDocument(input: {
     const invocation = pythonArgv(parserPython(), [
       '-m', 'workmate_agentscope_runtime.document_parser', sourcePath,
     ]);
-    const componentPackages = path.join(pptxEnhancedComponentRoot(), 'python-packages');
-    const pythonPath = [componentPackages, path.join(root, 'src'), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter);
+    const pythonPath = [
+      path.join(pptxEnhancedComponentRoot(), 'python-packages'),
+      path.join(doclingEnhancedComponentRoot(), 'python-packages'),
+      path.join(root, 'src'),
+      process.env.PYTHONPATH,
+    ].filter(Boolean).join(path.delimiter);
     const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       cwd: tempRoot,
       timeout: input.timeoutMs ?? 120_000,

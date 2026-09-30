@@ -14,6 +14,7 @@ import UsageStatsPanel from './UsageStatsPanel.vue';
 import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
 import PptxEnhancedSettingsCard from './PptxEnhancedSettingsCard.vue';
+import DoclingEnhancedSettingsCard from './DoclingEnhancedSettingsCard.vue';
 import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse } from '../../services/api';
 import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
@@ -760,6 +761,7 @@ function handleDefaultEmployeeChange(event: Event) {
         <div class="mt-4 flex flex-wrap items-center gap-2"><button class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold" type="button" :disabled="attachmentCleanupBusy" @click="previewAttachmentCleanup">预览清理</button><button class="rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50" type="button" :disabled="attachmentCleanupBusy" @click="runAttachmentCleanup">清理过期附件</button><span class="text-xs text-[var(--muted)]">{{ attachmentCleanupPreview }}</span></div>
       </div>
       <PptxEnhancedSettingsCard :is-admin="isAdmin" />
+      <DoclingEnhancedSettingsCard :is-admin="isAdmin" />
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>

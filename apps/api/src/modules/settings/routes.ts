@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { FastifyPluginAsync } from 'fastify';
-import { detectBundledPython, pptxEnhancedComponentRoot, pythonArgv } from '@workmate/agent-core';
+import { detectBundledPython, doclingEnhancedComponentRoot, pptxEnhancedComponentRoot, pythonArgv } from '@workmate/agent-core';
 import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '../auth/service.js';
 
 type SettingName =
@@ -24,6 +24,7 @@ type SettingsEnvelope = {
 
 const execFileAsync = promisify(execFile);
 const PPTX_COMPONENT_VERSION = 1;
+const DOCLING_COMPONENT_VERSION = 1;
 
 function agentscopeRoot() {
   return process.env.WORKMATE_AGENTSCOPE_ROOT?.trim() || path.resolve(process.cwd(), 'runtimes', 'agentscope-runtime');
@@ -38,6 +39,39 @@ function pptxPython() {
   return process.env.WORKMATE_AGENTSCOPE_PYTHON?.trim()
     || detectBundledPython(agentscopeRoot())?.command
     || (process.platform === 'win32' ? 'python' : 'python3');
+}
+
+function doclingComponentPaths() {
+  const root = doclingEnhancedComponentRoot();
+  return { root, packages: path.join(root, 'python-packages'), marker: path.join(root, 'installed.json') };
+}
+
+async function doclingComponentStatus() {
+  const paths = doclingComponentPaths();
+  if (!fs.existsSync(paths.marker)) return { state: 'not-installed' as const, installed: false, version: null, location: paths.root };
+  try {
+    const invocation = pythonArgv(pptxPython(), ['-c', 'import docling; print(getattr(docling, "__version__", "installed"))']);
+    const result = await execFileAsync(invocation.command, invocation.args, {
+      timeout: 15_000, maxBuffer: 1024 * 1024,
+      env: { ...process.env, PYTHONPATH: [paths.packages, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter), PYTHONIOENCODING: 'utf-8' },
+    });
+    return { state: 'ready' as const, installed: true, version: String(result.stdout || '').trim() || 'installed', location: paths.root };
+  } catch (error) {
+    return { state: 'broken' as const, installed: true, version: null, location: paths.root, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function installDoclingComponent() {
+  const paths = doclingComponentPaths();
+  fs.mkdirSync(paths.packages, { recursive: true, mode: 0o700 });
+  const invocation = pythonArgv(pptxPython(), ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3']);
+  try {
+    await execFileAsync(invocation.command, invocation.args, { timeout: 600_000, maxBuffer: 16 * 1024 * 1024, env: process.env });
+    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: DOCLING_COMPONENT_VERSION, installedAt: Date.now(), package: 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3' }, null, 2), { mode: 0o600 });
+    const status = await doclingComponentStatus();
+    if (status.state !== 'ready') throw new Error(status.message || '安装完成但组件校验失败。');
+    return status;
+  } catch (error) { fs.rmSync(paths.root, { recursive: true, force: true }); throw error; }
 }
 
 async function pptxComponentStatus() {
@@ -579,5 +613,19 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return sendAuthError(reply, error);
     }
+  });
+  app.get('/settings/components/docling-enhanced', async (request, reply) => {
+    try { ensureAuth(request); requireAuth(request); return await doclingComponentStatus(); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.post('/settings/components/docling-enhanced/install', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); }
+    catch (error) { return sendAuthError(reply, error); }
+    try { return await installDoclingComponent(); }
+    catch (error) { return reply.code(500).send({ message: `Docling 增强解析组件安装失败：${error instanceof Error ? error.message : String(error)}` }); }
+  });
+  app.delete('/settings/components/docling-enhanced', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); fs.rmSync(doclingComponentPaths().root, { recursive: true, force: true }); return await doclingComponentStatus(); }
+    catch (error) { return sendAuthError(reply, error); }
   });
 };

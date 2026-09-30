@@ -1,0 +1,4 @@
+# Optional high-fidelity PDF/DOCX parser. Installed from Settings into the
+# user's component directory so native parsing dependencies do not inflate the
+# base Electron installer.
+docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3

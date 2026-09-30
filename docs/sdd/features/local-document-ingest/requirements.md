@@ -4,7 +4,7 @@ Requirement ID: `LDI-001`
 
 - A local LanceDB knowledge base accepts `.pdf` and `.docx` uploads in addition to text formats.
 - Binary documents are parsed in the API/runtime process, never with browser `File.text()`.
-- MarkItDown is the primary converter. Empty, too-short, or visibly corrupted output falls back to Docling.
+- MarkItDown is the bundled primary converter. Empty, too-short, or visibly corrupted output falls back to Docling when the optional enhanced component is installed.
 - The resulting Markdown enters the existing chunking, embedding, and LanceDB pipeline.
 - Excel data-workbench import remains on SheetJS and is outside this change.
 - Bailian binary upload behavior remains unchanged.
@@ -22,4 +22,4 @@ Requirement ID: `LDI-002`
 
 ## Compatibility and rollback
 
-The request contract already accepts `fileBase64`; its meaning is extended compatibly to local PDF/DOCX. Its maximum length is raised to accommodate the existing 8 MB source-file limit after Base64 expansion. Rollback consists of reverting this feature and its two Python dependencies. Existing indexed chunks remain readable.
+The request contract already accepts `fileBase64`; its meaning is extended compatibly to local PDF/DOCX. Its maximum length is raised to accommodate the existing 8 MB source-file limit after Base64 expansion. Docling is installed into the user component directory and may be removed without affecting MarkItDown or existing indexed chunks.

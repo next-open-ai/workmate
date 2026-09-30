@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -44,10 +44,11 @@ function installRequirements(python) {
 
 const python = resolveBasePython();
 const bundledPython = venvPython();
-if (!existsSync(bundledPython)) {
-  console.log(`[agentscope-runtime] creating bundled venv with ${python}`);
-  createVenv(python);
-}
+// Packaging must be reproducible. Reusing an older venv preserves packages
+// removed from requirements and silently bloats later installers.
+if (existsSync(venvRoot)) rmSync(venvRoot, { recursive: true, force: true });
+console.log(`[agentscope-runtime] creating clean bundled venv with ${python}`);
+createVenv(python);
 console.log(`[agentscope-runtime] installing requirements into ${venvRoot}`);
 installRequirements(bundledPython);
 console.log(`[agentscope-runtime] ready: ${bundledPython}`);

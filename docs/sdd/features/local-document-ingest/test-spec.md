@@ -11,5 +11,7 @@
 | Upload size boundary | LDI-002 | An 8 MB source file fits the Base64 request contract and the API route body limit |
 | Renderer type check/build | LDI-002 | The professional import dialog compiles and bundles successfully |
 | Knowledge-base form modality | LDI-002 | Clicking the backdrop does not close or reset the create/edit form; only explicit Close or Save exits it |
+| Optional Docling lifecycle | LDI-001 | Admin can install, validate and remove Docling in the user component directory; base parsing remains available |
+| Reproducible runtime packaging | LDI-002 | Packaging starts from a clean virtual environment and does not retain dependencies removed from base requirements |
 
 Manual packaged-app acceptance: import one text PDF and one DOCX into a local knowledge base, then retrieve a distinctive sentence from each. A scanned PDF without embedded text may report no readable content until the optional OCR phase is added.
