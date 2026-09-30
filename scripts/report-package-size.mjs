@@ -45,7 +45,7 @@ const packages = files
   // Ignore unpacked app directories and update metadata: the release budget is
   // for user-downloadable installers only. Dependency archives can exist under
   // an unpacked app and must not be mistaken for release artifacts.
-  .filter((file) => path.dirname(file) === releaseDirectory && artifactPattern.test(file))
+  .filter((file) => path.resolve(path.dirname(file)) === path.resolve(releaseDirectory) && artifactPattern.test(file))
   .map((file) => ({ file, bytes: statSync(file).size }))
   .sort((left, right) => right.bytes - left.bytes);
 
