@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourcePath = path.join(repoRoot, 'docs/guides/user-manual.md');
 const outputPath = path.join(repoRoot, 'apps/renderer/src/generated/user-manual.json');
-const manualSource = await readFile(sourcePath, 'utf8');
+// Git may check this file out with CRLF on Windows. Normalize before parsing:
+// several block regexes intentionally anchor at end-of-line and a retained
+// carriage return can otherwise leave the parser on the same line forever.
+const manualSource = (await readFile(sourcePath, 'utf8')).replace(/\r\n?/g, '\n');
 
 function escapeHtml(input) {
   return input.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -40,6 +43,7 @@ function splitBlocks() {
   const blocks = [];
   let index = 0;
   while (index < lines.length) {
+    const iterationStart = index;
     const line = lines[index];
     if (!line.trim()) { index += 1; continue; }
     if (/^```/.test(line.trim())) {
@@ -79,6 +83,7 @@ function splitBlocks() {
     const buffer = [];
     while (index < lines.length && lines[index].trim() && !/^```/.test(lines[index].trim()) && !/^(#{1,6})\s/.test(lines[index]) && !lines[index].trimStart().startsWith('>') && !/^(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[index].trim()) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[index])) buffer.push(lines[index++]);
     blocks.push({ kind: 'p', data: buffer });
+    if (index === iterationStart) throw new Error(`User manual parser stalled at line ${index + 1}: ${JSON.stringify(line)}`);
   }
   return blocks;
 }

@@ -23,7 +23,15 @@ function venvPython() {
 
 function resolveBasePython() {
   if (process.env.WORKMATE_AGENTSCOPE_PYTHON?.trim()) return process.env.WORKMATE_AGENTSCOPE_PYTHON.trim();
-  const candidates = isWin ? ['py', 'python', 'python3'] : ['python3', 'python'];
+  // actions/setup-python exposes its exact interpreter directory here. Prefer
+  // it over the Windows `py` launcher, whose default may be a newer unrelated
+  // installation (the 3.11 job previously created a 3.14 runtime).
+  const configuredRoot = process.env.pythonLocation?.trim() || process.env.Python_ROOT_DIR?.trim();
+  const configuredPython = configuredRoot
+    ? path.join(configuredRoot, isWin ? 'python.exe' : 'bin/python3')
+    : '';
+  if (configuredPython && existsSync(configuredPython)) return configuredPython;
+  const candidates = isWin ? ['python', 'python3', 'py'] : ['python3', 'python'];
   for (const command of candidates) {
     const args = command === 'py' ? ['-3', '--version'] : ['--version'];
     const result = spawnSync(command, args, { cwd: runtimeRoot, encoding: 'utf8', env: process.env });
