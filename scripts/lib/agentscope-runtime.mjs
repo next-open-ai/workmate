@@ -16,6 +16,10 @@ export function installedRuntimeRoot(dataDir = defaultDataDir()) {
 }
 
 export function installedRuntimePython(runtimeRoot = installedRuntimeRoot()) {
+  const portable = process.platform === 'win32'
+    ? path.join(runtimeRoot, 'python', 'python.exe')
+    : path.join(runtimeRoot, 'python', 'bin', 'python3');
+  if (fs.existsSync(portable)) return portable;
   return process.platform === 'win32'
     ? path.join(runtimeRoot, '.venv', 'Scripts', 'python.exe')
     : path.join(runtimeRoot, '.venv', 'bin', 'python3');
@@ -87,7 +91,7 @@ export function detectAgentscopeRuntime(projectRoot, dataDir = defaultDataDir())
 
 /**
  * Prefer a project-bundled runtime (Docker / packaged installs) when it already
- * ships a usable `.venv`. This keeps volume mounts over WORKMATE_DATA_DIR from
+ * ships a usable portable Python. This keeps volume mounts over WORKMATE_DATA_DIR from
  * wiping the baked AgentScope environment.
  */
 export function resolveBundledAgentscopeRuntime(projectRoot) {

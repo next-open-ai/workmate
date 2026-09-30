@@ -90,7 +90,7 @@ console.log(`Staged ${seen.size} API production packages.`);
 
 const stagedRuntime = path.join(stageRoot, 'agentscope-runtime');
 mkdirSync(stagedRuntime, { recursive: true });
-for (const entry of ['src', 'pyproject.toml', 'requirements.txt', '.venv']) {
+for (const entry of ['src', 'pyproject.toml', 'requirements.txt', 'python']) {
   const source = path.join(runtimeRoot, entry);
   if (!existsSync(source)) continue;
   copyDereferenced(source, path.join(stagedRuntime, entry));

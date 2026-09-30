@@ -4,7 +4,7 @@ Requirement ID: `LDI-001`
 
 - A local LanceDB knowledge base accepts `.pdf` and `.docx` uploads in addition to text formats.
 - Binary documents are parsed in the API/runtime process, never with browser `File.text()`.
-- The base package uses `pypdf` for PDF and Python's OOXML reader for DOCX without adding a second native runtime. MarkItDown and Docling are optional enhanced converters; low-quality base output falls back to them when installed.
+- The base package uses the Node runtime (`unpdf`/PDF.js for PDF and direct OOXML extraction for DOCX), so ordinary document upload does not depend on a relocatable Python virtual environment. MarkItDown and Docling are optional enhanced converters; low-quality base output falls back to them when installed.
 - The resulting Markdown enters the existing chunking, embedding, and LanceDB pipeline.
 - Excel data-workbench import remains on SheetJS and is outside this change.
 - Bailian binary upload behavior remains unchanged.

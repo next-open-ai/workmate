@@ -13,5 +13,7 @@ stage/
 !.env.example
 .stage/
 runtimes/**/.venv/
+runtimes/agentscope-runtime/python/
+runtimes/agentscope-runtime/.python-install/
 __pycache__/
 *.pyc

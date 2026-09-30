@@ -39,7 +39,7 @@
 ## Phase 4（后续）
 
 - [x] MCP 客户端挂入 Toolkit
-- [x] 桌面打包携带 AgentScope runtime（优先使用包内 `.venv` Python，缺失时回退系统 Python）
+- [x] 桌面打包携带可迁移的 AgentScope runtime（使用 uv 管理的 `python-build-standalone` CPython，不依赖构建机 `.venv` 路径；缺失时才回退系统 Python）
 - [x] Plan / Tracing 首版增益（项目任务详情展示 model / usage / event trace）
 - [x] npm Web Launcher（`pnpm web:start`）与静态前端托管
 - [x] 主要 Electron IPC 服务能力下沉到统一 HTTP API（providers / skills / workspace / assets）

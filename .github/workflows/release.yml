@@ -63,6 +63,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.10.6'
       - name: Enable Corepack (uses packageManager-pinned pnpm)
         run: corepack enable
       - name: Verify pnpm version

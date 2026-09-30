@@ -21,8 +21,8 @@ const PORT_WAIT_MS = process.platform === 'win32' ? 90_000 : 45_000;
 
 function bundledPython() {
   return process.platform === 'win32'
-    ? path.join(runtimeRoot, '.venv', 'Scripts', 'python.exe')
-    : path.join(runtimeRoot, '.venv', 'bin', 'python3');
+    ? path.join(runtimeRoot, 'python', 'python.exe')
+    : path.join(runtimeRoot, 'python', 'bin', 'python3');
 }
 
 function ensureRuntimePrepared() {
