@@ -11,7 +11,7 @@ const PPTX_DOCUMENT = /\.(pptx|ppsx)$/i;
 
 export type ParsedDocument = {
   markdown: string;
-  parser: 'markitdown' | 'docling';
+  parser: 'builtin' | 'markitdown' | 'docling';
   warnings: string[];
 };
 
@@ -90,7 +90,7 @@ export async function parseLocalDocument(input: {
       env: { ...process.env, PYTHONPATH: pythonPath, PYTHONIOENCODING: 'utf-8' },
     });
     const parsed = JSON.parse(stdout) as Partial<ParsedDocument>;
-    if (!parsed.markdown?.trim() || !['markitdown', 'docling'].includes(String(parsed.parser))) {
+    if (!parsed.markdown?.trim() || !['builtin', 'markitdown', 'docling'].includes(String(parsed.parser))) {
       throw new Error('Document parser returned no readable content.');
     }
     return {

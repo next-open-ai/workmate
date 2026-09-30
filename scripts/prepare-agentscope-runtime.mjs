@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -42,6 +42,23 @@ function installRequirements(python) {
   run(python, ['-m', 'pip', 'install', '-r', path.join(runtimeRoot, 'requirements.txt')]);
 }
 
+function pruneRuntime(directory) {
+  if (!existsSync(directory)) return;
+  for (const entry of readdirSync(directory)) {
+    const target = path.join(directory, entry);
+    const stat = statSync(target);
+    if (stat.isDirectory()) {
+      if (entry === '__pycache__' || entry === '.pytest_cache' || entry === '.mypy_cache' || entry === 'tests' || entry === 'test') {
+        rmSync(target, { recursive: true, force: true });
+      } else {
+        pruneRuntime(target);
+      }
+    } else if (entry.endsWith('.pyc') || entry.endsWith('.pyo')) {
+      rmSync(target, { force: true });
+    }
+  }
+}
+
 const python = resolveBasePython();
 const bundledPython = venvPython();
 // Packaging must be reproducible. Reusing an older venv preserves packages
@@ -51,4 +68,5 @@ console.log(`[agentscope-runtime] creating clean bundled venv with ${python}`);
 createVenv(python);
 console.log(`[agentscope-runtime] installing requirements into ${venvRoot}`);
 installRequirements(bundledPython);
+pruneRuntime(venvRoot);
 console.log(`[agentscope-runtime] ready: ${bundledPython}`);

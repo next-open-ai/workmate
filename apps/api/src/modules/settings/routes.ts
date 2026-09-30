@@ -64,10 +64,10 @@ async function doclingComponentStatus() {
 async function installDoclingComponent() {
   const paths = doclingComponentPaths();
   fs.mkdirSync(paths.packages, { recursive: true, mode: 0o700 });
-  const invocation = pythonArgv(pptxPython(), ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3']);
+  const invocation = pythonArgv(pptxPython(), ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'markitdown[pdf,docx]>=0.1.3,<0.2', 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3']);
   try {
     await execFileAsync(invocation.command, invocation.args, { timeout: 600_000, maxBuffer: 16 * 1024 * 1024, env: process.env });
-    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: DOCLING_COMPONENT_VERSION, installedAt: Date.now(), package: 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3' }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: DOCLING_COMPONENT_VERSION, installedAt: Date.now(), packages: ['markitdown[pdf,docx]>=0.1.3,<0.2', 'docling-slim[convert-core,format-pdf,format-docx]>=2.70,<3'] }, null, 2), { mode: 0o600 });
     const status = await doclingComponentStatus();
     if (status.state !== 'ready') throw new Error(status.message || '安装完成但组件校验失败。');
     return status;
@@ -102,11 +102,11 @@ async function installPptxComponent() {
   const paths = pptxComponentPaths();
   fs.mkdirSync(paths.packages, { recursive: true, mode: 0o700 });
   const invocation = pythonArgv(pptxPython(), [
-    '-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'python-pptx>=1.0,<2',
+    '-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--target', paths.packages, 'markitdown[pptx]>=0.1.3,<0.2',
   ]);
   try {
     await execFileAsync(invocation.command, invocation.args, { timeout: 180_000, maxBuffer: 8 * 1024 * 1024, env: process.env });
-    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: PPTX_COMPONENT_VERSION, installedAt: Date.now(), package: 'python-pptx>=1.0,<2' }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(paths.marker, JSON.stringify({ schemaVersion: PPTX_COMPONENT_VERSION, installedAt: Date.now(), package: 'markitdown[pptx]>=0.1.3,<0.2' }, null, 2), { mode: 0o600 });
     const status = await pptxComponentStatus();
     if (status.state !== 'ready') throw new Error(status.message || '安装完成但组件校验失败。');
     return status;

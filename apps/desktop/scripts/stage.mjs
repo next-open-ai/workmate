@@ -8,10 +8,10 @@ const appsRoot = path.resolve(desktopRoot, '..');
 const projectRoot = path.resolve(appsRoot, '..');
 const stageRoot = path.join(desktopRoot, 'stage');
 const runtimeRoot = path.join(projectRoot, 'runtimes', 'agentscope-runtime');
+const sqlJsDist = path.dirname(createRequire(path.join(desktopRoot, 'package.json')).resolve('sql.js/dist/sql-wasm.js'));
 const sources = [
   { from: path.join(appsRoot, 'renderer', 'dist'), to: path.join(stageRoot, 'renderer') },
   { from: path.join(appsRoot, 'api', 'dist'), to: path.join(stageRoot, 'api') },
-  { from: path.dirname(createRequire(path.join(desktopRoot, 'package.json')).resolve('sql.js/dist/sql-wasm.js')), to: path.join(stageRoot, 'sqljs') },
 ];
 
 rmSync(stageRoot, { recursive: true, force: true });
@@ -19,6 +19,8 @@ for (const source of sources) {
   if (!existsSync(source.from)) throw new Error(`Missing build output: ${source.from}`);
   cpSync(source.from, source.to, { recursive: true, dereference: true });
 }
+mkdirSync(path.join(stageRoot, 'sqljs'), { recursive: true });
+for (const file of ['sql-wasm.js', 'sql-wasm.wasm']) cpSync(path.join(sqlJsDist, file), path.join(stageRoot, 'sqljs', file));
 
 // pi-coding-agent resolves its package root by walking up from main.cjs and
 // reading package.json. Packaged API lives under Resources/api/, so the
@@ -72,7 +74,14 @@ function stageDependency(name, resolver) {
   const manifest = JSON.parse(readFileSync(path.join(source, 'package.json'), 'utf8'));
   const dependencyResolver = createRequire(path.join(source, 'package.json'));
   for (const dependency of Object.keys(manifest.dependencies ?? {})) stageDependency(dependency, dependencyResolver);
-  copyDereferenced(source, path.join(stagedDeps, name));
+  const destination = path.join(stagedDeps, name);
+  if (name === 'sql.js') {
+    mkdirSync(path.join(destination, 'dist'), { recursive: true });
+    cpSync(path.join(source, 'package.json'), path.join(destination, 'package.json'));
+    for (const file of ['sql-wasm.js', 'sql-wasm.wasm']) cpSync(path.join(source, 'dist', file), path.join(destination, 'dist', file));
+  } else {
+    copyDereferenced(source, destination);
+  }
 }
 
 const apiResolver = createRequire(path.join(appsRoot, 'api', 'package.json'));
