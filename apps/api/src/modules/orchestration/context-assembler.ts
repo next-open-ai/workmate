@@ -116,7 +116,7 @@ function modelCapabilitiesFor(employeeId: string, raw: unknown, enabled = true):
   const models = settings.models ?? [];
   const instances = settings.providerInstances ?? [];
   const bindings = settings.capabilityBindings ?? [];
-  const supported = new Set(['quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts']);
+  const supported = new Set(['quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'ontology']);
   return bindings.flatMap((binding) => {
     const capability = String(binding.capability || '');
     if (!supported.has(capability) || binding.enabled === false) return [];
@@ -426,6 +426,7 @@ async function knowledgeBasesFor(store: KeyValueStore, prefs: PrefsRow, modelSet
       name: String(raw.name ?? id),
       provider: String(raw.provider ?? provider) as ChatRunContext['knowledgeBases'][number]['provider'],
       enabled: raw.enabled !== false,
+      ontologyEnabled: raw.ontologyEnabled !== false,
       description: raw.description ? String(raw.description) : undefined,
       ...(raw.dataDir ? { dataDir: String(raw.dataDir) } : {}),
       ...(raw.baseUrl ? { baseUrl: String(raw.baseUrl) } : {}),
@@ -486,7 +487,9 @@ export async function resolveTaskContext(
   const searchMode = prefs.searchMode;
   const enableSearch = searchMode === 'llm-builtin' && (model.provider === 'qwen' || model.provider === 'openai-compatible');
   const maxSteps = taskMaxSteps(task, prefs);
-  const runTimeoutMs = prefs.runTimeoutMs ?? 600_000;
+  // 600s was the former persisted default; migrate it to the new 30-minute
+  // platform default while preserving every other explicit custom value.
+  const runTimeoutMs = prefs.runTimeoutMs === 600_000 ? 1_800_000 : (prefs.runTimeoutMs ?? 1_800_000);
   const mcpToolTimeoutMs = prefs.mcpToolTimeoutMs ?? 60_000;
   const engineRaw = String(prefs.engine || '').trim().toLowerCase();
   const engine =

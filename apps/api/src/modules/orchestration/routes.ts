@@ -2,14 +2,14 @@ import path from 'node:path';
 import os from 'node:os';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { getSharedAgentscopeRuntimeStats, saveChatImage, readChatImage, ImageInputError } from '@workmate/agent-core';
-import { ChatFilesSchema, ChatImagesSchema } from '@workmate/contracts';
+import { ChatFilesSchema, ChatImagesSchema, DurableTaskArtifactRoleSchema, DurableTaskStatusSchema } from '@workmate/contracts';
 import { JsonFileStore, Orchestrator, createScriptedRunner, type AgentRunner, type OrcEvent } from '@workmate/orchestrator';
 import type { ChatRunContext, ConfirmProjectInput, CreateProjectDraftInput, ProjectTask, ResolveProjectApprovalInput, UpdateProjectAccessInput } from '@workmate/orchestrator';
 import { requireAuth } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource, requireSystemAdmin } from '../auth/ownership.js';
 import { resolveEmployeeMcpConnections, resolveTaskContext } from './context-assembler.js';
 import { applyParentSecrets } from './secrets.js';
-import { chatAttachmentStats, cleanupChatAttachments, deleteChatFile, deleteChatFiles, resolveChatFiles, saveChatFile } from './chat-attachments.js';
+import { chatAttachmentStats, cleanupChatAttachments, deleteChatFile, deleteChatFiles, readChatFile, resolveChatFiles, saveChatFile } from './chat-attachments.js';
 
 /**
  * Orchestration module (M0): hosts the headless orchestrator inside the API
@@ -98,6 +98,18 @@ export function getOrchestrator(): Orchestrator {
           return [];
         }
       },
+      durableTaskSourceResolver: async (sessionId, attachments) => Promise.all(attachments.map(async (attachment) => {
+        const file = await readChatFile(sessionId, attachment.id);
+        if (file.attachment.name !== attachment.name || file.attachment.size !== attachment.size) {
+          throw new Error('附件元数据不匹配，请重新上传。');
+        }
+        return {
+          attachmentId: file.attachment.id,
+          name: file.attachment.name,
+          mimeType: file.attachment.mimeType,
+          bytes: file.bytes,
+        };
+      })),
     });
     // Fire-and-forget: settle runs left `running` by a previous process exit.
     void instance.recoverOnBoot().catch((error) => {
@@ -258,6 +270,17 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true };
   });
 
+  app.post('/sessions/:sessionId/clear', async (request, reply) => {
+    const auth = requireAuth(request);
+    const sessionId = String((request.params as Record<string, string>).sessionId);
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
+    const cleared = await orch.chat.clearChatSession(sessionId);
+    if (!cleared) return fail(reply, new Error('Chat session not found.'));
+    await deleteChatFiles(sessionId);
+    return { session: publicChatSession(cleared as unknown as { messages: Array<Record<string, unknown>> }) };
+  });
+
   app.post('/sessions/:sessionId/files', { bodyLimit: 26 * 1024 * 1024 }, async (request, reply) => {
     const auth = requireAuth(request); const sessionId = String((request.params as Record<string, string>).sessionId);
     const session = await orch.chat.getChatSession(sessionId);
@@ -361,6 +384,50 @@ export const orchestrationRoutes: FastifyPluginAsync = async (app) => {
       if (run) runs.push(run);
     }
     return { runs };
+  });
+
+  app.get('/sessions/:sessionId/tasks', async (request, reply) => {
+    const auth = requireAuth(request);
+    const sessionId = String((request.params as Record<string, string>).sessionId);
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canReadOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
+    return { tasks: await orch.durableTasks.listForConversation(sessionId), activeTaskId: session.activeDurableTaskId ?? null };
+  });
+
+  app.get('/sessions/:sessionId/tasks/:taskId', async (request, reply) => {
+    const auth = requireAuth(request);
+    const { sessionId, taskId } = request.params as Record<string, string>;
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canReadOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
+    const task = await orch.durableTasks.get(taskId);
+    if (!task || task.conversationId !== sessionId) return reply.code(404).send({ message: 'Durable task not found.' });
+    return { task };
+  });
+
+  app.patch('/sessions/:sessionId/tasks/:taskId', async (request, reply) => {
+    const auth = requireAuth(request);
+    const { sessionId, taskId } = request.params as Record<string, string>;
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
+    const task = await orch.durableTasks.get(taskId);
+    if (!task || task.conversationId !== sessionId) return reply.code(404).send({ message: 'Durable task not found.' });
+    const parsed = DurableTaskStatusSchema.safeParse((request.body as { status?: unknown } | null)?.status);
+    if (!parsed.success) return reply.code(400).send({ message: 'Invalid durable task status.' });
+    return { task: await orch.durableTasks.setStatus(taskId, parsed.data) };
+  });
+
+  app.post('/sessions/:sessionId/tasks/:taskId/assets', async (request, reply) => {
+    const auth = requireAuth(request);
+    const { sessionId, taskId } = request.params as Record<string, string>;
+    const session = await orch.chat.getChatSession(sessionId);
+    if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) return fail(reply, new Error('Chat session not found.'));
+    const task = await orch.durableTasks.get(taskId);
+    if (!task || task.conversationId !== sessionId) return reply.code(404).send({ message: 'Durable task not found.' });
+    const body = (request.body ?? {}) as { assetId?: string; name?: string; role?: unknown; sourceRunId?: string };
+    if (!body.assetId?.trim() || !body.name?.trim()) return reply.code(400).send({ message: 'assetId and name are required.' });
+    const role = body.role === undefined ? undefined : DurableTaskArtifactRoleSchema.safeParse(body.role);
+    if (role && !role.success) return reply.code(400).send({ message: 'Invalid asset role.' });
+    return { task: await orch.durableTasks.attachAsset(taskId, { assetId: body.assetId.trim(), name: body.name.trim(), ...(role?.success ? { role: role.data } : {}), ...(body.sourceRunId ? { sourceRunId: body.sourceRunId } : {}) }) };
   });
 
   app.get('/sessions/:sessionId/approvals', async (request, reply) => {

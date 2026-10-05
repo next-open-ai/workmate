@@ -47,4 +47,18 @@ test('legacy knowledge base remains valid without embedding selection fields', (
   });
   assert.equal(parsed.embeddingMode, undefined);
   assert.equal(parsed.embeddingModel, 'text-embedding-v2');
+  // Legacy records omit the field; runtime code treats anything except an
+  // explicit false as enabled, avoiding a data migration.
+  assert.equal(parsed.ontologyEnabled, undefined);
+});
+
+test('knowledge base can explicitly disable ontology-enhanced retrieval', () => {
+  const parsed = KnowledgeBaseRuntimeSchema.parse({
+    id: 'kb-vector-only',
+    name: 'Vector only',
+    provider: 'lancedb',
+    enabled: true,
+    ontologyEnabled: false,
+  });
+  assert.equal(parsed.ontologyEnabled, false);
 });

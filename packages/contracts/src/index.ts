@@ -55,7 +55,7 @@ export const AgentSkillRuntimeSchema = z.object({
 });
 export type AgentSkillRuntime = z.infer<typeof AgentSkillRuntimeSchema>;
 
-export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision']);
+export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision', 'ontology']);
 export type ModelCapability = z.infer<typeof ModelCapabilitySchema>;
 export const ImageGenerationProtocolSchema = z.enum([
   'openai-images',
@@ -113,10 +113,10 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('reasoning.delta'), runId: z.string(), text: z.string() }),
   z.object({ type: z.literal('message.delta'), runId: z.string(), text: z.string() }),
-  z.object({ type: z.literal('tool.started'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string() }),
-  z.object({ type: z.literal('tool.progress'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), progress: z.number().min(0).max(100).optional() }),
-  z.object({ type: z.literal('tool.completed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), ok: z.boolean() }),
-  z.object({ type: z.literal('tool.failed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string() }),
+  z.object({ type: z.literal('tool.started'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), detail: z.string().max(12_000).optional() }),
+  z.object({ type: z.literal('tool.progress'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), progress: z.number().min(0).max(100).optional(), detail: z.string().max(12_000).optional() }),
+  z.object({ type: z.literal('tool.completed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), ok: z.boolean(), detail: z.string().max(12_000).optional() }),
+  z.object({ type: z.literal('tool.failed'), runId: z.string(), invocationId: z.string().optional(), toolName: z.string(), summary: z.string(), detail: z.string().max(12_000).optional() }),
   z.object({ type: z.literal('capability.started'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string() }),
   z.object({ type: z.literal('capability.progress'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string(), progress: z.number().min(0).max(100).optional() }),
   z.object({ type: z.literal('capability.completed'), runId: z.string(), invocationId: z.string().optional(), capability: ModelCapabilitySchema, modelId: z.string(), summary: z.string(), ok: z.boolean() }),
@@ -365,6 +365,8 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   name: z.string().min(1).max(120),
   provider: KnowledgeProviderIdSchema,
   enabled: z.boolean().default(true),
+  /** Use a published ontology to expand and rerank retrieval. Falls back to vector search on failure. */
+  ontologyEnabled: z.boolean().optional(),
   description: z.string().max(500).optional(),
   /** Local LanceDB directory (absolute). */
   dataDir: z.string().max(1000).optional(),
@@ -451,10 +453,19 @@ export const OntologyGraphRequestSchema = z.object({
   graph: OntologyGraphSchema,
 });
 export type OntologyGraphRequest = z.infer<typeof OntologyGraphRequestSchema>;
+export const OntologyQueryConstraintsSchema = z.object({
+  nodeTypes: z.array(z.string().min(1).max(80)).max(20).default([]),
+  predicates: z.array(z.string().min(1).max(120)).max(30).default([]),
+  properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+  direction: z.enum(['both', 'out', 'in']).default('both'),
+  maxResults: z.number().int().min(1).max(100).default(50),
+}).default({});
+export type OntologyQueryConstraints = z.infer<typeof OntologyQueryConstraintsSchema>;
 export const OntologyQueryRequestSchema = z.object({
   knowledgeBase: KnowledgeBaseRuntimeSchema,
   query: z.string().min(2).max(800),
   maxHops: z.number().int().min(0).max(2).default(1),
+  constraints: OntologyQueryConstraintsSchema.optional(),
 });
 export type OntologyQueryRequest = z.infer<typeof OntologyQueryRequestSchema>;
 
@@ -473,7 +484,7 @@ export const OntologyCandidateSchema = z.object({
   edge: OntologyEdgeSchema.optional(),
   evidence: z.array(OntologyEvidenceSchema).min(1).max(20),
   confidence: z.number().min(0).max(1).default(0.5),
-  status: z.enum(['pending', 'accepted', 'rejected', 'committed']).default('pending'),
+  status: z.enum(['pending', 'accepted', 'rejected', 'deferred', 'committed']).default('pending'),
   reviewedAt: z.number().int().positive().optional(),
   reviewNote: z.string().max(1000).optional(),
 }).superRefine((value, ctx) => {
@@ -495,13 +506,33 @@ export const OntologyExtractRequestSchema = OntologyWorkflowRequestSchema.extend
   documentIds: z.array(z.string().min(1).max(240)).min(1).max(20),
   instructions: z.string().max(2000).optional(),
   model: ModelConfigSchema,
+  intensity: z.enum(['quick', 'standard', 'deep']).default('standard'),
 });
 export type OntologyExtractRequest = z.infer<typeof OntologyExtractRequestSchema>;
 export const OntologyReviewRequestSchema = OntologyWorkflowRequestSchema.extend({
   candidateIds: z.array(z.string().min(1)).min(1).max(1000),
-  decision: z.enum(['accepted', 'rejected']),
+  decision: z.enum(['accepted', 'rejected', 'deferred']),
   note: z.string().max(1000).optional(),
 });
+export const OntologyCandidateUpsertRequestSchema = OntologyWorkflowRequestSchema.extend({ candidate: OntologyCandidateSchema });
+export const OntologyCandidateDeleteRequestSchema = OntologyWorkflowRequestSchema.extend({ candidateIds: z.array(z.string().min(1)).min(1).max(1000) });
+export const OntologyCandidateMergeRequestSchema = OntologyWorkflowRequestSchema.extend({ sourceCandidateIds: z.array(z.string().min(1)).min(2).max(50), mergedCandidate: OntologyCandidateSchema });
+export const OntologyPublishRequestSchema = OntologyWorkflowRequestSchema.extend({ note: z.string().max(1000).optional(), publisher: z.string().max(120).optional() });
+export const OntologyVersionRequestSchema = OntologyWorkflowRequestSchema.extend({ version: z.number().int().positive() });
+export const OntologyAnalysisJobRequestSchema = z.object({ jobId: z.string().uuid() });
+export const OntologyGovernanceCommandSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('merge_nodes'), nodeIds: z.array(z.string().min(1)).min(2).max(20), canonicalId: z.string().min(1), canonicalName: z.string().min(1).max(240) }),
+  z.object({ type: z.literal('rename_node'), nodeId: z.string().min(1), name: z.string().min(1).max(240), keepOldAsAlias: z.boolean().default(true) }),
+  z.object({ type: z.literal('change_node_type'), nodeId: z.string().min(1), nodeType: z.string().min(1).max(120) }),
+  z.object({ type: z.literal('delete_node'), nodeId: z.string().min(1), migrateToNodeId: z.string().min(1).optional() }),
+  z.object({ type: z.literal('delete_edge'), edgeId: z.string().min(1) }),
+  z.object({ type: z.literal('reverse_edge'), edgeId: z.string().min(1) }),
+  z.object({ type: z.literal('mark_term'), nodeId: z.string().min(1) }),
+  z.object({ type: z.literal('add_edge'), edgeId: z.string().min(1), subjectId: z.string().min(1), predicate: z.string().min(1).max(120), objectId: z.string().min(1) }),
+]);
+export type OntologyGovernanceCommand = z.infer<typeof OntologyGovernanceCommandSchema>;
+export const OntologyGovernanceApplyRequestSchema = OntologyWorkflowRequestSchema.extend({ commands: z.array(OntologyGovernanceCommandSchema).min(1).max(100), actor: z.string().max(120).optional(), source: z.enum(['manual', 'rule', 'ai']).default('manual') });
+export const OntologyGovernanceSuggestRequestSchema = OntologyWorkflowRequestSchema.extend({ issueIds: z.array(z.string().min(1)).max(100).default([]), model: ModelConfigSchema });
 
 export const BailianCreateKnowledgeRequestSchema = z.object({
   accessKeyId: z.string().min(1).max(120),
@@ -619,5 +650,72 @@ export const ChatRequestSchema = z.object({
   engine: AgentEngineIdSchema.optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+/* ------------------------------------------------------------------ *
+ * Conversation durable tasks
+ * ------------------------------------------------------------------ */
+
+export const DurableTaskStatusSchema = z.enum([
+  'running',
+  'waiting_user',
+  'waiting_external',
+  'paused',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+export type DurableTaskStatus = z.infer<typeof DurableTaskStatusSchema>;
+
+export const DurableTaskArtifactRoleSchema = z.enum(['source', 'intermediate', 'deliverable', 'checkpoint', 'state']);
+export type DurableTaskArtifactRole = z.infer<typeof DurableTaskArtifactRoleSchema>;
+
+export const DurableTaskWorkingSetEntrySchema = z.object({
+  id: z.string().uuid(),
+  logicalPath: z.string().min(1).max(500),
+  role: DurableTaskArtifactRoleSchema,
+  /** Original upload id when this entry was promoted from a chat attachment. */
+  sourceAttachmentId: z.string().uuid().optional(),
+  mimeType: z.string().min(1).max(160).optional(),
+  sourceRunId: z.string().min(1).max(120).optional(),
+  sizeBytes: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  updatedAt: z.number().int().positive(),
+});
+export type DurableTaskWorkingSetEntry = z.infer<typeof DurableTaskWorkingSetEntrySchema>;
+
+export const DurableTaskAssetReferenceSchema = z.object({
+  assetId: z.string().min(1).max(160),
+  name: z.string().min(1).max(300),
+  role: DurableTaskArtifactRoleSchema,
+  sourceRunId: z.string().min(1).max(120).optional(),
+  addedAt: z.number().int().positive(),
+});
+export type DurableTaskAssetReference = z.infer<typeof DurableTaskAssetReferenceSchema>;
+
+export const DurableTaskCheckpointSchema = z.object({
+  id: z.string().uuid(),
+  runId: z.string().min(1).max(120),
+  status: DurableTaskStatusSchema,
+  summary: z.string().min(1).max(2_000),
+  createdAt: z.number().int().positive(),
+  workingSetVersion: z.number().int().nonnegative(),
+});
+export type DurableTaskCheckpoint = z.infer<typeof DurableTaskCheckpointSchema>;
+
+export const DurableTaskSchema = z.object({
+  id: z.string().uuid(),
+  conversationId: z.string().min(1).max(120),
+  title: z.string().min(1).max(120),
+  objective: z.string().min(1).max(4_000),
+  status: DurableTaskStatusSchema,
+  version: z.number().int().positive(),
+  runIds: z.array(z.string().min(1).max(120)).max(500),
+  workingSet: z.array(DurableTaskWorkingSetEntrySchema).max(500),
+  assetRefs: z.array(DurableTaskAssetReferenceSchema).max(500),
+  checkpoints: z.array(DurableTaskCheckpointSchema).max(200),
+  createdAt: z.number().int().positive(),
+  updatedAt: z.number().int().positive(),
+});
+export type DurableTask = z.infer<typeof DurableTaskSchema>;
 
 export * from './data-schema.js';

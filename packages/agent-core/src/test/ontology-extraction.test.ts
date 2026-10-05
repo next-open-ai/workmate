@@ -56,6 +56,31 @@ test('ontology extraction partitions documents without splitting chunk contents'
   assert.deepEqual(batches.flat().map((chunk) => chunk.id), manyChunks.map((chunk) => chunk.id));
 });
 
+test('ontology extraction runs top-level batches with bounded concurrency and preserves batch order', async () => {
+  const manyChunks = Array.from({ length: 18 }, (_, index) => ({
+    id: `chunk-${index + 1}`,
+    documentId: 'doc-1',
+    documentTitle: '材料',
+    content: `实体${index + 1}属于分类。`,
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const result = await extractOntologyCandidateBatches(manyChunks, async (batch) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    const batchNumber = Number(batch[0]!.id.split('-')[1]);
+    await new Promise((resolve) => setTimeout(resolve, batchNumber === 1 ? 25 : 5));
+    active -= 1;
+    const chunk = batch[0]!;
+    return JSON.stringify({
+      nodes: [{ id: `entity_${chunk.id}`, type: 'concept', name: `实体${batchNumber}`, evidence: { chunkId: chunk.id, quote: chunk.content } }],
+      edges: [],
+    });
+  });
+  assert.equal(maxActive, 2);
+  assert.deepEqual(result.map((candidate) => candidate.node?.name), ['实体1', '实体5', '实体9', '实体13', '实体17']);
+});
+
 test('ontology extraction splits and retries a batch when model JSON is incomplete', async () => {
   const retryChunks = Array.from({ length: 4 }, (_, index) => ({
     id: `chunk-${index + 1}`,
@@ -107,4 +132,15 @@ test('ontology extraction splits dense single-chunk text for retry without chang
   assert.equal(calls.every((call) => call.id === denseChunk.id), true);
   assert.equal(result.length > 1, true);
   assert.equal(result.every((candidate) => candidate.evidence[0]?.chunkId === denseChunk.id), true);
+});
+
+test('AI governance normalizer safely completes missing merge command fields', async () => {
+  const { normalizeAiGovernanceCommands } = await import('../ontology-extraction.js');
+  const graph = { version: 1, nodes: [
+    { id: 'a', type: 'Indicator', name: 'shoe_weight', aliases: [], properties: {}, status: 'draft' as const },
+    { id: 'b', type: 'Indicator', name: 'indicator_shoe_weight', aliases: [], properties: {}, status: 'draft' as const },
+  ], edges: [] };
+  const issue = { id: 'duplicate:shoeweight', category: 'duplicate_node' as const, severity: 'warning' as const, title: '重复', description: '', nodeIds: ['a', 'b'], edgeIds: [], suggestedCommands: [] };
+  assert.deepEqual(normalizeAiGovernanceCommands([{ type: 'merge_nodes', nodeIds: ['a', 'b'] }], issue, graph), [{ type: 'merge_nodes', nodeIds: ['a', 'b'], canonicalId: 'a', canonicalName: 'shoe_weight' }]);
+  assert.deepEqual(normalizeAiGovernanceCommands([{ type: 'rename_node', nodeId: 'a' }], issue, graph), []);
 });

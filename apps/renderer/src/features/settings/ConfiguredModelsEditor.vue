@@ -427,6 +427,7 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
         </div>
         <p v-if="model.capability === 'vision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">用于主模型不能看图时的定向识别；请选择确实支持图片输入的模型，设为默认后在员工应用模型能力中开启“图片理解”。不会替换主模型。</p>
         <p v-else-if="model.capability === 'decision'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">有限问题决策模型，不进入聊天主模型选择器。设为默认后，可在“决策守卫”中选择并用于 Tool 执行前安检和主模型按需判断。</p>
+        <p v-else-if="model.capability === 'ontology'" class="border-t border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">仅在本体名称与别名规则未命中时，对受限候选进行语义消歧；超时、不可用或低置信度时自动退回普通检索。</p>
         <div v-if="model.capability === 'embedding'" class="grid gap-3 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 sm:grid-cols-3">
           <label class="grid gap-1 text-[11px] font-semibold text-[var(--muted)]">
             <span>Dimension</span>

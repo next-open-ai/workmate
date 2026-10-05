@@ -1,6 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { KnowledgeBaseRuntime, ModelConfig } from '@workmate/contracts';
+import { completeSimple } from '@mariozechner/pi-ai';
+import { z } from 'zod';
+import type { KnowledgeBaseRuntime, ModelCapabilityRuntime, ModelConfig, OntologyNode } from '@workmate/contracts';
 import { Type } from '@sinclair/typebox';
 import { defineAgentTool, type AgentTool } from './pi-tools.js';
 import {
@@ -17,8 +19,9 @@ import {
   bailianOpenApiUploadDocument,
 } from './bailian-openapi.js';
 import { buildEmbeddingSignature, embedOpenAiCompatible } from './embedding-http.js';
-import { graphDocumentHints, planOntologyQuery, type OntologyQueryPlan } from './ontology-runtime.js';
+import { graphDocumentHints, planOntologyQuery, readOntologyGraph, type OntologyQueryPlan } from './ontology-runtime.js';
 import { parseLocalDocument } from './document-parser.js';
+import { createChatCompletionsPayloadPatch, toPiModel } from './pi-model.js';
 
 export type KnowledgeHit = {
   id: string;
@@ -30,6 +33,7 @@ export type KnowledgeHit = {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
   provider: string;
+  retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'>;
 };
 
 type EmbedConfig = {
@@ -217,7 +221,7 @@ async function tryLanceDeleteByIds(dataDir: string, ids: string[]) {
 
 async function loadAllLocalChunks(dataDir: string): Promise<{ rows: LocalChunk[]; backend: 'lancedb' | 'file-fallback' }> {
   const lanceRows = await tryLanceListAll(dataDir);
-  if (lanceRows) return { rows: lanceRows, backend: 'lancedb' };
+  if (lanceRows?.length || (lanceRows && !existsSync(fileStorePath(dataDir)))) return { rows: lanceRows, backend: 'lancedb' };
   return { rows: readFileStore(dataDir).map((row) => normalizeLocalChunk(row)), backend: 'file-fallback' };
 }
 
@@ -1112,40 +1116,151 @@ export type HybridKnowledgeSearchResult = {
   results: KnowledgeHit[];
 };
 
+const SemanticOntologyMatchesSchema = z.object({
+  matches: z.array(z.object({
+    nodeId: z.string().min(1).max(240),
+    confidence: z.number().min(0).max(1),
+    reason: z.string().max(300).optional(),
+  })).max(5).default([]),
+});
+
+function ontologyCandidateScore(node: OntologyNode, query: string) {
+  const chars = new Set(query.toLocaleLowerCase().replace(/\s+/g, ''));
+  const text = [node.name, ...node.aliases, node.type].join('').toLocaleLowerCase();
+  let overlap = 0;
+  for (const char of new Set(text)) if (chars.has(char)) overlap += 1;
+  return overlap / Math.max(1, Math.min(chars.size, new Set(text).size));
+}
+
+function capabilityModel(config: ModelCapabilityRuntime): ModelConfig {
+  return {
+    provider: config.provider,
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey || (config.provider === 'ollama' ? 'ollama' : ''),
+    chatModel: config.modelId,
+    providerLabel: config.providerLabel,
+  };
+}
+
+/**
+ * Semantic entity linking is a bounded fallback: it runs only after exact
+ * name/alias rules miss, sees a capped candidate list, and may only select
+ * supplied IDs. Invalid, low-confidence, slow, or unavailable model results
+ * are treated as no match so retrieval remains fail-open.
+ */
+export async function resolveOntologyEntitiesWithModel(
+  kb: KnowledgeBaseRuntime,
+  query: string,
+  config: ModelCapabilityRuntime,
+): Promise<Array<{ nodeId: string; confidence: number; reason?: string }>> {
+  const graph = await readOntologyGraph(kb);
+  const candidates = graph.nodes
+    .filter((node) => node.status !== 'archived')
+    .sort((a, b) => ontologyCandidateScore(b, query) - ontologyCandidateScore(a, query))
+    .slice(0, 60)
+    .map((node) => ({ id: node.id, name: node.name, aliases: node.aliases.slice(0, 12), type: node.type }));
+  if (!candidates.length) return [];
+  const model = capabilityModel(config);
+  const response = await completeSimple(toPiModel(model), {
+    systemPrompt: [
+      '你是企业本体实体链接器。判断用户问题是否与给定候选实体语义一致。',
+      '只能选择候选列表中已有的 id，不得创建实体或关系。语义证据不足时返回空 matches。',
+      '返回严格 JSON：{"matches":[{"nodeId":"候选id","confidence":0.0,"reason":"简短理由"}]}。最多 3 项，不要 Markdown。',
+      '仅返回 confidence >= 0.72 的结果；同音、同字但业务含义不同不得匹配。',
+    ].join('\n'),
+    messages: [{ role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: JSON.stringify({ question: query, candidates }) }] }],
+  }, {
+    apiKey: model.apiKey,
+    signal: AbortSignal.timeout(8_000),
+    maxTokens: 800,
+    onPayload: createChatCompletionsPayloadPatch(model),
+  });
+  if (response.stopReason === 'error' || response.stopReason === 'aborted' || response.stopReason === 'length') return [];
+  const text = response.content.filter((part): part is { type: 'text'; text: string } => part.type === 'text').map((part) => part.text).join('\n');
+  const raw = (/```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1] || text).trim();
+  const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) return [];
+  let parsed: z.infer<typeof SemanticOntologyMatchesSchema>;
+  try { parsed = SemanticOntologyMatchesSchema.parse(JSON.parse(raw.slice(start, end + 1))); } catch { return []; }
+  const allowed = new Set(candidates.map((item) => item.id));
+  return parsed.matches.filter((item) => allowed.has(item.nodeId) && item.confidence >= 0.72).slice(0, 3);
+}
+
+export async function recallOntologyEvidence(kb: KnowledgeBaseRuntime, plan: OntologyQueryPlan): Promise<KnowledgeHit[]> {
+  const refs = plan.evidenceRefs.filter((ref) => ref.documentId).slice(0, 24);
+  const documentIds = [...new Set(refs.map((ref) => ref.documentId!))].slice(0, 12);
+  const settled = await Promise.allSettled(documentIds.map((documentId) => listKnowledgeChunks({ kb, documentId, offset: 0, limit: 100 })));
+  const hits: KnowledgeHit[] = [];
+  for (let index = 0; index < settled.length; index += 1) {
+    const result = settled[index];
+    if (result?.status !== 'fulfilled') continue;
+    const documentId = documentIds[index]!;
+    const documentRefs = refs.filter((ref) => ref.documentId === documentId);
+    const exactChunkIds = new Set(documentRefs.map((ref) => ref.chunkId).filter((value): value is string => Boolean(value)));
+    const selected = exactChunkIds.size
+      ? result.value.chunks.filter((chunk: KnowledgeChunkSummary) => exactChunkIds.has(chunk.id))
+      : result.value.chunks.slice(0, 2);
+    for (const chunk of selected as KnowledgeChunkSummary[]) {
+      hits.push({
+        id: chunk.id,
+        title: chunk.title || chunk.documentTitle,
+        content: chunk.content,
+        score: exactChunkIds.has(chunk.id) ? 0.96 : 0.82,
+        source: chunk.source,
+        knowledgeBaseId: kb.id,
+        knowledgeBaseName: kb.name,
+        provider: kb.provider,
+      });
+    }
+  }
+  return hits;
+}
+
 /**
  * Phase-1 hybrid retrieval. The original query always runs as a recall safety
  * net; ontology terms add a second route and graph document hints boost rather
  * than exclude candidates, so an incomplete graph cannot hide valid evidence.
  */
-export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig): Promise<HybridKnowledgeSearchResult> {
-  const plan = await planOntologyQuery(kb, query, 1);
+export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig, semanticModel?: ModelCapabilityRuntime): Promise<HybridKnowledgeSearchResult> {
+  let plan = await planOntologyQuery(kb, query, 2);
+  if (!plan.matchedNodes.length && semanticModel) {
+    try {
+      const semanticMatches = await resolveOntologyEntitiesWithModel(kb, query, semanticModel);
+      if (semanticMatches.length) plan = await planOntologyQuery(kb, query, 2, {}, semanticMatches);
+    } catch {
+      // The specialist model is optional. Network, timeout, and malformed
+      // output failures intentionally preserve the deterministic/vector path.
+    }
+  }
   const enhancedQuery = [query, ...plan.expandedTerms, ...plan.relatedNodes.map((node) => node.name)].filter(Boolean).join(' ');
   const rawPromise = searchKnowledgeBase(kb, query, Math.min(8, Math.max(topK, topK * 2)), model);
   const enhancedPromise = enhancedQuery === query
     ? Promise.resolve([] as KnowledgeHit[])
     : searchKnowledgeBase(kb, enhancedQuery.slice(0, 800), Math.min(8, Math.max(topK, topK * 2)), model);
-  const [raw, enhanced] = await Promise.all([rawPromise, enhancedPromise]);
+  const evidencePromise = plan.evidenceRefs.length ? recallOntologyEvidence(kb, plan) : Promise.resolve([] as KnowledgeHit[]);
+  const [raw, enhanced, evidence] = await Promise.all([rawPromise, enhancedPromise, evidencePromise]);
   const hints = graphDocumentHints(plan).map((value) => value.toLocaleLowerCase());
   const merged = new Map<string, KnowledgeHit & { routes: Set<string> }>();
-  for (const [route, hits] of [['raw-vector', raw], ['ontology-vector', enhanced]] as const) {
+  for (const [route, hits] of [['raw-vector', raw], ['ontology-vector', enhanced], ['ontology-evidence', evidence]] as const) {
     for (const hit of hits) {
       const key = `${hit.knowledgeBaseId}:${hit.id}`;
       const hinted = hints.some((hint) => (hit.source || '').toLocaleLowerCase().includes(hint) || hit.title.toLocaleLowerCase().includes(hint));
       const score = Math.min(1, hit.score + (hinted ? 0.12 : 0));
       const current = merged.get(key);
       if (current) {
-        current.score = Math.max(current.score, score) + 0.03;
+        current.score = Math.min(1, Math.max(current.score, score) + 0.03);
         current.routes.add(route);
       } else merged.set(key, { ...hit, score, routes: new Set([route]) });
     }
   }
-  const results = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, topK).map(({ routes: _routes, ...hit }) => hit);
+  const results = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, topK).map(({ routes, ...hit }) => ({ ...hit, retrievalRoutes: [...routes] as KnowledgeHit['retrievalRoutes'] }));
   return { query, plan, strategy: plan.matchedNodes.length ? 'ontology-enhanced' : 'vector-only', results };
 }
 
 export function createKnowledgeTools(input: {
   knowledgeBases?: KnowledgeBaseRuntime[];
   model?: ModelConfig;
+  semanticModel?: ModelCapabilityRuntime;
 }): AgentTool[] {
   const enabled = (input.knowledgeBases ?? []).filter((item) => item.enabled);
   if (!enabled.length) return [];
@@ -1168,12 +1283,26 @@ export function createKnowledgeTools(input: {
         }
         const hits: KnowledgeHit[] = [];
         const errors: string[] = [];
+        const strategies: Array<{ knowledgeBaseId: string; strategy: HybridKnowledgeSearchResult['strategy']; matchedEntities: number }> = [];
         for (const kb of targets) {
+          if (kb.ontologyEnabled === false) {
+            try {
+              hits.push(...await searchKnowledgeBase(kb, query, topK, input.model));
+              strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 });
+            } catch (error) {
+              errors.push(`${kb.name}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            continue;
+          }
           try {
-            const rows = await searchKnowledgeBase(kb, query, topK, input.model);
-            hits.push(...rows);
+            const hybrid = await searchKnowledgeWithOntology(kb, query, topK, input.model, input.semanticModel);
+            hits.push(...hybrid.results);
+            strategies.push({ knowledgeBaseId: kb.id, strategy: hybrid.strategy, matchedEntities: hybrid.plan.matchedNodes.length });
           } catch (error) {
-            errors.push(`${kb.name}: ${error instanceof Error ? error.message : String(error)}`);
+            // Ontology is an enhancement, never a hard dependency. A damaged or
+            // unavailable graph must not hide otherwise valid private knowledge.
+            try { hits.push(...await searchKnowledgeBase(kb, query, topK, input.model)); strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 }); }
+            catch (fallbackError) { errors.push(`${kb.name}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`); }
           }
         }
         hits.sort((a, b) => b.score - a.score);
@@ -1183,6 +1312,7 @@ export function createKnowledgeTools(input: {
           query,
           count: selected.length,
           results: selected,
+          strategies,
           errors: errors.length ? errors : undefined,
         };
       },

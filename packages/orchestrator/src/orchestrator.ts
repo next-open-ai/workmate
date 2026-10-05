@@ -6,9 +6,11 @@ import { InMemoryExecutionDispatcher, type ExecutionDispatcher, type ExecutionDi
 import { RunEngine } from './run-engine.js';
 import { agentCoreRunner, type AgentRunner } from './runner.js';
 import type { ChatRunContext } from './chat-session.js';
+import type { DurableTaskSourceInput } from './chat-session.js';
 import type { KeyValueStore } from './storage/kv.js';
 import type { ProjectTask } from './types.js';
 import { JsonFileStore, MemoryStore } from './storage/index.js';
+import { DurableTaskService } from './durable-task.js';
 
 export interface OrchestratorOptions {
   store: KeyValueStore;
@@ -33,6 +35,7 @@ export interface OrchestratorOptions {
     employeeId: string,
     ownerUserId?: string | null,
   ) => ChatRunContext['mcpConnections'] | Promise<ChatRunContext['mcpConnections']>;
+  durableTaskSourceResolver?: (sessionId: string, attachments: import('@workmate/contracts').ChatFileAttachment[]) => Promise<DurableTaskSourceInput[]>;
 }
 
 /**
@@ -48,6 +51,7 @@ export class Orchestrator {
   readonly engine: RunEngine;
   readonly chat: ChatSessionService;
   readonly projects: ProjectService;
+  readonly durableTasks: DurableTaskService;
   readonly dispatcher: ExecutionDispatcher;
 
   constructor(options: OrchestratorOptions) {
@@ -60,19 +64,22 @@ export class Orchestrator {
       maxQueueWaitMs: options.maxQueueWaitMs,
     });
     this.dispatcher = dispatcher;
-    this.engine = new RunEngine(this.store, runner, this.events, dispatcher, options.runTimeoutMs ?? 600_000);
+    this.engine = new RunEngine(this.store, runner, this.events, dispatcher, options.runTimeoutMs ?? 1_800_000);
+    this.durableTasks = new DurableTaskService(this.store);
     this.chat = new ChatSessionService({
       store: this.store,
       hub: this.events,
       engine: this.engine,
       contextResolver: options.chatContextResolver,
       mcpConnectionsResolver: options.chatMcpConnectionsResolver,
+      durableTasks: this.durableTasks,
+      durableTaskSourceResolver: options.durableTaskSourceResolver,
     });
     this.projects = new ProjectService({
       store: this.store,
       hub: this.events,
       engine: this.engine,
-      runTimeoutMs: options.runTimeoutMs ?? 600_000,
+      runTimeoutMs: options.runTimeoutMs ?? 1_800_000,
       projectTaskTimeoutMs: options.projectTaskTimeoutMs,
       maxConcurrentProjectTasks: Math.min(
         options.maxConcurrentRunsGlobal ?? 4,

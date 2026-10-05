@@ -16,6 +16,7 @@ export interface KnowledgeBase {
   name: string;
   provider: KnowledgeProviderId;
   enabled: boolean;
+  ontologyEnabled: boolean;
   description?: string;
   /** Absolute or app-relative data dir for LanceDB */
   dataDir?: string;
@@ -52,9 +53,11 @@ export interface KnowledgeBase {
   updatedAt: number;
 }
 
-export type KnowledgeBaseUpsert = Omit<KnowledgeBase, 'id' | 'updatedAt' | 'documentCount'> & {
+export type KnowledgeBaseUpsert = Omit<KnowledgeBase, 'id' | 'updatedAt' | 'documentCount' | 'ontologyEnabled'> & {
   id?: string;
   documentCount?: number;
+  /** Omitted by legacy entry points; normalized to enabled. */
+  ontologyEnabled?: boolean;
 };
 
 export interface KnowledgeProviderSetting {
@@ -143,6 +146,7 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
     name,
     provider: provider as KnowledgeProviderId,
     enabled: raw.enabled !== false,
+    ontologyEnabled: raw.ontologyEnabled !== false,
     description: raw.description ? String(raw.description) : '',
     dataDir: raw.dataDir ? String(raw.dataDir) : '',
     baseUrl: raw.baseUrl ? String(raw.baseUrl).trim() : '',
@@ -264,6 +268,7 @@ function toRuntime(item: KnowledgeBase) {
     name: item.name,
     provider: item.provider,
     enabled: true as const,
+    ontologyEnabled: item.ontologyEnabled !== false,
     description: item.description || undefined,
     dataDir: item.dataDir?.trim() || undefined,
     baseUrl: creds.baseUrl,
@@ -400,6 +405,7 @@ export function useKnowledgeConfig() {
       name,
       provider,
       enabled: input.enabled !== false,
+      ontologyEnabled: input.ontologyEnabled !== false,
       description: String(input.description || '').trim(),
       dataDir: String(input.dataDir || '').trim(),
       // Keep per-base overrides empty when using shared provider credentials.

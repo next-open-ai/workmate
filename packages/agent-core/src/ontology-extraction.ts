@@ -3,12 +3,16 @@ import { completeSimple } from '@mariozechner/pi-ai';
 import { z } from 'zod';
 import {
   OntologyCandidateSchema,
+  OntologyGovernanceCommandSchema,
   type KnowledgeBaseRuntime,
   type ModelConfig,
   type OntologyCandidate,
+  type OntologyGovernanceCommand,
+  type OntologyGraph,
 } from '@workmate/contracts';
 import { listKnowledgeChunks } from './knowledge-runtime.js';
 import { importOntologyCandidates } from './ontology-runtime.js';
+import type { OntologyGovernanceIssue } from './ontology-runtime.js';
 import { createChatCompletionsPayloadPatch, toPiModel } from './pi-model.js';
 
 const PrimitiveSchema = z.union([z.string(), z.number(), z.boolean()]);
@@ -44,7 +48,8 @@ export type ExtractionChunk = {
 };
 
 const EXTRACTION_BATCH_MAX_CHUNKS = 4;
-const EXTRACTION_BATCH_MAX_CHARS = 8_000;
+const EXTRACTION_BATCH_MAX_CHARS = 10_000;
+const EXTRACTION_BATCH_CONCURRENCY = 2;
 const EXTRACTION_RETRY_MIN_CHARS = 480;
 
 class OntologyModelOutputError extends Error {
@@ -185,6 +190,7 @@ type AnalyzeExtractionBatch = (chunks: ExtractionChunk[]) => Promise<string>;
 export async function extractOntologyCandidateBatches(
   chunks: ExtractionChunk[],
   analyze: AnalyzeExtractionBatch,
+  options: { concurrency?: number; maxChunks?: number; maxChars?: number; onProgress?: (event: { phase: string; currentBatch: number; totalBatches: number; discovered?: number }) => void } = {},
 ): Promise<OntologyCandidate[]> {
   const analyzeWithFallback = async (batch: ExtractionChunk[]): Promise<OntologyCandidate[]> => {
     try {
@@ -209,10 +215,24 @@ export async function extractOntologyCandidateBatches(
     }
   };
 
+  const batches = partitionOntologyExtractionChunks(chunks, options);
+  options.onProgress?.({ phase: '整理分析批次', currentBatch: 0, totalBatches: batches.length });
+  const concurrency = Math.min(batches.length, Math.max(1, Math.floor(options.concurrency || EXTRACTION_BATCH_CONCURRENCY)));
+  const batchCandidates: OntologyCandidate[][] = new Array(batches.length);
+  let nextBatchIndex = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (nextBatchIndex < batches.length) {
+      const batchIndex = nextBatchIndex++;
+      batchCandidates[batchIndex] = await analyzeWithFallback(batches[batchIndex]!);
+      options.onProgress?.({ phase: 'AI 识别', currentBatch: batchCandidates.filter(Boolean).length, totalBatches: batches.length, discovered: batchCandidates.filter(Boolean).flat().length });
+    }
+  });
+  await Promise.all(workers);
+
   const candidates: OntologyCandidate[] = [];
   const seen = new Set<string>();
-  for (const batch of partitionOntologyExtractionChunks(chunks)) {
-    for (const candidate of await analyzeWithFallback(batch)) {
+  for (const batch of batchCandidates) {
+    for (const candidate of batch) {
       if (seen.has(candidate.id)) continue;
       seen.add(candidate.id);
       candidates.push(candidate);
@@ -227,7 +247,11 @@ export async function extractOntologyCandidates(input: {
   documentIds: string[];
   instructions?: string;
   model: ModelConfig;
+  intensity?: 'quick' | 'standard' | 'deep';
+  signal?: AbortSignal;
+  onProgress?: (event: { phase: string; currentBatch: number; totalBatches: number; discovered?: number }) => void;
 }) {
+  input.onProgress?.({ phase: '读取文档', currentBatch: 0, totalBatches: 0 });
   const selected = new Set(input.documentIds);
   const chunks: ExtractionChunk[] = [];
   for (const documentId of selected) {
@@ -240,6 +264,7 @@ export async function extractOntologyCandidates(input: {
   }
   if (!chunks.length) throw new Error('所选文档没有可用于分析的知识切片。');
 
+  const profile = input.intensity === 'quick' ? { maxChunks: 5, maxChars: 12000, maxTokens: 5000 } : input.intensity === 'deep' ? { maxChunks: 3, maxChars: 8000, maxTokens: 12000 } : { maxChunks: 4, maxChars: 10000, maxTokens: 8000 };
   const candidates = await extractOntologyCandidateBatches(chunks, async (batch) => {
     const corpus = batch.map((chunk) => `<chunk id="${chunk.id}" document="${chunk.documentId}" title="${chunk.documentTitle}">\n${chunk.content}\n</chunk>`).join('\n\n');
     const response = await completeSimple(toPiModel(input.model), {
@@ -249,19 +274,77 @@ export async function extractOntologyCandidates(input: {
         '每个 node 包含 id,type,name,aliases,properties,confidence,evidence:{chunkId,quote}。',
         '每个 edge 包含 subjectId,predicate,objectId,properties,confidence,evidence:{chunkId,quote}；两端必须引用 nodes 中的 id。',
         'id 使用简短稳定的英文或拼音标识。quote 必须是对应切片中的原文证据。合并同义实体，避免重复和过度抽取。',
-        '每次最多返回 12 个节点和 16 条关系。只保留对业务检索有明确价值的候选，确保 JSON 完整闭合。',
+        '每次最多返回 20 个节点和 30 条关系。逐个检查每个 chunk，只保留对业务检索有明确价值的候选，确保 JSON 完整闭合。',
       ].join('\n'),
       messages: [{ role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: `${input.instructions?.trim() ? `分析重点：${input.instructions.trim()}\n\n` : ''}请从以下文档切片生成待人工审核的本体候选：\n\n${corpus}` }] }],
     }, {
       apiKey: input.model.apiKey || (input.model.provider === 'ollama' ? 'ollama' : undefined),
-      signal: AbortSignal.timeout(120_000),
-      maxTokens: 4_000,
+      signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+      maxTokens: profile.maxTokens,
       onPayload: createChatCompletionsPayloadPatch(input.model),
     });
     if (response.stopReason === 'length') throw new OntologyModelOutputError('模型输出达到长度上限。');
     if (response.stopReason === 'error' || response.stopReason === 'aborted') throw new Error(response.errorMessage || '本体分析模型未完成请求。');
     return response.content.filter((part): part is { type: 'text'; text: string } => part.type === 'text').map((part) => part.text).join('\n').trim();
-  });
+  }, { maxChunks: profile.maxChunks, maxChars: profile.maxChars, onProgress: input.onProgress });
+  input.onProgress?.({ phase: '证据核验与候选归并', currentBatch: 1, totalBatches: 1, discovered: candidates.length });
   const workflow = await importOntologyCandidates(input.kb, candidates);
   return { workflow, generated: candidates.length, nodes: candidates.filter((item) => item.kind === 'node').length, edges: candidates.filter((item) => item.kind === 'edge').length, analyzedChunks: chunks.length };
+}
+
+export async function suggestOntologyGovernanceRepairs(input: { graph: OntologyGraph; issues: OntologyGovernanceIssue[]; model: ModelConfig }) {
+  const allowedNodeIds = new Set(input.issues.flatMap((issue) => issue.nodeIds));
+  const allowedEdgeIds = new Set(input.issues.flatMap((issue) => issue.edgeIds));
+  const scopedEdges = input.graph.edges.filter((edge) => allowedEdgeIds.has(edge.id) || allowedNodeIds.has(edge.subjectId) || allowedNodeIds.has(edge.objectId));
+  for (const edge of scopedEdges) { allowedNodeIds.add(edge.subjectId); allowedNodeIds.add(edge.objectId); }
+  const scopedGraph = { version: input.graph.version, nodes: input.graph.nodes.filter((node) => allowedNodeIds.has(node.id)), edges: scopedEdges };
+  const response = await completeSimple(toPiModel(input.model), {
+    systemPrompt: [
+      '你是企业本体治理助手。只能针对给定问题提出草稿修复命令，不能编造实体、关系或证据。',
+      '返回 JSON：{"suggestions":[{"issueId":"...","confidence":0.9,"reason":"...","commands":[...]}]}。不要输出解释或 Markdown。',
+      '允许的命令仅包括 merge_nodes、rename_node、change_node_type、delete_node、delete_edge、reverse_edge。',
+      '合并实体需谨慎；证据或语义不足时不要建议合并。删除孤立实体默认低置信度。',
+    ].join('\n'),
+    messages: [{ role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: JSON.stringify({ nodes: scopedGraph.nodes, edges: scopedGraph.edges, issues: input.issues }) }] }],
+  }, { apiKey: input.model.apiKey || (input.model.provider === 'ollama' ? 'ollama' : undefined), signal: AbortSignal.timeout(120_000), maxTokens: 6000, onPayload: createChatCompletionsPayloadPatch(input.model) });
+  if (response.stopReason === 'error' || response.stopReason === 'aborted') throw new Error(response.errorMessage || 'AI 治理建议生成失败。');
+  const text = response.content.filter((part): part is { type: 'text'; text: string } => part.type === 'text').map((part) => part.text).join('\n');
+  const raw = (/```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1] || text).trim(), start = raw.indexOf('{'), end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('模型没有返回完整的治理建议 JSON。');
+  const parsed = z.object({ suggestions: z.array(z.object({ issueId: z.string(), confidence: z.number().min(0).max(1).catch(0.5), reason: z.string().max(2000).catch('模型未提供说明'), commands: z.array(z.record(z.string(), z.unknown())).max(20).catch([]) })).max(100) }).parse(JSON.parse(raw.slice(start, end + 1)));
+  const issueIds = new Set(input.issues.map((issue) => issue.id));
+  const issueById = new Map(input.issues.map((issue) => [issue.id, issue]));
+  const commandIsScoped = (command: OntologyGovernanceCommand) => {
+    if (command.type === 'merge_nodes') return command.nodeIds.every((id) => allowedNodeIds.has(id)) && allowedNodeIds.has(command.canonicalId);
+    if (command.type === 'rename_node' || command.type === 'change_node_type' || command.type === 'delete_node' || command.type === 'mark_term') return allowedNodeIds.has(command.nodeId) && (!('migrateToNodeId' in command) || !command.migrateToNodeId || allowedNodeIds.has(command.migrateToNodeId));
+    if (command.type === 'add_edge') return allowedNodeIds.has(command.subjectId) && allowedNodeIds.has(command.objectId);
+    return allowedEdgeIds.has(command.edgeId);
+  };
+  return parsed.suggestions.map((suggestion) => ({ ...suggestion, commands: normalizeAiGovernanceCommands(suggestion.commands, issueById.get(suggestion.issueId), input.graph) })).filter((suggestion) => issueIds.has(suggestion.issueId) && suggestion.commands.length && suggestion.commands.every(commandIsScoped)) as Array<{ issueId: string; confidence: number; reason: string; commands: OntologyGovernanceCommand[] }>;
+}
+
+export function normalizeAiGovernanceCommands(rawCommands: Array<Record<string, unknown>>, issue: OntologyGovernanceIssue | undefined, graph: OntologyGraph): OntologyGovernanceCommand[] {
+  if (!issue) return [];
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node])), normalized: OntologyGovernanceCommand[] = [];
+  for (const raw of rawCommands) {
+    const type = String(raw.type || '');
+    let candidate: unknown = raw;
+    if (type === 'merge_nodes') {
+      const requested = Array.isArray(raw.nodeIds) ? raw.nodeIds.map(String).filter((id) => issue.nodeIds.includes(id)) : [];
+      const nodeIds = requested.length >= 2 ? requested : issue.nodeIds;
+      const canonicalId = typeof raw.canonicalId === 'string' && nodeIds.includes(raw.canonicalId) ? raw.canonicalId : nodeIds[0];
+      const canonicalName = typeof raw.canonicalName === 'string' && raw.canonicalName.trim() ? raw.canonicalName.trim() : (canonicalId ? nodeById.get(canonicalId)?.name : undefined);
+      candidate = { type, nodeIds, canonicalId, canonicalName };
+    } else if (type === 'delete_edge' || type === 'reverse_edge') {
+      const edgeId = typeof raw.edgeId === 'string' ? raw.edgeId : issue.edgeIds[0]; candidate = { type, edgeId };
+    } else if (type === 'delete_node') {
+      const nodeId = typeof raw.nodeId === 'string' ? raw.nodeId : issue.nodeIds[0]; candidate = { type, nodeId, ...(typeof raw.migrateToNodeId === 'string' ? { migrateToNodeId: raw.migrateToNodeId } : {}) };
+    } else if (type === 'rename_node') {
+      const nodeId = typeof raw.nodeId === 'string' ? raw.nodeId : issue.nodeIds[0]; candidate = { type, nodeId, name: raw.name, keepOldAsAlias: raw.keepOldAsAlias !== false };
+    } else if (type === 'change_node_type') {
+      const nodeId = typeof raw.nodeId === 'string' ? raw.nodeId : issue.nodeIds[0]; candidate = { type, nodeId, nodeType: raw.nodeType };
+    }
+    const parsed = OntologyGovernanceCommandSchema.safeParse(candidate); if (parsed.success) normalized.push(parsed.data);
+  }
+  return normalized;
 }

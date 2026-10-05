@@ -15,7 +15,7 @@ import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
 import PptxEnhancedSettingsCard from './PptxEnhancedSettingsCard.vue';
 import DoclingEnhancedSettingsCard from './DoclingEnhancedSettingsCard.vue';
-import { getRuntimeStatus, getServerRuntimeConfig, saveServerRuntimeConfig, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse } from '../../services/api';
+import { deleteArchivedAssets, getRuntimeStatus, getServerRuntimeConfig, runStorageCleanup, saveServerRuntimeConfig, scanStorageCleanup, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse, type StorageCleanupReport } from '../../services/api';
 import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
 import { knowledgeProviderMeta, useKnowledgeConfig } from '../../app/kb-config';
@@ -90,7 +90,12 @@ const runtimeStatus = ref<RuntimeStatusResponse | null>(null);
 const attachmentStats = ref<{ bytes: number; count: number; limitBytes: number; warning: boolean } | null>(null);
 const attachmentCleanupBusy = ref(false);
 const attachmentCleanupPreview = ref('');
-function attachmentBytes(value: number) { return value < 1024 * 1024 ? `${Math.round(value / 1024)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`; }
+function attachmentBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 async function loadAttachmentStats() { attachmentStats.value = await getChatAttachmentStats().catch(() => null); }
 async function previewAttachmentCleanup() {
   attachmentCleanupBusy.value = true;
@@ -101,6 +106,42 @@ async function runAttachmentCleanup() {
   attachmentCleanupBusy.value = true;
   try { const result = await cleanupChatAttachments(false); attachmentCleanupPreview.value = `已清理 ${result.count} 个附件，释放 ${attachmentBytes(result.bytes)}`; await loadAttachmentStats(); }
   finally { attachmentCleanupBusy.value = false; }
+}
+const storageReport = ref<StorageCleanupReport | null>(null);
+const storageBusy = ref(false);
+const storageMessage = ref('');
+const selectedLargeAssets = ref<string[]>([]);
+async function scanStorage() {
+  storageBusy.value = true;
+  storageMessage.value = '';
+  try {
+    storageReport.value = await scanStorageCleanup();
+    selectedLargeAssets.value = selectedLargeAssets.value.filter((id) => storageReport.value?.largeAssets.some((asset) => asset.id === id));
+  } catch (error) { notify.error(error instanceof Error ? error.message : '空间扫描失败'); }
+  finally { storageBusy.value = false; }
+}
+async function cleanSafeStorage() {
+  if (!storageReport.value?.safeCleanup.count || !window.confirm(`确认清理 ${storageReport.value.safeCleanup.count} 处无主或过期中间文件？正式资产不会被删除。`)) return;
+  storageBusy.value = true;
+  try {
+    const result = await runStorageCleanup();
+    storageReport.value = result.scan;
+    storageMessage.value = `已释放 ${attachmentBytes(result.bytes)}`;
+    notify.pushRaw('success', '清理完成', storageMessage.value);
+  } catch (error) { notify.error(error instanceof Error ? error.message : '清理失败'); }
+  finally { storageBusy.value = false; }
+}
+async function deleteSelectedLargeAssets() {
+  const ids = [...selectedLargeAssets.value];
+  if (!ids.length || !window.confirm(`确认永久删除选中的 ${ids.length} 个资产？删除后无法恢复。`)) return;
+  storageBusy.value = true;
+  try {
+    const result = await deleteArchivedAssets(ids);
+    selectedLargeAssets.value = [];
+    storageMessage.value = `已删除 ${result.deleted} 个资产`;
+    await scanStorage();
+  } catch (error) { notify.error(error instanceof Error ? error.message : '资产删除失败'); }
+  finally { storageBusy.value = false; }
 }
 const runtimeStatusLoading = ref(false);
 const runtimeStatusAutoRefresh = ref(true);
@@ -749,6 +790,51 @@ function handleDefaultEmployeeChange(event: Event) {
           <option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employeeDisplayName(employee, t) }}</option>
         </select>
       </label>
+      <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h3 class="text-[16px] font-bold">存储清理</h3>
+              <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-600">安全扫描</span>
+            </div>
+            <p class="mt-1 max-w-2xl text-[13px] leading-relaxed text-[var(--muted)]">清理 7 天前的无主目录和已结束运行的中间文件；正式资产只列出大文件，由你确认后删除。</p>
+          </div>
+          <button class="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-xs font-semibold disabled:opacity-50" type="button" :disabled="storageBusy" @click="scanStorage">
+            {{ storageBusy ? '处理中…' : storageReport ? '重新扫描' : '扫描空间' }}
+          </button>
+        </div>
+
+        <div v-if="storageReport" class="mt-4 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <span class="text-xs text-[var(--muted)]">可安全清理</span>
+            <strong class="mt-1 block text-xl">{{ attachmentBytes(storageReport.safeCleanup.bytes) }}</strong>
+            <span class="text-[11px] text-[var(--muted)]">{{ storageReport.safeCleanup.count }} 处中间文件或无主目录</span>
+          </div>
+          <div class="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <span class="text-xs text-[var(--muted)]">大资产（20 MB 以上）</span>
+            <strong class="mt-1 block text-xl">{{ storageReport.largeAssets.length }} 个</strong>
+            <span class="text-[11px] text-[var(--muted)]">不会随安全清理自动删除</span>
+          </div>
+        </div>
+
+        <div v-if="storageReport" class="mt-4 flex flex-wrap items-center gap-2">
+          <button v-if="isAdmin" class="rounded-xl bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" :disabled="storageBusy || !storageReport.safeCleanup.count" @click="cleanSafeStorage">一键安全清理</button>
+          <span v-else class="text-xs text-[var(--muted)]">仅管理员可清理系统中间文件。</span>
+          <span class="text-xs text-[var(--muted)]">{{ storageMessage || (storageReport.safeCleanup.count ? '清理前会再次确认' : '当前没有可安全清理的内容') }}</span>
+        </div>
+
+        <div v-if="storageReport?.largeAssets.length" class="mt-5 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <div class="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <div><strong class="text-sm">占空间较大的资产</strong><span class="ml-2 text-[11px] text-[var(--muted)]">勾选后删除</span></div>
+            <button class="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-600 disabled:opacity-40" type="button" :disabled="storageBusy || !selectedLargeAssets.length" @click="deleteSelectedLargeAssets">删除所选</button>
+          </div>
+          <label v-for="asset in storageReport.largeAssets" :key="asset.id" class="flex cursor-pointer items-center gap-3 border-b border-[var(--border)] px-4 py-3 last:border-b-0 hover:bg-[var(--surface-muted)]">
+            <input v-model="selectedLargeAssets" :value="asset.id" type="checkbox" class="h-4 w-4" />
+            <span class="min-w-0 flex-1"><strong class="block truncate text-sm">{{ asset.name }}</strong><span class="text-[11px] text-[var(--muted)]">{{ new Date(asset.createdAt).toLocaleDateString() }} · {{ asset.mimeType }}</span></span>
+            <strong class="shrink-0 text-xs">{{ attachmentBytes(asset.sizeBytes) }}</strong>
+          </label>
+        </div>
+      </div>
       <div class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-5">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>

@@ -64,6 +64,8 @@ export interface Message {
   engine?: 'pi' | 'agentscope' | 'dsh';
   /** Server run id when this assistant turn was executed via orch. */
   runId?: string;
+  /** Durable task associated with this turn, used to anchor its inline task card. */
+  durableTaskId?: string;
   startedAt?: number;
   elapsedMs?: number;
 }
@@ -373,6 +375,7 @@ export function useWorkspace() {
           role: message.role,
           content: message.content || liveText || failedText || cancelledText || old?.content || '',
           runId: message.runId || old?.runId,
+          durableTaskId: message.durableTaskId || old?.durableTaskId,
         };
         if (message.role === 'assistant') {
           if (old?.reasoning) base.reasoning = old.reasoning;
@@ -464,6 +467,7 @@ export function useWorkspace() {
       // Adopt the durable final text. This is what makes the reply appear even
       // when deltas were missed (SSE gap) or the run outlived the subscription.
       if (serverAssistant.content && assistantMessage.content !== serverAssistant.content) assistantMessage.content = serverAssistant.content;
+      assistantMessage.durableTaskId = serverAssistant.durableTaskId;
     }
     assistantMessage.runId = runId;
     const runs = await orch.sessionRuns(sessionId).catch(() => [] as orch.ServerRunRecord[]);
@@ -627,7 +631,7 @@ export function useWorkspace() {
       currentRunId = runId;
       for (const event of pendingEvents) applyServerEvent(event);
       pendingEvents.length = 0;
-      await waitForServerSettled(sessionId, runId, abort, assistantMessage, () => ({ sseLive, sseResolved, sseError }), settledViaSse);
+      await waitForServerSettled(sessionId, runId, abort, assistantMessage, () => ({ sseLive, sseResolved, sseError }), settledViaSse, opts.runTimeoutMs);
     } finally {
       unsubscribe();
       serverActiveRuns.delete(conversation.id);
@@ -689,10 +693,9 @@ export function useWorkspace() {
    * model-generation window. Sparse poll remains only as backup / transcript
    * hydration when SSE is down or silent.
    *
-   * VPN / network flaps can leave the provider stream half-open: tools finish,
-   * partial text is visible, but status stays `running`. If the polled run
-   * fingerprint stops changing for STREAM_IDLE_MS, cancel the server run so the
-   * UI can leave the spinning state.
+   * The renderer never cancels a server run merely because its visible state is
+   * quiet. Long-running encoders and converters may legitimately produce no
+   * output for minutes; the server-side configured run timeout is authoritative.
    */
   async function waitForServerSettled(
     sessionId: string,
@@ -701,9 +704,11 @@ export function useWorkspace() {
     assistantMessage: Message,
     sseState?: () => { sseLive: boolean; sseResolved: boolean; sseError: string | null },
     settledViaSse?: Promise<{ status?: string; error?: string }>,
+    requestedRunTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
   ): Promise<void> {
-    const deadline = Date.now() + 12 * 60_000;
-    const STREAM_IDLE_MS = 120_000;
+    // The UI watcher must outlive the authoritative server run budget. A fixed
+    // 12-minute deadline used to cancel healthy 30-minute encoding jobs.
+    const deadline = Date.now() + Math.max(DEFAULT_RUN_TIMEOUT_MS, requestedRunTimeoutMs) + 120_000;
     const POLL_MS_SSE_LIVE = 15_000;
     const POLL_MS_FALLBACK = 800;
     let lastFingerprint = '';
@@ -826,10 +831,6 @@ export function useWorkspace() {
         if (fingerprint !== lastFingerprint) {
           lastFingerprint = fingerprint;
           lastProgressAt = Date.now();
-        } else if (run?.status === 'running' && Date.now() - lastProgressAt >= STREAM_IDLE_MS) {
-          await orch.cancelChatRun(sessionId).catch(() => undefined);
-          abort.abort(new Error(FRIENDLY_NETWORK_ERROR));
-          return;
         }
       } else if (assistantMessage.content.trim()) {
         lastProgressAt = Date.now();
@@ -987,7 +988,14 @@ export function useWorkspace() {
   const clearConversation = async (id: string) => {
     const conversation = conversations.value.find((item) => item.id === id);
     if (!conversation) return;
+    const serverRun = serverActiveRuns.get(id);
+    if (serverRun) { serverRun.unsubscribe(); serverActiveRuns.delete(id); }
+    if (conversation.serverSessionId) {
+      const session = await orch.clearChatSession(conversation.serverSessionId);
+      conversation.serverSessionId = session.id;
+    }
     conversation.messages = [];
+    conversation.title = '新对话';
     conversation.updatedAt = Date.now();
     conversations.value = [...conversations.value];
     await persist();

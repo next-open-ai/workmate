@@ -373,7 +373,7 @@ async function handleLogout() {
         @start-chat="startChat"
       />
       <CapabilitiesPage v-else-if="view === 'capabilities'" />
-      <KnowledgePage v-else-if="view === 'knowledge'" @open-settings="setView('settings')" />
+      <KnowledgePage v-else-if="view === 'knowledge'" :is-admin="isAdmin" @open-settings="setView('settings')" />
       <AssetsPage v-else-if="view === 'assets'" :conversations="conversations" @open-conversation="(id) => { selectConversation(id); setView('chat'); }" @open-project="openProjectFromAssets" @open-data="setView('data')" />
       <DataWorkbenchPage
         v-else-if="view === 'data'"

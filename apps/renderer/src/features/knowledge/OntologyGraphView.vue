@@ -6,10 +6,13 @@ type GraphNode = { id: string; type: string; name: string; aliases?: string[]; p
 type GraphEdge = { id: string; subjectId: string; predicate: string; objectId: string; properties?: Record<string, unknown>; source?: string; status?: string };
 type SelectedItem = { kind: 'node'; value: GraphNode } | { kind: 'edge'; value: GraphEdge };
 
-const props = defineProps<{ graph?: { version: number; nodes: unknown[]; edges: unknown[] } }>();
+const props = withDefaults(defineProps<{ graph?: { version: number; nodes: unknown[]; edges: unknown[] }; title?: string; compact?: boolean }>(), { title: '正式本体关系图', compact: false });
+const graphPanel = ref<HTMLElement | null>(null);
 const container = ref<HTMLDivElement | null>(null);
 const loading = ref(false);
 const error = ref('');
+const fullscreenError = ref('');
+const isFullscreen = ref(false);
 const query = ref('');
 const layoutName = ref<'cose' | 'breadthfirst' | 'circle'>('cose');
 const selected = ref<SelectedItem | null>(null);
@@ -97,6 +100,19 @@ async function renderGraph() {
 function runLayout() { scheduleCanvasRefresh(true); }
 function fit() { scheduleCanvasRefresh(false); }
 function zoom(delta: number) { if (!cy) return; cy.zoom({ level: Math.min(3, Math.max(0.15, cy.zoom() + delta)), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); }
+function syncFullscreenState() {
+  isFullscreen.value = document.fullscreenElement === graphPanel.value;
+  scheduleCanvasRefresh(false);
+}
+async function toggleFullscreen() {
+  fullscreenError.value = '';
+  try {
+    if (document.fullscreenElement === graphPanel.value) await document.exitFullscreen();
+    else await graphPanel.value?.requestFullscreen();
+  } catch (cause) {
+    fullscreenError.value = cause instanceof Error ? cause.message : '无法进入全屏模式。';
+  }
+}
 function focusQuery() {
   if (!cy) return;
   const keyword = query.value.trim().toLocaleLowerCase();
@@ -117,19 +133,20 @@ function focusQuery() {
 watch(() => props.graph, async () => { await nextTick(); await renderGraph(); }, { deep: true });
 watch(layoutName, runLayout);
 onMounted(async () => {
+  document.addEventListener('fullscreenchange', syncFullscreenState);
   resizeObserver = new ResizeObserver(() => scheduleCanvasRefresh(false));
   if (container.value) resizeObserver.observe(container.value);
   await nextTick();
   await renderGraph();
 });
-onBeforeUnmount(() => { resizeObserver?.disconnect(); cancelAnimationFrame(resizeFrame); cy?.destroy(); });
+onBeforeUnmount(() => { document.removeEventListener('fullscreenchange', syncFullscreenState); resizeObserver?.disconnect(); cancelAnimationFrame(resizeFrame); cy?.destroy(); });
 </script>
 
 <template>
-  <section class="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+  <section ref="graphPanel" :class="['overflow-hidden border border-[var(--border)] bg-[var(--surface)]', isFullscreen ? 'flex h-screen w-screen flex-col rounded-none' : 'rounded-2xl']">
     <header class="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
-      <div><div class="flex items-center gap-2"><span class="grid h-8 w-8 place-items-center rounded-xl bg-indigo-600 text-white">◎</span><h3 class="font-semibold">正式本体关系图</h3><span v-if="graph" class="rounded-full bg-[var(--surface-muted)] px-2.5 py-1 text-[11px]">v{{ graph.version }}</span></div><p class="mt-2 text-xs text-[var(--muted)]">查看已审核并写入正式图谱的实体与关系。点击节点或连线可查看详情。</p></div>
-      <div class="flex gap-2 text-xs"><span class="rounded-full bg-indigo-50 px-2.5 py-1.5 text-indigo-700">{{ nodes.length }} 个实体</span><span class="rounded-full bg-cyan-50 px-2.5 py-1.5 text-cyan-700">{{ edges.length }} 条关系</span></div>
+      <div><div class="flex items-center gap-2"><span class="grid h-8 w-8 place-items-center rounded-xl bg-indigo-600 text-white">◎</span><h3 class="font-semibold">{{ title }}</h3><span v-if="graph" class="rounded-full bg-[var(--surface-muted)] px-2.5 py-1 text-[11px]">v{{ graph.version }}</span></div><p class="mt-2 text-xs text-[var(--muted)]">点击节点或连线查看详情，搜索可定位相关区域。</p></div>
+      <div class="flex flex-wrap items-center justify-end gap-2 text-xs"><span class="rounded-full bg-indigo-50 px-2.5 py-1.5 text-indigo-700">{{ nodes.length }} 个实体</span><span class="rounded-full bg-cyan-50 px-2.5 py-1.5 text-cyan-700">{{ edges.length }} 条关系</span><button v-if="graph && nodes.length" type="button" class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 font-semibold transition hover:border-[var(--accent)] hover:text-[var(--accent)]" :title="isFullscreen ? '退出全屏（Esc）' : '全屏查看关系图'" @click="toggleFullscreen">{{ isFullscreen ? '退出全屏' : '⛶ 全屏查看' }}</button></div>
     </header>
     <div v-if="!graph || !nodes.length" class="px-5 py-14 text-center"><div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[var(--surface-muted)] text-xl text-[var(--muted)]">◎</div><p class="mt-3 text-sm font-semibold">正式图谱还是空的</p><p class="mt-1 text-xs text-[var(--muted)]">请先接受候选并批准写入，关系图会自动显示已确认的数据。</p></div>
     <template v-else>
@@ -139,9 +156,10 @@ onBeforeUnmount(() => { resizeObserver?.disconnect(); cancelAnimationFrame(resiz
         <div class="flex overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)]"><button class="border-r border-[var(--border)] px-3 py-2 text-xs" title="缩小" @click="zoom(-0.18)">−</button><button class="border-r border-[var(--border)] px-3 py-2 text-xs" title="适应画布" @click="fit">居中</button><button class="px-3 py-2 text-xs" title="放大" @click="zoom(0.18)">＋</button></div>
       </div>
       <div v-if="isLimited" class="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-800">图谱共有 {{ nodes.length }} 个实体。为保证交互流畅，当前优先显示有关系的前 {{ MAX_NODES }} 个实体。</div>
-      <div class="grid lg:grid-cols-[minmax(0,1fr)_290px]">
-        <div class="relative bg-[radial-gradient(circle_at_center,rgba(79,107,232,0.06),transparent_62%)]"><div ref="container" class="h-[520px] w-full" /><div v-if="loading" class="absolute inset-0 grid place-items-center bg-white/70 text-sm text-[var(--muted)]">正在加载关系图…</div><div v-if="error" class="absolute inset-x-5 top-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">关系图加载失败：{{ error }}</div></div>
-        <aside class="border-t border-[var(--border)] p-4 lg:border-l lg:border-t-0">
+      <div v-if="fullscreenError" class="border-b border-rose-200 bg-rose-50 px-5 py-2 text-xs text-rose-800">无法切换全屏：{{ fullscreenError }}</div>
+      <div :class="['grid min-h-0 lg:grid-cols-[minmax(0,1fr)_290px]', isFullscreen ? 'flex-1' : '']">
+        <div class="relative min-h-0 bg-[radial-gradient(circle_at_center,rgba(79,107,232,0.06),transparent_62%)]"><div ref="container" :class="['w-full', isFullscreen ? 'h-full min-h-[420px]' : compact ? 'h-[380px]' : 'h-[520px]']" /><div v-if="loading" class="absolute inset-0 grid place-items-center bg-white/70 text-sm text-[var(--muted)]">正在加载关系图…</div><div v-if="error" class="absolute inset-x-5 top-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">关系图加载失败：{{ error }}</div></div>
+        <aside :class="['border-t border-[var(--border)] p-4 lg:border-l lg:border-t-0', isFullscreen ? 'overflow-y-auto' : '']">
           <template v-if="selected"><div class="flex items-center justify-between"><span class="rounded-md bg-[var(--accent)]/10 px-2 py-1 text-[10px] font-semibold text-[var(--accent)]">{{ selected.kind === 'node' ? '实体详情' : '关系详情' }}</span><button class="text-xs text-[var(--muted)]" @click="selected = null">关闭</button></div>
             <template v-if="selected.kind === 'node'"><h4 class="mt-3 break-words font-semibold">{{ selected.value.name }}</h4><p class="mt-1 text-xs text-[var(--muted)]">{{ selected.value.type }}</p><div v-if="selected.value.aliases?.length" class="mt-4"><p class="text-[11px] font-semibold text-[var(--muted)]">别名</p><div class="mt-2 flex flex-wrap gap-1.5"><span v-for="alias in selected.value.aliases" :key="alias" class="rounded-md bg-[var(--surface-muted)] px-2 py-1 text-[11px]">{{ alias }}</span></div></div></template>
             <template v-else><p class="mt-3 text-xs leading-relaxed"><strong>{{ nodeName(selected.value.subjectId) }}</strong><span class="mx-2 text-[var(--accent)]">{{ selected.value.predicate }}</span><strong>{{ nodeName(selected.value.objectId) }}</strong></p></template>

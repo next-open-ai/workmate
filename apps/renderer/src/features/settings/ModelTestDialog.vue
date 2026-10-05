@@ -8,14 +8,14 @@ const props = defineProps<{ model: ConfiguredModel; instance: ProviderInstance }
 const emit = defineEmits<{ close: []; tested: [result: { ok: boolean; summary: string }] }>();
 const running = ref(false);
 const result = ref<{ ok: boolean; title: string; detail: string; latencyMs: number } | null>(null);
-const prompt = ref(({ image: '一只放在木桌上的青花瓷杯，柔和自然光，专业产品摄影，画面简洁', tts: '你好，这是 Workmate 语音模型测试。', embedding: 'Workmate 模型测试', 'quantum-code': '请给出一个创建 Bell 态的最小 Qiskit 示例。', decision: '这是一次低风险的连接测试，是否允许继续？', chat: '请用一句话介绍你自己。', vision: '请描述上传图片的主要内容。', asr: '请上传一段音频进行转写测试。' } as Record<string, string>)[props.model.capability]);
+const prompt = ref(({ image: '一只放在木桌上的青花瓷杯，柔和自然光，专业产品摄影，画面简洁', tts: '你好，这是 Workmate 语音模型测试。', embedding: 'Workmate 模型测试', 'quantum-code': '请给出一个创建 Bell 态的最小 Qiskit 示例。', decision: '这是一次低风险的连接测试，是否允许继续？', ontology: '问题“钱一直没退回来”是否与候选实体“退款未到账”语义一致？请简短回答。', chat: '请用一句话介绍你自己。', vision: '请描述上传图片的主要内容。', asr: '请上传一段音频进行转写测试。' } as Record<string, string>)[props.model.capability]);
 const media = ref<{ mimeType: string; base64: string } | null>(null);
 const sample = ref<{ name: string; dataUrl: string; base64: string; extension: string } | null>(null);
 const progress = ref(0);
 const elapsedSeconds = ref(0);
 let progressTimer: ReturnType<typeof setInterval> | null = null;
 
-const capabilityName = computed(() => ({ chat: '对话', vision: '图片理解', image: '图片生成', embedding: 'Embedding', asr: '语音识别', tts: '语音合成', 'quantum-code': '量子代码', decision: '决策判断' } as Record<string, string>)[props.model.capability] || props.model.capability);
+const capabilityName = computed(() => ({ chat: '对话', vision: '图片理解', image: '图片生成', embedding: 'Embedding', asr: '语音识别', tts: '语音合成', 'quantum-code': '量子代码', decision: '决策判断', ontology: '本体语义匹配' } as Record<string, string>)[props.model.capability] || props.model.capability);
 const testDescription = computed(() => props.model.capability === 'embedding'
   ? '发送一段最小文本并验证返回向量及维度。'
   : props.model.capability === 'image'

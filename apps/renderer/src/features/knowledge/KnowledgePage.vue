@@ -27,6 +27,8 @@ import {
   type KnowledgeBasePayload,
 } from '../../services/api';
 
+defineProps<{ isAdmin?: boolean }>();
+
 const emit = defineEmits<{ openSettings: [] }>();
 const { t } = useI18n();
 const notify = useNotify();
@@ -71,6 +73,7 @@ const draft = ref({
   name: '',
   provider: 'lancedb' as KnowledgeProviderId,
   enabled: true,
+  ontologyEnabled: true,
   description: '',
   baseUrl: '',
   apiKey: '',
@@ -227,6 +230,7 @@ function resetDraft() {
     name: '',
     provider: 'lancedb',
     enabled: true,
+    ontologyEnabled: true,
     description: '',
     baseUrl: '',
     apiKey: '',
@@ -273,6 +277,7 @@ function openEdit(item: KnowledgeBase) {
     name: item.name,
     provider: item.provider,
     enabled: item.enabled,
+    ontologyEnabled: item.ontologyEnabled !== false,
     description: item.description || '',
     baseUrl: item.baseUrl || '',
     apiKey: item.apiKey || '',
@@ -311,6 +316,7 @@ async function save() {
       name: draft.value.name,
       provider: draft.value.provider,
       enabled: draft.value.enabled,
+      ontologyEnabled: draft.value.ontologyEnabled,
       description: draft.value.description,
       baseUrl: draft.value.baseUrl,
       apiKey: draft.value.apiKey,
@@ -981,7 +987,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
           <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
 
-        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" />
+        <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" />
 
         <article v-if="detailTab === 'settings'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 class="text-base font-bold">{{ t('knowledge.settingsTitle') }}</h3>
@@ -1094,7 +1100,13 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
             </label>
             <p v-if="!embeddingModels.length" class="rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-[11px] font-normal text-[var(--muted)]">当前没有可用的 Embedding 模型。<button type="button" class="ml-1 font-semibold text-[var(--accent)]" @click="emit('openSettings')">前往设置</button></p>
           </div>
-          <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
+          <div class="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-3">
+            <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
+            <label class="flex items-start gap-2 text-xs font-semibold">
+              <input v-model="draft.ontologyEnabled" class="mt-0.5" type="checkbox" />
+              <span><strong class="block text-[var(--text)]">启用本体增强检索</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">默认开启。Agent 会自动使用已发布本体扩展与重排结果；不可用时自动退回普通检索。</span></span>
+            </label>
+          </div>
         </div>
         <div class="mt-5 flex justify-end gap-2">
           <button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="closeForm">{{ t('common.close') }}</button>

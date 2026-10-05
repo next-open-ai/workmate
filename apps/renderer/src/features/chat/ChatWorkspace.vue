@@ -11,8 +11,8 @@ import type {
 import ChatReplyPending from "./ChatReplyPending.vue";
 import ChatImagePreview from './ChatImagePreview.vue';
 import ChatAssetMediaPreview from './ChatAssetMediaPreview.vue';
-import type { ChatFileAttachment, ChatImageAttachment } from '@workmate/contracts';
-import { deleteChatFile, uploadChatFile, uploadChatImage } from '../../services/orchestration';
+import type { ChatFileAttachment, ChatImageAttachment, DurableTask } from '@workmate/contracts';
+import { deleteChatFile, sessionDurableTasks, updateDurableTaskStatus, uploadChatFile, uploadChatImage } from '../../services/orchestration';
 import ChatAutoScheduleRail from "./ChatAutoScheduleRail.vue";
 import { useModelConfig, type ProviderConfig } from "../../app/model-config";
 import type { ToolActivity, ToolApproval } from "../../services/api";
@@ -97,6 +97,62 @@ const files = ref<ChatFileAttachment[]>([]);
 const uploadingFiles = ref(false);
 const attachmentMenuOpen = ref(false);
 const uploadingImages = ref(false);
+const durableTasks = ref<DurableTask[]>([]);
+const activeDurableTaskId = ref<string | null>(null);
+const activeDurableTask = computed(() => durableTasks.value.find((item) => item.id === activeDurableTaskId.value && !['completed', 'cancelled'].includes(item.status)) ?? null);
+const durableTaskStatusLabel = (status: DurableTask['status']) => ({ running: '执行中', waiting_user: '等待确认', waiting_external: '等待外部条件', paused: '已暂停', completed: '已完成', failed: '需处理', cancelled: '已取消' }[status]);
+const durableTaskTone = computed(() => {
+  const status = activeDurableTask.value?.status;
+  if (status === 'running') return 'bg-emerald-500';
+  if (status === 'failed') return 'bg-rose-500';
+  if (status === 'waiting_user' || status === 'waiting_external') return 'bg-amber-500';
+  return 'bg-[var(--accent)]';
+});
+const activeDurableTaskMessageId = computed(() => {
+  const taskId = activeDurableTask.value?.id;
+  if (!taskId) return '';
+  return [...(props.conversation?.messages ?? [])].reverse()
+    .find((message) => message.role === 'assistant' && message.durableTaskId === taskId)?.id ?? '';
+});
+async function refreshDurableTasks() {
+  const sessionId = props.conversation?.serverSessionId;
+  if (!sessionId) { durableTasks.value = []; activeDurableTaskId.value = null; return; }
+  const result = await sessionDurableTasks(sessionId).catch(() => ({ tasks: [], activeTaskId: null }));
+  durableTasks.value = result.tasks;
+  activeDurableTaskId.value = result.activeTaskId;
+}
+async function pauseDurableTask() {
+  const sessionId = props.conversation?.serverSessionId; const task = activeDurableTask.value;
+  if (!sessionId || !task) return;
+  try {
+    props.abortMessage?.();
+    await updateDurableTaskStatus(sessionId, task.id, 'paused');
+    await refreshDurableTasks();
+  }
+  catch (cause) { notify.error(cause); }
+}
+async function continueDurableTask() {
+  const task = activeDurableTask.value;
+  if (!task || inputBusy.value || !props.modelConfigured) return;
+  sending.value = true;
+  stickToBottom.value = true;
+  void nextTick(() => scrollMessagesToBottom(true));
+  try {
+    await props.sendMessage(
+      `继续执行持续任务“${task.title}”。请从最近检查点恢复，先检查已有源文件、中间文件和交付物，只完成尚未完成的部分。`,
+      [], 'direct', onlineSearch.value, false, [], [],
+    );
+    await props.pullFromServer?.();
+    await refreshDurableTasks();
+  } catch (cause) { notify.error(cause); }
+  finally { sending.value = false; }
+}
+async function completeDurableTask() {
+  const sessionId = props.conversation?.serverSessionId; const task = activeDurableTask.value;
+  if (!sessionId || !task || inputBusy.value) return;
+  try { await updateDurableTaskStatus(sessionId, task.id, 'completed'); await refreshDurableTasks(); }
+  catch (cause) { notify.error(cause); }
+}
 const activityClock = ref(Date.now());
 let activityClockTimer: number | undefined;
 const imageSessionId = ref('');
@@ -106,6 +162,7 @@ watch(() => [props.conversation?.id, props.selectedEmployeeId], () => {
   images.value = []; files.value = []; imageSessionId.value = ''; imageUploadVersion += 1;
   if (pendingSessionId) pendingFiles.forEach((item) => { void deleteChatFile(pendingSessionId, item.id).catch(() => undefined); });
 });
+watch(() => [props.conversation?.serverSessionId, props.conversation?.messages.length], () => { void refreshDurableTasks(); }, { immediate: true });
 const allowedFileExtensions = ['pdf', 'docx', 'pptx', 'ppsx', 'xlsx', 'xls', 'csv', 'html', 'htm', 'md', 'txt', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'webm'];
 async function attachFiles(selected: File[]) {
   if (inputBusy.value || !selected.length) return;
@@ -224,6 +281,17 @@ let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncBusy = false;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
 const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value || uploadingFiles.value);
+const expandedBashActivities = ref<Set<string>>(new Set());
+function bashActivityKey(activity: ToolActivity, index: number) {
+  return activity.invocationId || `${activity.toolName}-${index}`;
+}
+function toggleBashDetail(activity: ToolActivity, index: number) {
+  const key = bashActivityKey(activity, index);
+  const next = new Set(expandedBashActivities.value);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  expandedBashActivities.value = next;
+}
+watch(inputBusy, (busy, previous) => { if (previous && !busy) void refreshDurableTasks(); });
 const approving = ref("");
 const { allowedSkillsFor } = useCapabilities();
 const { get: getEmployeePrefs } = useEmployeeRuntimePrefs();
@@ -385,7 +453,7 @@ async function approve(item: ToolApproval, scope: "session" | "always") {
 function clearCurrentConversation() {
   if (
     props.conversation &&
-    window.confirm("清空当前对话的所有消息？此会话会保留在左侧列表中。")
+    window.confirm("清空后将删除当前对话内容和临时上下文，但保留 Session、关联资产与持续任务记录。若要彻底删除 Session，请在最近对话中点击删除。是否继续？")
   )
     emit("clearConversation", props.conversation.id);
 }
@@ -1181,21 +1249,36 @@ onBeforeUnmount(() => {
                         <strong class="text-[10px] font-medium leading-4 tracking-[0.01em]">{{
                           displayTool(activity)
                         }}</strong
-                        ><span
+                        ><span class="ml-auto flex shrink-0 items-center gap-1">
+                          <button
+                            v-if="activity.toolName === 'bash' && activity.detail"
+                            type="button"
+                            class="grid h-4 w-4 place-items-center rounded text-[11px] font-bold text-[var(--accent)] transition hover:bg-[var(--accent-soft)]"
+                            :class="expandedBashActivities.has(bashActivityKey(activity, index)) ? 'rotate-90' : ''"
+                            :aria-expanded="expandedBashActivities.has(bashActivityKey(activity, index))"
+                            aria-label="查看 Bash 命令与输出"
+                            title="查看 Bash 命令与输出"
+                            @click="toggleBashDetail(activity, index)"
+                          >›</button>
+                          <span
                           :class="[
-                            'shrink-0 rounded-full px-1.5 py-0 text-[8px] font-semibold',
+                            'rounded-full px-1.5 py-0 text-[8px] font-semibold',
                             activity.status === 'failed'
                               ? 'bg-rose-500/10 text-rose-600'
                               : activity.status === 'running'
                                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
                                 : 'bg-emerald-500/10 text-emerald-600',
                           ]"
-                          >{{ stateLabel(activity) }}<template v-if="activityElapsedLabel(activity)"> · {{ activityElapsedLabel(activity) }}</template></span
-                        >
+                          >{{ stateLabel(activity) }}<template v-if="activityElapsedLabel(activity)"> · {{ activityElapsedLabel(activity) }}</template></span>
+                        </span>
                       </div>
                       <p class="mt-0.5 break-words text-[10px] leading-3.5 text-[var(--muted)]">
                         {{ activity.summary }}
                       </p>
+                      <pre
+                        v-if="activity.toolName === 'bash' && activity.detail && expandedBashActivities.has(bashActivityKey(activity, index))"
+                        class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--border)]/70 bg-[var(--surface)]/70 px-2 py-1.5 font-mono text-[9px] leading-4 text-[var(--text)]"
+                      >{{ activity.detail }}</pre>
                       <div
                         v-if="activity.status === 'running' && activity.progress !== undefined"
                         class="mt-1 flex items-center gap-1.5"
@@ -1309,6 +1392,21 @@ onBeforeUnmount(() => {
                 </div>
               </article>
             </section>
+            <div
+              v-if="activeDurableTask && message.id === activeDurableTaskMessageId"
+              class="mt-3 flex min-h-12 flex-wrap items-center gap-2 rounded-xl border border-[var(--accent)]/30 bg-[var(--accent-soft)]/55 px-3 py-2 shadow-[0_5px_16px_rgba(79,70,229,0.08)]"
+            >
+              <span class="relative grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[var(--surface)] text-xs font-bold text-[var(--accent)] shadow-sm">
+                ↻<span :class="['absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ring-2 ring-[var(--surface)]', durableTaskTone]" />
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-1.5"><strong class="truncate text-[11px]">持续任务未结束</strong><span class="shrink-0 rounded-full bg-[var(--surface)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--muted)]">{{ durableTaskStatusLabel(activeDurableTask.status) }}</span></span>
+                <small class="block truncate text-[9px] leading-4 text-[var(--muted)]">{{ activeDurableTask.title }} · {{ activeDurableTask.checkpoints.length }} 个检查点</small>
+              </span>
+              <button class="rounded-lg px-2 py-1.5 text-[10px] font-semibold text-[var(--muted)] hover:bg-[var(--surface)] disabled:opacity-40" type="button" :disabled="inputBusy" @click="completeDurableTask">结束任务</button>
+              <button v-if="inputBusy" class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[10px] font-semibold" type="button" @click="pauseDurableTask">暂停</button>
+              <button v-else class="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[10px] font-semibold text-white shadow-sm hover:brightness-105" type="button" @click="continueDurableTask">继续</button>
+            </div>
           </div>
         </article>
         <ChatReplyPending

@@ -8,9 +8,9 @@ test('same-name tool calls settle by invocation id without duplicating activitie
     async start(_request, emit) {
       const runId = 'tool-run';
       emit({ type: 'run.started', runId });
-      emit({ type: 'tool.started', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'first command' });
+      emit({ type: 'tool.started', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'first command', detail: '命令\nffmpeg -i input.mp4 output.mp4' });
       emit({ type: 'tool.started', runId, invocationId: 'bash-2', toolName: 'bash', summary: 'second command' });
-      emit({ type: 'tool.failed', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'exit 1' });
+      emit({ type: 'tool.failed', runId, invocationId: 'bash-1', toolName: 'bash', summary: 'exit 1', detail: '输出\nencoder failed' });
       emit({ type: 'tool.completed', runId, invocationId: 'bash-2', toolName: 'bash', summary: 'completed', ok: true });
       emit({ type: 'run.completed', runId });
     },
@@ -25,6 +25,7 @@ test('same-name tool calls settle by invocation id without duplicating activitie
       { invocationId: 'bash-1', summary: 'first command — exit 1', status: 'failed' },
       { invocationId: 'bash-2', summary: 'second command', status: 'completed' },
     ]);
+    assert.equal(run?.activities[0]?.detail, '命令\nffmpeg -i input.mp4 output.mp4\n\n输出\nencoder failed');
   } finally {
     await orch.close();
   }
@@ -54,6 +55,71 @@ test('application-model activities persist their elapsed duration', async () => 
   } finally {
     await orch.close();
   }
+});
+
+test('durable chat tasks receive a long-run budget while ordinary chat keeps its configured timeout', async () => {
+  const observed: number[] = [];
+  const runner: AgentRunner = {
+    async start(request, emit) {
+      observed.push(request.runTimeoutMs ?? 0);
+      const runId = request.runId ?? 'timeout-run';
+      emit({ type: 'run.started', runId });
+      emit({ type: 'message.delta', runId, text: 'done' });
+      emit({ type: 'run.completed', runId });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const session = await orch.chat.createChatSession();
+    const normal = await orch.chat.sendUserMessage(session.id, { content: '普通问答', context: { ...runContext(), runTimeoutMs: 600_000 } });
+    await waitFor(async () => (await orch.chat.getRun(normal.runId))?.status === 'completed');
+    const durable = await orch.chat.sendUserMessage(session.id, { content: '这是一个需要分阶段完成的长期任务', context: { ...runContext(), runTimeoutMs: 600_000 } });
+    await waitFor(async () => (await orch.chat.getRun(durable.runId))?.status === 'completed');
+    assert.deepEqual(observed, [600_000, 1_800_000]);
+  } finally {
+    await orch.close();
+  }
+});
+
+test('an unrelated turn does not silently continue a waiting durable task', async () => {
+  const runner: AgentRunner = {
+    async start(request, emit) {
+      const runId = request.runId ?? 'run';
+      emit({ type: 'run.started', runId });
+      emit({ type: 'message.delta', runId, text: '已记录。' });
+      emit({ type: 'run.completed', runId });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const session = await orch.chat.createChatSession();
+    const first = await orch.chat.sendUserMessage(session.id, { content: '这是一个需要分阶段完成的长期任务', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(first.runId))?.status === 'completed');
+    await waitFor(async () => (await orch.durableTasks.latestResumable(session.id))?.status === 'waiting_user');
+    const second = await orch.chat.sendUserMessage(session.id, { content: '顺便解释一下什么是向量检索', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(second.runId))?.status === 'completed');
+    const saved = await orch.chat.getChatSession(session.id);
+    const secondTurn = saved?.messages.filter((item) => item.turnId === second.turnId) ?? [];
+    assert.equal(secondTurn.some((item) => item.durableTaskId), false);
+  } finally { await orch.close(); }
+});
+
+test('clearing chat preserves the session and durable tasks but resets conversational context', async () => {
+  const orch = Orchestrator.memory({ runner: new FakeRunner() });
+  try {
+    const session = await orch.chat.createChatSession({ title: '需要保留的 Session', employeeId: 'general' });
+    const task = await orch.durableTasks.create({ conversationId: session.id, objective: '持续整理资料' });
+    await orch.durableTasks.setStatus(task.id, 'paused');
+    const sent = await orch.chat.sendUserMessage(session.id, { content: '普通问答', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(sent.runId))?.status === 'completed');
+    const cleared = await orch.chat.clearChatSession(session.id);
+    assert.equal(cleared?.id, session.id);
+    assert.equal(cleared?.messages.length, 0);
+    assert.equal(cleared?.memory, undefined);
+    assert.equal(cleared?.activeDurableTaskId, undefined);
+    assert.equal((await orch.chat.listChatSessions()).some((item) => item.id === session.id), true);
+    assert.equal((await orch.durableTasks.get(task.id))?.status, 'paused');
+  } finally { await orch.close(); }
 });
 
 test('two clients share the same durable chat session state', async () => {

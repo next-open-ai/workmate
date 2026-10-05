@@ -36,6 +36,8 @@ export interface ChatMessage {
   turnId?: string;
   /** Run attempt that produced this assistant message. */
   runId?: string;
+  /** Durable task selected for this turn, when the chat was upgraded to task mode. */
+  durableTaskId?: string;
   /** Older attempts of the same turn are hidden from the canonical view. */
   superseded?: boolean;
 }
@@ -78,6 +80,8 @@ export interface ChatSession {
   memory?: SessionMemory;
   /** Future channel binding, e.g. channel:telegram:<chatId>. */
   channelBinding?: { channelId: string; threadId: string } | null;
+  /** Most recently selected non-terminal durable task. */
+  activeDurableTaskId?: string;
   /** Per-session approvals granted this run (skillId -> capabilities). */
   grantsSession: Record<string, GrantCapability[]>;
   /** Persistent approvals (skillId -> capabilities). */
@@ -97,6 +101,8 @@ export interface RunActivity {
   progress?: number;
   toolName: string;
   summary: string;
+  /** Bounded, redacted diagnostic detail. Currently populated for Bash. */
+  detail?: string;
   status: 'running' | 'completed' | 'failed';
   startedAt?: number;
   durationMs?: number;

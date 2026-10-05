@@ -258,7 +258,7 @@ export const providerRoutes: FastifyPluginAsync = async (app) => {
   app.post('/providers/test-model-capability', { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
     const value = asRecord(request.body);
     const capability = String(value.capability || '');
-    if (!['chat', 'vision', 'image', 'tts', 'asr', 'embedding', 'quantum-code', 'decision'].includes(capability)) return reply.code(400).send({ message: '不支持该模型能力测试。' });
+    if (!['chat', 'vision', 'image', 'tts', 'asr', 'embedding', 'quantum-code', 'decision', 'ontology'].includes(capability)) return reply.code(400).send({ message: '不支持该模型能力测试。' });
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'workmate-model-test-'));
     const startedAt = Date.now();
     try {
@@ -292,7 +292,7 @@ export const providerRoutes: FastifyPluginAsync = async (app) => {
         const result = await testVisionCapabilityDataUrl(config, String(value.prompt || '请简要描述图片内容。'), String(value.imageDataUrl));
         return { ok: true, latencyMs: Date.now() - startedAt, result: { ...result, content: result.analysis } };
       }
-      if (capability === 'chat') {
+      if (capability === 'chat' || capability === 'ontology') {
         const content = String(value.prompt || '请用一句话介绍你自己。');
         const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', ...(value.apiKey ? { authorization: `Bearer ${String(value.apiKey)}` } : {}) }, body: JSON.stringify({ model: String(value.model || ''), messages: [{ role: 'user', content }], max_tokens: 300 }), signal: AbortSignal.timeout(120_000) });
         const raw = await response.text();

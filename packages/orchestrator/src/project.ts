@@ -236,7 +236,7 @@ export class ProjectService {
     this.store = options.store;
     this.hub = options.hub;
     this.engine = options.engine;
-    this.runTimeoutMs = options.runTimeoutMs ?? 600_000;
+    this.runTimeoutMs = options.runTimeoutMs ?? 1_800_000;
     this.projectTaskTimeoutMs = Math.min(7_200_000, Math.max(30_000, options.projectTaskTimeoutMs ?? 1_200_000));
     this.maxConcurrentProjectTasks = Math.max(1, Math.round(options.maxConcurrentProjectTasks ?? 2));
     this.contextResolver = options.contextResolver;

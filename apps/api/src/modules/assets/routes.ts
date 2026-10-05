@@ -185,6 +185,27 @@ async function listAssets(auth?: { orgId: string; userId: string }) {
   return assetRows(db.exec(`${ASSET_SELECT} WHERE COALESCE(owner_user_id, user_id) = ? AND (org_id IS NULL OR org_id = ?) ORDER BY created_at DESC`, [auth.userId, auth.orgId]));
 }
 
+/** Storage-maintenance view used by Settings. It intentionally returns metadata only. */
+export async function listLargeAssetsForOwner(auth: Pick<AuthPrincipal, 'orgId' | 'userId'>, minimumBytes = 20 * 1024 * 1024) {
+  const rows = await listAssets(auth);
+  return rows
+    .filter((row) => row.sizeBytes >= minimumBytes)
+    .sort((a, b) => b.sizeBytes - a.sizeBytes)
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      mimeType: row.mimeType,
+      sizeBytes: row.sizeBytes,
+      createdAt: row.createdAt,
+      conversationId: row.conversationId,
+      projectId: row.projectId,
+    }));
+}
+
+export async function listAssetIds(): Promise<Set<string>> {
+  return new Set((await listAssets()).map((row) => row.id));
+}
+
 async function assetFile(assetId: string) {
   const db = await database();
   const row = assetRows(db.exec(`${ASSET_SELECT} WHERE id = ?`, [String(assetId)]))[0];
@@ -553,7 +574,7 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
         const project = await orch.projects.getProject(projectId);
         if (!canWriteOwnedResource(project, auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
       }
-      return await archiveArtifact({
+      const asset = await archiveArtifact({
         runId: typeof body.runId === 'string' ? body.runId : undefined,
         relativePath: typeof body.relativePath === 'string' ? body.relativePath : undefined,
         conversationId,
@@ -562,6 +583,11 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
         orgId: auth.orgId,
         ownerUserId: auth.userId,
       });
+      if (conversationId && typeof body.runId === 'string') {
+        const run = await orch.chat.getRun(body.runId);
+        if (run?.taskId) await orch.durableTasks.attachAsset(run.taskId, { assetId: asset.id, name: asset.name, role: 'deliverable', sourceRunId: run.id });
+      }
+      return asset;
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) });
     }
@@ -575,7 +601,13 @@ export const assetRoutes: FastifyPluginAsync = async (app) => {
       const projectId = typeof body.projectId === 'string' ? body.projectId : undefined;
       if (conversationId && !canWriteOwnedResource(await orch.chat.getChatSession(conversationId), auth, { allowLegacyUnowned: true })) throw new Error('Chat session not found.');
       if (projectId && !canWriteOwnedResource(await orch.projects.getProject(projectId), auth, { allowLegacyUnowned: true })) throw new Error('Project not found.');
-      return await archiveBundle({ runId: String(body.runId || ''), conversationId, employeeId: typeof body.employeeId === 'string' ? body.employeeId : undefined, projectId, orgId: auth.orgId, ownerUserId: auth.userId });
+      const runId = String(body.runId || '');
+      const asset = await archiveBundle({ runId, conversationId, employeeId: typeof body.employeeId === 'string' ? body.employeeId : undefined, projectId, orgId: auth.orgId, ownerUserId: auth.userId });
+      if (conversationId) {
+        const run = await orch.chat.getRun(runId);
+        if (run?.taskId) await orch.durableTasks.attachAsset(run.taskId, { assetId: asset.id, name: asset.name, role: 'deliverable', sourceRunId: run.id });
+      }
+      return asset;
     }
     catch (error) { return reply.code(400).send({ message: error instanceof Error ? error.message : String(error) }); }
   });

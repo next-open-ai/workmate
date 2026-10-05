@@ -45,6 +45,13 @@ function findRunningActivity(activities: RunActivity[], event: { invocationId?: 
     : !item.invocationId && item.toolName === event.toolName && item.status === 'running');
 }
 
+function mergeActivityDetail(current?: string, next?: string): string | undefined {
+  if (!next) return current;
+  if (!current) return next.slice(0, 12_000);
+  if (current.includes(next)) return current;
+  return `${current}\n\n${next}`.slice(0, 12_000);
+}
+
 function looksLikeReasoningBlock(text: string) {
   const trimmed = text.replace(/\u0000/g, '').trim();
   if (!trimmed) return false;
@@ -101,7 +108,7 @@ export class RunEngine {
     private readonly runner: AgentRunner,
     private readonly hub: EventHub<OrcEvent>,
     private readonly dispatcher: ExecutionDispatcher,
-    private readonly runTimeoutMs = 600_000,
+    private readonly runTimeoutMs = 1_800_000,
   ) {}
 
   private runKey(runId: string): string {
@@ -239,7 +246,7 @@ export class RunEngine {
         }
         case 'tool.started': {
           const now = Date.now();
-          const activity: RunActivity = { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', startedAt: now, at: now };
+          const activity: RunActivity = { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, detail: event.detail, status: 'running', startedAt: now, at: now };
           run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity });
           scheduleCheckpoint();
@@ -249,8 +256,8 @@ export class RunEngine {
           const existing = findRunningActivity(run.activities, event);
           const now = Date.now();
           const activity: RunActivity = existing
-            ? Object.assign(existing, { summary: event.summary, progress: event.progress, at: now })
-            : { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running', progress: event.progress, startedAt: now, at: now };
+            ? Object.assign(existing, { summary: event.summary, progress: event.progress, detail: mergeActivityDetail(existing.detail, event.detail), at: now })
+            : { invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, detail: event.detail, status: 'running', progress: event.progress, startedAt: now, at: now };
           if (!existing) run.activities.push(activity);
           publish({ type: 'run.activity', runId, activity: { ...activity } });
           scheduleCheckpoint();
@@ -263,12 +270,14 @@ export class RunEngine {
           const activity: RunActivity = existing
             ? Object.assign(existing, {
                 status: event.ok ? 'completed' : 'failed',
+                detail: mergeActivityDetail(existing.detail, event.detail),
                 durationMs: Math.max(0, now - (existing.startedAt ?? existing.at)),
                 at: now,
               })
             : {
                 invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
+                detail: event.detail,
                 status: event.ok ? 'completed' : 'failed',
                 startedAt: now,
                 durationMs: 0,
@@ -288,12 +297,14 @@ export class RunEngine {
                 summary: event.summary && !existing.summary.includes(event.summary)
                   ? `${existing.summary} — ${event.summary}`
                   : (existing.summary || event.summary),
+                detail: mergeActivityDetail(existing.detail, event.detail),
                 durationMs: Math.max(0, now - (existing.startedAt ?? existing.at)),
                 at: now,
               })
             : {
                 invocationId: event.invocationId, toolName: event.toolName,
                 summary: event.summary,
+                detail: event.detail,
                 status: 'failed',
                 startedAt: now,
                 durationMs: 0,

@@ -43,7 +43,7 @@ import { resolveChatImages, imageMessageText } from './image-input.js';
 import { visionAttachmentText } from './vision-capability.js';
 import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from './model-capability-runtime.js';
 
-export const DEFAULT_RUN_TIMEOUT_MS = 600_000;
+export const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
 /** Maximum silence for one provider turn, including the turn after a tool result. */
 export const DEFAULT_MODEL_TURN_IDLE_MS = 75_000;
 
@@ -344,6 +344,46 @@ function toolInputSummary(toolName: string, input: unknown) {
   return `正在调用工具：${toolName}`;
 }
 
+const TOOL_DETAIL_LIMIT = 12_000;
+
+/** Keep diagnostic text useful without exposing common credentials in the UI. */
+export function redactToolDetail(input: string, limit = TOOL_DETAIL_LIMIT): string {
+  const redacted = input
+    .replace(/(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s'";]+/gi, '$1[REDACTED]')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret)\s*[:=]\s*)('[^']*'|"[^"]*"|[^\s;&|]+)/gi, '$1[REDACTED]')
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|password|secret)=)[^&#\s]+/gi, '$1[REDACTED]');
+  if (redacted.length <= limit) return redacted;
+  return `${redacted.slice(0, limit)}\n…（详情已截断）`;
+}
+
+function bashInputDetail(input: unknown): string | undefined {
+  const value = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const command = typeof value.command === 'string' ? value.command.trim() : '';
+  if (!command) return undefined;
+  const timeout = typeof value.timeout === 'number' ? `\n\n超时设置：${value.timeout} 秒` : '';
+  return redactToolDetail(`命令\n${command}${timeout}`);
+}
+
+function toolResultText(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return typeof result === 'string' ? result : undefined;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((item): item is { type: string; text: string } => Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'text' && typeof (item as { text?: unknown }).text === 'string'))
+    .map((item) => item.text)
+    .join('\n');
+  return text || undefined;
+}
+
+function bashResultDetail(result: unknown, fallback?: string): string {
+  return redactToolDetail(`输出\n${toolResultText(result) || fallback || '（无输出）'}`);
+}
+
+function abortWasTimeout(signal?: AbortSignal): boolean {
+  const reason = signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason || '');
+  return /timed?\s*out|timeout|超时/i.test(reason);
+}
+
 function toolResultSummary(toolName: string, output: unknown) {
   const value = output && typeof output === 'object' ? output as Record<string, unknown> : {};
   const failText = () => String(value.message || value.error || `${toolName} 未完成。`);
@@ -627,7 +667,11 @@ export async function* streamAgentReply(input: {
   const projectBound = workspaceMode === 'project';
   yield { type: 'run.started', runId };
 
-  const knowledgeTools = createKnowledgeTools({ knowledgeBases: input.knowledgeBases, model: input.model });
+  const knowledgeTools = createKnowledgeTools({
+    knowledgeBases: input.knowledgeBases,
+    model: input.model,
+    semanticModel: input.modelCapabilities?.find((item) => item.capability === 'ontology'),
+  });
   const experienceTools = createExperienceTools({ agentId: input.profile.id, model: input.model });
   const lastUserText = [...input.messages].reverse().find((item) => item.role === 'user')?.content || '';
   const eligibleMcpConnections = filterMcpConnectionsForTask(input.mcpConnections, lastUserText, { projectBound });
@@ -873,10 +917,11 @@ export async function* streamAgentReply(input: {
         }
         const modelCapability = MODEL_CAPABILITY_TOOLS[event.toolName];
         const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
+        const bashDetail = event.toolName === 'bash' ? bashInputDetail(event.args) : undefined;
         enqueue(modelCapability && capabilityConfig ? {
           type: 'capability.started', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId,
           summary: toolInputSummary(event.toolName, event.args),
-        } : { type: 'tool.started', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolInputSummary(event.toolName, event.args) });
+        } : { type: 'tool.started', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolInputSummary(event.toolName, event.args), ...(bashDetail ? { detail: bashDetail } : {}) });
         return;
       }
 
@@ -912,7 +957,9 @@ export async function* streamAgentReply(input: {
 
         if (event.isError) {
           lastToolSucceeded = false;
-          const raw = typeof output === 'string'
+          const raw = abortSignal.aborted
+            ? (abortWasTimeout(input.abortSignal) || timeoutController.signal.aborted ? '命令因本次运行超时被中止。' : '命令随本次运行被中止。')
+            : typeof output === 'string'
             ? output
             : output && typeof output === 'object' && 'error' in (output as object)
               ? String((output as { error?: unknown }).error || 'tool failed')
@@ -924,7 +971,7 @@ export async function* streamAgentReply(input: {
           const capabilityConfig = modelCapability ? input.modelCapabilities?.find((item) => item.capability === modelCapability) : undefined;
           enqueue(modelCapability && capabilityConfig
             ? { type: 'capability.failed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: `${raw}${hint}` }
-            : { type: 'tool.failed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: `${raw}${hint}` });
+            : { type: 'tool.failed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: `${raw}${hint}`, ...(event.toolName === 'bash' ? { detail: bashResultDetail(event.result, raw) } : {}) });
           return;
         }
 
@@ -955,7 +1002,7 @@ export async function* streamAgentReply(input: {
           ? logicalOk
             ? { type: 'capability.completed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: toolResultSummary(event.toolName, output), ok }
             : { type: 'capability.failed', runId, invocationId: event.toolCallId, capability: modelCapability, modelId: capabilityConfig.modelId, summary: toolResultSummary(event.toolName, output) }
-          : { type: 'tool.completed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolResultSummary(event.toolName, output), ok });
+          : { type: 'tool.completed', runId, invocationId: event.toolCallId, toolName: event.toolName, summary: toolResultSummary(event.toolName, output), ok, ...(event.toolName === 'bash' ? { detail: bashResultDetail(event.result) } : {}) });
         for (const artifactEvent of yieldArtifactEvents(runId, event.toolName, output, emittedArtifactPaths)) {
           enqueue(artifactEvent);
         }
@@ -975,7 +1022,7 @@ export async function* streamAgentReply(input: {
         }
         await agent.prompt(input.model.supportsVision ? imageMessageText(last) : visionAttachmentText(last), input.model.supportsVision ? await resolveChatImages(last, conversationId) : []);
         if (abortSignal.aborted) {
-          const timedOut = timeoutController.signal.aborted && !input.abortSignal?.aborted;
+          const timedOut = (timeoutController.signal.aborted && !input.abortSignal?.aborted) || abortWasTimeout(input.abortSignal);
           enqueue({
             type: 'run.cancelled',
             runId,
@@ -1012,7 +1059,7 @@ export async function* streamAgentReply(input: {
           await publishProjectDiff();
           enqueue({ type: 'run.failed', runId, message: STEP_BUDGET_EXCEEDED_MESSAGE(maxSteps) });
         } else if (isAbortLike(error, abortSignal)) {
-          const timedOut = timeoutController.signal.aborted && !input.abortSignal?.aborted;
+          const timedOut = (timeoutController.signal.aborted && !input.abortSignal?.aborted) || abortWasTimeout(input.abortSignal);
           enqueue({
             type: 'run.cancelled',
             runId,

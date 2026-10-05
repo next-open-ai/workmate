@@ -88,6 +88,17 @@ export interface PptxEnhancedComponentStatus {
 }
 export type DoclingEnhancedComponentStatus = PptxEnhancedComponentStatus;
 
+export interface StorageCleanupReport {
+  scannedAt: number;
+  retentionDays: number;
+  safeCleanup: {
+    count: number;
+    bytes: number;
+    items: Array<{ id: string; category: 'run-intermediate' | 'legacy-workspace' | 'orphan-asset'; label: string; bytes: number; modifiedAt: number }>;
+  };
+  largeAssets: Array<{ id: string; name: string; mimeType: string; sizeBytes: number; createdAt: number; conversationId: string | null; projectId: string | null }>;
+}
+
 export async function getHealth(): Promise<HealthStatus> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
   const response = await fetch(`${apiBase}/api/health`);
@@ -255,6 +266,22 @@ export async function saveServerRuntimeConfig(value: unknown) {
   return body as unknown;
 }
 
+export async function scanStorageCleanup(): Promise<StorageCleanupReport> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/storage/scan`);
+  const body = await response.json().catch(() => ({})) as StorageCleanupReport & { message?: string };
+  if (!response.ok) throw new Error(body.message || `Storage scan failed: ${response.status}`);
+  return body;
+}
+
+export async function runStorageCleanup(): Promise<{ deleted: number; bytes: number; scan: StorageCleanupReport }> {
+  const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
+  const response = await fetch(`${apiBase}/api/settings/storage/cleanup`, { method: 'POST' });
+  const body = await response.json().catch(() => ({})) as { deleted: number; bytes: number; scan: StorageCleanupReport; message?: string };
+  if (!response.ok) throw new Error(body.message || `Storage cleanup failed: ${response.status}`);
+  return body;
+}
+
 export async function getPptxEnhancedComponentStatus(): Promise<PptxEnhancedComponentStatus> {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
   const response = await fetch(`${apiBase}/api/settings/components/pptx-enhanced`);
@@ -384,7 +411,7 @@ export interface RuntimeSkill {
   execution: { allowWorkspaceWrite: boolean; allowScriptExecution: boolean; allowedNetworkHosts: string[]; allowAllNonDestructive: boolean };
 }
 
-export interface ToolActivity { invocationId?: string; progress?: number; toolName: string; summary: string; status: 'running' | 'completed' | 'failed'; startedAt?: number; durationMs?: number; at?: number; }
+export interface ToolActivity { invocationId?: string; progress?: number; toolName: string; summary: string; detail?: string; status: 'running' | 'completed' | 'failed'; startedAt?: number; durationMs?: number; at?: number; }
 export interface CapabilityHealthObservation {
   capability: import('@workmate/contracts').ModelCapability;
   modelId: string;
@@ -402,8 +429,14 @@ export function mergeToolActivity(activities: ToolActivity[], incoming: ToolActi
     : activities.find((item) => !item.invocationId && item.toolName === incoming.toolName && item.status === 'running');
   if (existing) {
     const startedSummary = existing.summary;
+    const startedDetail = existing.detail;
     const startedAt = existing.startedAt ?? existing.at ?? Date.now();
     Object.assign(existing, incoming);
+    if (startedDetail && incoming.detail && !startedDetail.includes(incoming.detail)) {
+      existing.detail = `${startedDetail}\n\n${incoming.detail}`.slice(0, 12_000);
+    } else if (startedDetail && !incoming.detail) {
+      existing.detail = startedDetail;
+    }
     existing.startedAt = startedAt;
     if (incoming.status !== 'running' && existing.durationMs == null) existing.durationMs = Math.max(0, Date.now() - startedAt);
     if (incoming.status !== 'running' && incoming.status !== 'failed') existing.summary = startedSummary;
@@ -558,6 +591,7 @@ export async function streamChat(
           invocationId?: string;
           progress?: number;
           summary?: string;
+          detail?: string;
           ok?: boolean;
           skillId?: string;
           capability?: ToolApproval['capability'];
@@ -569,10 +603,10 @@ export async function streamChat(
           reason?: 'user' | 'timeout';
         };
         if (event.type === 'message.delta' && event.text) onDelta(event.text);
-        if (event.type === 'tool.started' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'running' });
-        if (event.type === 'tool.progress' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, progress: event.progress, toolName: event.toolName, summary: event.summary, status: 'running' });
-        if (event.type === 'tool.completed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: event.ok ? 'completed' : 'failed' });
-        if (event.type === 'tool.failed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, status: 'failed' });
+        if (event.type === 'tool.started' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, detail: event.detail, status: 'running' });
+        if (event.type === 'tool.progress' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, progress: event.progress, toolName: event.toolName, summary: event.summary, detail: event.detail, status: 'running' });
+        if (event.type === 'tool.completed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, detail: event.detail, status: event.ok ? 'completed' : 'failed' });
+        if (event.type === 'tool.failed' && event.toolName && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: event.toolName, summary: event.summary, detail: event.detail, status: 'failed' });
         if (event.type === 'capability.started' && event.capability && event.summary) onToolActivity?.({ invocationId: event.invocationId, toolName: `model:${event.capability}`, summary: event.summary, status: 'running' });
         if (event.type === 'capability.progress' && event.capability && event.summary) onToolActivity?.({ invocationId: event.invocationId, progress: event.progress, toolName: `model:${event.capability}`, summary: event.summary, status: 'running' });
         if (event.type === 'capability.completed' && event.capability && event.summary) {
@@ -736,7 +770,16 @@ export async function searchKnowledge(input: {
 export type OntologyWorkflowPayload = {
   draft: { version: number; nodes: unknown[]; edges: unknown[] };
   published?: { version: number; nodes: unknown[]; edges: unknown[] };
-  candidates: Array<{ id: string; kind: 'node' | 'edge'; node?: Record<string, unknown>; edge?: Record<string, unknown>; evidence: Array<{ documentId: string; chunkId?: string; quote: string; source?: string }>; confidence: number; status: string; reviewNote?: string }>;
+  candidates: Array<{
+    id: string;
+    kind: 'node' | 'edge';
+    node?: { id: string; type: string; name: string; aliases: string[]; properties: Record<string, unknown>; status: string; source?: string };
+    edge?: { id: string; subjectId: string; predicate: string; objectId: string; properties: Record<string, unknown>; status: string; source?: string };
+    evidence: Array<{ documentId: string; chunkId?: string; quote: string; source?: string }>;
+    confidence: number;
+    status: string;
+    reviewNote?: string;
+  }>;
   updatedAt: number;
 };
 
@@ -745,8 +788,12 @@ export type OntologyQueryPlanPayload = {
   matchedNodes: Array<{ id: string; type: string; name: string; aliases?: string[]; properties?: Record<string, unknown>; source?: string; status: string; score: number }>;
   relatedNodes: Array<{ id: string; type: string; name: string; aliases?: string[]; properties?: Record<string, unknown>; source?: string; status: string }>;
   edges: Array<{ id: string; subjectId: string; predicate: string; objectId: string; properties?: Record<string, unknown>; source?: string; status: string }>;
+  paths: Array<{ nodeIds: string[]; edgeIds: string[]; depth: number }>;
   expandedTerms: string[];
+  matchedPredicates: string[];
   filters: Record<string, string>;
+  evidenceRefs: Array<{ documentId?: string; chunkId?: string; source?: string; nodeId?: string; edgeId?: string }>;
+  constraints: { nodeTypes: string[]; predicates: string[]; properties: Record<string, string | number | boolean>; direction: 'both' | 'out' | 'in'; maxResults: number };
 };
 
 export type OntologyHybridSearchPayload = {
@@ -754,12 +801,12 @@ export type OntologyHybridSearchPayload = {
   query: string;
   strategy: 'vector-only' | 'ontology-enhanced';
   plan: OntologyQueryPlanPayload;
-  results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string }>;
+  results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>;
 };
 
 export const readOntologyWorkflow = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/workflow/read', { knowledgeBase });
 export const saveOntologyDraft = (knowledgeBase: KnowledgeBasePayload, graph: unknown) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/save', { knowledgeBase, graph });
-export const publishOntologyDraft = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/publish', { knowledgeBase });
+export const publishOntologyDraft = (knowledgeBase: KnowledgeBasePayload, note?: string, publisher?: string) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/draft/publish', { knowledgeBase, note, publisher });
 export const importOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidates: unknown[]) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/import', { knowledgeBase, candidates });
 export const extractOntologyCandidates = (input: {
   knowledgeBase: KnowledgeBasePayload;
@@ -767,9 +814,31 @@ export const extractOntologyCandidates = (input: {
   instructions?: string;
   model: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string };
 }) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload; generated: number; nodes: number; edges: number; analyzedChunks: number }>('/api/knowledge/ontology/candidates/extract', input);
-export const reviewOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidateIds: string[], decision: 'accepted' | 'rejected', note?: string) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/review', { knowledgeBase, candidateIds, decision, note });
+export const reviewOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidateIds: string[], decision: 'accepted' | 'rejected' | 'deferred', note?: string) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload }>('/api/knowledge/ontology/candidates/review', { knowledgeBase, candidateIds, decision, note });
 export const commitOntologyCandidates = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ ok: true; workflow: OntologyWorkflowPayload & { committed?: number } }>('/api/knowledge/ontology/candidates/commit', { knowledgeBase });
-export const queryOntology = (knowledgeBase: KnowledgeBasePayload, query: string, maxHops = 1) => postKnowledge<{ ok: true; plan: OntologyQueryPlanPayload }>('/api/knowledge/ontology/query', { knowledgeBase, query, maxHops });
+export const upsertOntologyCandidate = (knowledgeBase: KnowledgeBasePayload, candidate: unknown) => postKnowledge<{ok:true;workflow:OntologyWorkflowPayload}>('/api/knowledge/ontology/candidates/upsert',{knowledgeBase,candidate});
+export const deleteOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, candidateIds:string[]) => postKnowledge<{ok:true;workflow:OntologyWorkflowPayload}>('/api/knowledge/ontology/candidates/delete',{knowledgeBase,candidateIds});
+export const mergeOntologyCandidates = (knowledgeBase: KnowledgeBasePayload, sourceCandidateIds:string[], mergedCandidate:unknown) => postKnowledge<{ok:true;workflow:OntologyWorkflowPayload}>('/api/knowledge/ontology/candidates/merge',{knowledgeBase,sourceCandidateIds,mergedCandidate});
+export const stageOntologyCandidates = (knowledgeBase: KnowledgeBasePayload) => postKnowledge<{ok:true;workflow:OntologyWorkflowPayload}>('/api/knowledge/ontology/candidates/stage',{knowledgeBase});
+export type OntologyPreviewPayload={ok:true;graph:{version:number;nodes:unknown[];edges:unknown[]};summary:{addedNodes:number;modifiedNodes:number;deletedNodes:number;addedEdges:number;modifiedEdges:number;deletedEdges:number};validation:{blockers:string[];warnings:string[]}};
+export const previewOntologyChanges=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<OntologyPreviewPayload>('/api/knowledge/ontology/preview',{knowledgeBase});
+export const repairOntologyDraft=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<{ok:true;workflow:OntologyWorkflowPayload;removedEdgeIds:string[]}>('/api/knowledge/ontology/draft/repair',{knowledgeBase});
+export type OntologyGovernanceCommand = {type:'merge_nodes';nodeIds:string[];canonicalId:string;canonicalName:string}|{type:'rename_node';nodeId:string;name:string;keepOldAsAlias:boolean}|{type:'change_node_type';nodeId:string;nodeType:string}|{type:'delete_node';nodeId:string;migrateToNodeId?:string}|{type:'delete_edge';edgeId:string}|{type:'reverse_edge';edgeId:string}|{type:'mark_term';nodeId:string}|{type:'add_edge';edgeId:string;subjectId:string;predicate:string;objectId:string};
+export type OntologyGovernanceIssue={id:string;category:'duplicate_node'|'naming'|'isolated_node'|'orphan_edge'|'self_loop'|'duplicate_edge';severity:'blocker'|'warning';title:string;description:string;nodeIds:string[];edgeIds:string[];suggestedCommands:OntologyGovernanceCommand[]};
+export type OntologyGovernancePayload={ok:true;graph:{version:number;nodes:unknown[];edges:unknown[]};issues:OntologyGovernanceIssue[];operations:Array<{id:string;commands:OntologyGovernanceCommand[];source:string;actor?:string;createdAt:number;undoneAt?:number}>};
+export const readOntologyGovernance=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<OntologyGovernancePayload>('/api/knowledge/ontology/governance/read',{knowledgeBase});
+export const applyOntologyGovernance=(knowledgeBase:KnowledgeBasePayload,commands:OntologyGovernanceCommand[],source:'manual'|'rule'|'ai'='manual',actor='管理员')=>postKnowledge<{ok:true;workflow:OntologyWorkflowPayload;operationId:string;issues:OntologyGovernanceIssue[]}>('/api/knowledge/ontology/governance/apply',{knowledgeBase,commands,source,actor});
+export const undoOntologyGovernance=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<{ok:true;workflow:OntologyWorkflowPayload;issues:OntologyGovernanceIssue[]}>('/api/knowledge/ontology/governance/undo',{knowledgeBase});
+export type OntologyGovernanceSuggestion={issueId:string;confidence:number;reason:string;commands:OntologyGovernanceCommand[]};
+export const suggestOntologyGovernance=(knowledgeBase:KnowledgeBasePayload,model:{provider:string;baseUrl?:string;chatModel:string;embeddingModel?:string;apiKey:string},issueIds:string[]=[])=>postKnowledge<{ok:true;suggestions:OntologyGovernanceSuggestion[]}>('/api/knowledge/ontology/governance/suggest',{knowledgeBase,model,issueIds});
+export type OntologyVersionPayload={version:number;graph:{version:number;nodes:unknown[];edges:unknown[]};publishedAt:number;note?:string;publisher?:string};
+export const listOntologyVersions=(knowledgeBase:KnowledgeBasePayload)=>postKnowledge<{ok:true;versions:OntologyVersionPayload[]}>('/api/knowledge/ontology/versions',{knowledgeBase});
+export const rollbackOntologyVersion=(knowledgeBase:KnowledgeBasePayload,version:number)=>postKnowledge<{ok:true;workflow:OntologyWorkflowPayload}>('/api/knowledge/ontology/versions/rollback',{knowledgeBase,version});
+export const startOntologyAnalysis=(input:{knowledgeBase:KnowledgeBasePayload;documentIds:string[];instructions?:string;model:{provider:string;baseUrl?:string;chatModel:string;embeddingModel?:string;apiKey:string};intensity:'quick'|'standard'|'deep'})=>postKnowledge<{ok:true;jobId:string}>('/api/knowledge/ontology/analysis/start',input);
+export type OntologyAnalysisJob={id:string;status:'running'|'completed'|'failed'|'cancelled';startedAt:number;completedAt?:number;phase:string;currentBatch:number;totalBatches:number;discovered?:number;result?:{workflow:OntologyWorkflowPayload;generated:number;nodes:number;edges:number;analyzedChunks:number};error?:string};
+export const getOntologyAnalysisStatus=(jobId:string)=>postKnowledge<{ok:true;job:OntologyAnalysisJob}>('/api/knowledge/ontology/analysis/status',{jobId});
+export const cancelOntologyAnalysis=(jobId:string)=>postKnowledge<{ok:true}>('/api/knowledge/ontology/analysis/cancel',{jobId});
+export const queryOntology = (knowledgeBase: KnowledgeBasePayload, query: string, maxHops = 2) => postKnowledge<{ ok: true; plan: OntologyQueryPlanPayload }>('/api/knowledge/ontology/query', { knowledgeBase, query, maxHops });
 export const searchKnowledgeWithOntology = (input: { knowledgeBase: KnowledgeBasePayload; query: string; topK?: number; model?: { provider: string; baseUrl?: string; chatModel: string; embeddingModel?: string; apiKey: string } }) => postKnowledge<OntologyHybridSearchPayload>('/api/knowledge/hybrid-search', input);
 
 export async function listBailianPipelines(input: {

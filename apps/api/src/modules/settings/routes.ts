@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { FastifyPluginAsync } from 'fastify';
 import { detectBundledPython, doclingEnhancedComponentRoot, pptxEnhancedComponentRoot, pythonArgv } from '@workmate/agent-core';
 import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '../auth/service.js';
+import { executeStorageCleanup, scanStorageCleanup } from './storage-cleanup.js';
 
 type SettingName =
   | 'model-settings'
@@ -580,6 +581,21 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/settings/runtime', async () => mergeRuntimeSettings(readJson('runtime-settings')));
   app.put('/settings/runtime', async (request) => mergeRuntimeSettings(writeJson('runtime-settings', splitRuntimeSettings(request.body ?? {}))));
+
+  app.get('/settings/storage/scan', async (request, reply) => {
+    let auth;
+    try { ensureAuth(request); auth = requireAuth(request); }
+    catch (error) { return sendAuthError(reply, error); }
+    try { return await scanStorageCleanup(auth); }
+    catch (error) { return reply.code(500).send({ message: `空间扫描失败：${error instanceof Error ? error.message : String(error)}` }); }
+  });
+  app.post('/settings/storage/cleanup', async (request, reply) => {
+    let auth;
+    try { ensureAuth(request); requireAdmin(request); auth = requireAuth(request); }
+    catch (error) { return sendAuthError(reply, error); }
+    try { return await executeStorageCleanup(auth); }
+    catch (error) { return reply.code(500).send({ message: `空间清理失败：${error instanceof Error ? error.message : String(error)}` }); }
+  });
 
   app.get('/settings/components/pptx-enhanced', async (request, reply) => {
     try {

@@ -9,7 +9,7 @@ export type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding,
 
 export const imageGenerationProtocols: ImageGenerationProtocol[] = ['openai-images', 'dashscope-multimodal', 'dashscope-image-async'];
 
-export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision'];
+export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision', 'ontology'];
 
 /** Connection instance — same provider type can appear multiple times. */
 export interface ProviderInstance {
@@ -158,7 +158,7 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
   ollama: { chat: providerSuggestedChatModels.ollama },
   // Compatible services are intentionally vendor-neutral. eSight is entered
   // as a model ID under `quantum-code`, never as a provider protocol/type.
-  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [], decision: [] },
+  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [], decision: [], ontology: [] },
 };
 
 const providerAutoProfiles: Partial<Record<ProviderId, Partial<Record<ModelCapability, string>>>> = {

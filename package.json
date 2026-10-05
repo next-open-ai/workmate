@@ -70,6 +70,7 @@
     "orch:remote-confirm": "node scripts/remote-project-confirm.mjs",
     "orch:remote-chat": "node scripts/remote-chat.mjs",
     "chat-attachments:regression": "pnpm --filter @workmate/agent-core build && pnpm --filter @workmate/orchestrator build && pnpm --filter @workmate/api build && node scripts/chat-attachments-regression.mjs",
+    "durable-task:regression": "node scripts/durable-task-regression.mjs",
     "gateway:stub": "node scripts/gateway-stub-smoke.mjs",
     "gateway:config": "node scripts/gateway-config.mjs",
     "gateway:feishu": "node scripts/gateway-feishu-smoke.mjs",

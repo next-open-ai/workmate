@@ -17,7 +17,8 @@ export type {
   DispatcherWaitReason,
 } from './execution-dispatcher.js';
 export { ChatSessionService, SESSION_KEY_PREFIX } from './chat-session.js';
-export type { ChatRunContext, SendUserMessageInput, ResolveApprovalInput } from './chat-session.js';
+export { DurableTaskService, DURABLE_TASK_KEY_PREFIX, isDurableTaskResumeIntent, shouldCreateDurableTask } from './durable-task.js';
+export type { ChatRunContext, DurableTaskSourceInput, SendUserMessageInput, ResolveApprovalInput } from './chat-session.js';
 export {
   buildSessionModelMessages,
   canonicalTurns,

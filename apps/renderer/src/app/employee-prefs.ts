@@ -40,7 +40,9 @@ export const RESEARCH_DEFAULT_MAX_STEPS = DEFAULT_MAX_STEPS;
 export const MIN_MAX_STEPS = DEFAULT_MAX_STEPS;
 export const MAX_MAX_STEPS = 64;
 
-export const DEFAULT_RUN_TIMEOUT_MS = 600_000;
+/** Default whole-run budget: 30 minutes. */
+export const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
+const LEGACY_DEFAULT_RUN_TIMEOUT_MS = 600_000;
 export const MIN_RUN_TIMEOUT_MS = 60_000;
 export const MAX_RUN_TIMEOUT_MS = 1_800_000;
 
@@ -113,7 +115,11 @@ function normalizeOne(value: unknown): EmployeeRuntimePrefs {
     defaultModelId: raw.defaultModelId ? String(raw.defaultModelId) : null,
     searchMode: allowedSearch ? searchMode : 'inherit',
     maxSteps: clampSteps(raw.maxSteps),
-    runTimeoutMs: clampTimeout(raw.runTimeoutMs, DEFAULT_RUN_TIMEOUT_MS, MIN_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS),
+    // Migrate the former persisted default (10 minutes). Other explicit values
+    // remain untouched, so customized employee budgets still work.
+    runTimeoutMs: Number(raw.runTimeoutMs) === LEGACY_DEFAULT_RUN_TIMEOUT_MS
+      ? DEFAULT_RUN_TIMEOUT_MS
+      : clampTimeout(raw.runTimeoutMs, DEFAULT_RUN_TIMEOUT_MS, MIN_RUN_TIMEOUT_MS, MAX_RUN_TIMEOUT_MS),
     mcpToolTimeoutMs: clampTimeout(raw.mcpToolTimeoutMs, DEFAULT_MCP_TOOL_TIMEOUT_MS, MIN_MCP_TOOL_TIMEOUT_MS, MAX_MCP_TOOL_TIMEOUT_MS),
     mcpIds: Array.isArray(raw.mcpIds) ? raw.mcpIds.map((id) => String(id)).filter(Boolean).slice(0, 24) : [],
     knowledgeProvider: normalizeKnowledgeProvider(raw.knowledgeProvider),

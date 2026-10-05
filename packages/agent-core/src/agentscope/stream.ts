@@ -33,7 +33,7 @@ function asToolCalls(value: unknown): HostToolCall[] {
 function resolveStreamIdleMs(input: ChatRequest): number {
   const runTimeoutMs = typeof input.runTimeoutMs === 'number' && input.runTimeoutMs > 0
     ? input.runTimeoutMs
-    : 600_000;
+    : 1_800_000;
   // Keep idle below the whole-run timeout; floor at 90s for slow MCP tools.
   return Math.max(90_000, Math.min(DEFAULT_STREAM_IDLE_MS, Math.floor(runTimeoutMs / 4)));
 }

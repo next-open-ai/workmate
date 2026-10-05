@@ -8,7 +8,7 @@
  * convention as services/api.ts.
  */
 
-import type { ChatFileAttachment, ChatImageAttachment } from '@workmate/contracts';
+import type { ChatFileAttachment, ChatImageAttachment, DurableTask, DurableTaskStatus } from '@workmate/contracts';
 
 const apiBase = () =>
   window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
@@ -55,6 +55,7 @@ export interface ServerRunActivity {
   progress?: number;
   toolName: string;
   summary: string;
+  detail?: string;
   status: 'running' | 'completed' | 'failed';
   startedAt?: number;
   durationMs?: number;
@@ -459,6 +460,7 @@ export interface ServerChatMessage {
   createdAt: number;
   turnId?: string;
   runId?: string;
+  durableTaskId?: string;
   superseded?: boolean;
 }
 
@@ -481,6 +483,7 @@ export interface ServerChatSession {
     dirty: boolean;
   };
   channelBinding?: { channelId: string; threadId: string } | null;
+  activeDurableTaskId?: string;
   grantsSession: Record<string, GrantCapability[]>;
   grantsAlways: Record<string, GrantCapability[]>;
   createdAt: number;
@@ -508,6 +511,11 @@ export async function getChatSession(id: string): Promise<ServerChatSession | nu
 
 export async function deleteChatSession(id: string): Promise<void> {
   await request(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function clearChatSession(id: string): Promise<ServerChatSession> {
+  const result = await request<{ session: ServerChatSession }>(`/sessions/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
+  return result.session;
 }
 
 /**
@@ -587,6 +595,17 @@ export async function chatPendingApprovals(id: string): Promise<ServerRunRecord[
 export async function sessionRuns(id: string): Promise<ServerRunRecord[]> {
   const result = await request<{ runs: ServerRunRecord[] }>(`/sessions/${encodeURIComponent(id)}/runs`);
   return result.runs;
+}
+
+export async function sessionDurableTasks(id: string): Promise<{ tasks: DurableTask[]; activeTaskId: string | null }> {
+  return request(`/sessions/${encodeURIComponent(id)}/tasks`);
+}
+
+export async function updateDurableTaskStatus(sessionId: string, taskId: string, status: DurableTaskStatus): Promise<DurableTask> {
+  const result = await request<{ task: DurableTask }>(`/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}`, {
+    method: 'PATCH', body: JSON.stringify({ status }),
+  });
+  return result.task;
 }
 
 export async function fetchUsageStats(): Promise<ServerUsageStats> {

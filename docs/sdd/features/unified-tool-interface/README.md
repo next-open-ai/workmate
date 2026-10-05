@@ -131,6 +131,10 @@ ToolTransportAdapter
 | 2026-09-24 | 实现完成，待验收 | UTI 专项测试覆盖注册、重复 ID、deadline、取消、AgentScope Host Transport、dsh MCP Transport；五包类型检查通过 |
 | 2026-09-24 | 边界复核通过 | 国产生图新增三类 Provider Adapter 时未修改 Pi、AgentScope、dsh Tool Transport 或 Agent Loop，验证供应商协议可以只扩展 AMC Backend；UTI 状态仍为“待验收”，不因 AMC 局部回归提前关闭。 |
 | 2026-09-24 | 缺陷修复完成 | `invocationId` 已贯穿 Pi、AgentScope、dsh、Orchestrator、SSE 与 Renderer；新增同名 Bash 交错结束回归，修复按 `toolName` 合并导致的重复失败活动。 |
+| 2026-10-03 | Bash 可观测性增强 | Pi Bash 活动保存经过脱敏和限长的命令与输出；Orchestrator 合并起止详情，聊天执行步骤可按需展开，并区分用户中止与命令自身失败。 |
+| 2026-10-03 | 长任务误取消修复 | Bash 详情入口收进状态行；Renderer 不再用 120 秒界面静默阈值取消服务端运行，长编码任务统一服从服务端可配置运行超时。 |
+| 2026-10-03 | 默认执行预算调整 | 数字员工、Agent Core、AgentScope、Orchestrator 与项目调度的整轮默认超时统一为 30 分钟；旧的 10 分钟默认配置自动迁移。 |
+| 2026-10-03 | 前端等待预算对齐 | 移除聊天镜像层固定 12 分钟截止线；等待器按实际运行预算加两分钟结算缓冲，避免前端先于服务端取消长任务。 |
 | 2026-09-24 | Workmate 同步完成，待 E2E | UTI 实现已同步到 Workmate；专项测试 `4/4`、同名 invocation 回归 `1/1`、五包类型检查、API 与 Renderer 生产构建通过。真实安装态 AgentScope/DSH E2E 尚未执行。 |
 
 当前验收说明：UTI 新增专项用例通过；Workmate `agent-core` 全量 `92/92` 通过。真实 AgentScope/dsh runtime E2E 仍需在具备运行环境时执行，因此本工单保持“待验收”。

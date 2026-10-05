@@ -16,6 +16,7 @@ import {
 import type { KeyValueStore } from './storage/kv.js';
 import { namespaceKey } from './storage/kv.js';
 import type { ChatMessage, ChatSession, GrantCapability, RunRecord } from './types.js';
+import { isDurableTaskResumeIntent, shouldCreateDurableTask, type DurableTaskService } from './durable-task.js';
 
 export const SESSION_KEY_PREFIX = 'sessions:';
 const SESSION_NS = 'sessions';
@@ -27,6 +28,13 @@ const RUN_NS = 'run';
  * runtime payloads, providers). Secrets never cross the persistence boundary.
  */
 export type ChatRunContext = Omit<ChatRequest, 'messages'>;
+
+export interface DurableTaskSourceInput {
+  attachmentId: string;
+  name: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
 
 export interface ChatSessionServiceOptions {
   store: KeyValueStore;
@@ -51,6 +59,9 @@ export interface ChatSessionServiceOptions {
     employeeId: string,
     ownerUserId?: string | null,
   ) => ChatRunContext['mcpConnections'] | Promise<ChatRunContext['mcpConnections']>;
+  durableTasks?: DurableTaskService;
+  /** Resolve verified chat-file originals only after a request becomes a durable task. */
+  durableTaskSourceResolver?: (sessionId: string, attachments: import('@workmate/contracts').ChatFileAttachment[]) => Promise<DurableTaskSourceInput[]>;
 }
 
 export interface SendUserMessageInput {
@@ -92,6 +103,8 @@ export class ChatSessionService {
   private readonly engine: RunEngine;
   private readonly contextResolver?: ChatSessionServiceOptions['contextResolver'];
   private readonly mcpConnectionsResolver?: ChatSessionServiceOptions['mcpConnectionsResolver'];
+  private readonly durableTasks?: DurableTaskService;
+  private readonly durableTaskSourceResolver?: ChatSessionServiceOptions['durableTaskSourceResolver'];
   /** Active run aborts per session (one run at a time, mirroring the UI). */
   private readonly activeAborts = new Map<string, AbortController>();
   private readonly runAttempts = new Map<string, number>();
@@ -102,6 +115,8 @@ export class ChatSessionService {
     this.engine = options.engine;
     this.contextResolver = options.contextResolver;
     this.mcpConnectionsResolver = options.mcpConnectionsResolver;
+    this.durableTasks = options.durableTasks;
+    this.durableTaskSourceResolver = options.durableTaskSourceResolver;
   }
 
   /** Resolve a run context for an employee (caller payload first, else resolver). */
@@ -224,8 +239,35 @@ export class ChatSessionService {
     }
     // Best-effort: remove conversation staging (Agent temp scripts / .python-packages).
     await cleanupConversationSessionWorkspaces(runIds).catch(() => undefined);
+    await this.durableTasks?.deleteForConversation(id).catch(() => undefined);
     await deleteChatImages(id);
     this.hub.publish(`session:${id}`, { type: 'session.deleted', sessionId: id });
+  }
+
+  /**
+   * Reset conversational context while preserving the session identity and
+   * related durable domain data (tasks, asset references, ownership, grants).
+   * This is intentionally different from deleteChatSession.
+   */
+  async clearChatSession(id: string): Promise<ChatSession | null> {
+    const session = await this.getChatSession(id);
+    if (!session) return null;
+    const abort = this.activeAborts.get(id);
+    if (abort && !abort.signal.aborted) abort.abort();
+    this.activeAborts.delete(id);
+    const runIds = [...new Set(session.messages.map((message) => String(message.runId || '').trim()).filter(Boolean))];
+    for (const runId of runIds) await deleteKey(this.store, namespaceKey(RUN_NS, runId));
+    await cleanupConversationSessionWorkspaces(runIds).catch(() => undefined);
+    await deleteChatImages(id);
+    session.messages = [];
+    session.memory = undefined;
+    session.activeDurableTaskId = undefined;
+    session.grantsSession = {};
+    session.title = '新对话';
+    session.updatedAt = Date.now();
+    await this.saveSession(session);
+    this.hub.publish(`session:${id}`, { type: 'session.updated', sessionId: id });
+    return session;
   }
 
   async getRun(runId: string): Promise<RunRecord | null> {
@@ -254,12 +296,35 @@ export class ChatSessionService {
 
     const attachments = ChatImagesSchema.parse(input.attachments ?? []);
     const fileAttachments = ChatFilesSchema.parse(input.fileAttachments ?? []);
-    const verifiedAttachments = await Promise.all(attachments.map(async (image) => (await readChatImage(sessionId, image.id)).attachment));
+    const verifiedImageInputs = await Promise.all(attachments.map((image) => readChatImage(sessionId, image.id)));
+    const verifiedAttachments = verifiedImageInputs.map((image) => image.attachment);
     const turnId = randomUUID();
     const runId = randomUUID();
     const now = Date.now();
-    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, ...(verifiedAttachments.length ? { attachments: verifiedAttachments } : {}), ...(fileAttachments.length ? { fileAttachments } : {}), ...(input.attachmentContext?.trim() ? { attachmentContext: input.attachmentContext.trim().slice(0, 40_000) } : {}), createdAt: now, turnId };
-    const assistantMessage: ChatMessage = { id: randomUUID(), role: 'assistant', content: '', createdAt: now, turnId, runId };
+    const activeTask = this.durableTasks && session.activeDurableTaskId
+      ? await this.durableTasks.get(session.activeDurableTaskId)
+      : null;
+    // Do not silently attach every later conversation turn to a paused/waiting
+    // task. Only an actively running turn or an explicit resume continues it.
+    let durableTask = activeTask?.status === 'running' ? activeTask : null;
+    if (this.durableTasks && isDurableTaskResumeIntent(text)) {
+      durableTask = await this.durableTasks.latestResumable(session.id);
+    }
+    if (!durableTask && this.durableTasks && shouldCreateDurableTask(text, fileAttachments.length + verifiedAttachments.length)) {
+      durableTask = await this.durableTasks.create({ conversationId: session.id, objective: text });
+    }
+    const taskContext = durableTask
+      ? [
+          `[Durable task: ${durableTask.title}]`,
+          `Objective: ${durableTask.objective}`,
+          'Task sources are under .task/source/; other files restored from previous attempts are under .task/. Inspect and reuse them before recreating work.',
+          'Write current user-facing deliverables under output/. This run will be checkpointed automatically.',
+        ].join('\n')
+      : '';
+    const attachmentContext = [input.attachmentContext?.trim(), taskContext].filter(Boolean).join('\n\n').slice(0, 40_000);
+    const taskFields = durableTask ? { durableTaskId: durableTask.id } : {};
+    const userMessage: ChatMessage = { id: randomUUID(), role: 'user', content: text, ...(verifiedAttachments.length ? { attachments: verifiedAttachments } : {}), ...(fileAttachments.length ? { fileAttachments } : {}), ...(attachmentContext ? { attachmentContext } : {}), ...taskFields, createdAt: now, turnId };
+    const assistantMessage: ChatMessage = { id: randomUUID(), role: 'assistant', content: '', ...taskFields, createdAt: now, turnId, runId };
     const attemptNo = 1;
 
     session.employeeId = input.employeeId ?? session.employeeId;
@@ -274,13 +339,39 @@ export class ChatSessionService {
       const routing = loadExecutionRoutingConfig();
       assertVisionSupported(visionHistory, runContext.model.supportsVision, resolveExecutionBackend({ ...routing, employeeEngine: runContext.engine }).id, runContext.modelCapabilities);
     }
+    if (durableTask && this.durableTasks) {
+      try {
+        for (const image of verifiedImageInputs) {
+          await this.durableTasks.addSourceFile(durableTask.id, {
+            attachmentId: image.attachment.id, name: image.attachment.name,
+            mimeType: image.attachment.mimeType, bytes: image.bytes,
+          });
+        }
+        if (fileAttachments.length) {
+          if (!this.durableTaskSourceResolver) throw new Error('Task source resolver is not configured.');
+          const sources = await this.durableTaskSourceResolver(sessionId, fileAttachments);
+          const expected = new Set(fileAttachments.map((item) => item.id));
+          if (sources.length !== expected.size || sources.some((item) => !expected.has(item.attachmentId))) {
+            throw new Error('Task source resolver returned mismatched attachments.');
+          }
+          for (const source of sources) await this.durableTasks.addSourceFile(durableTask.id, source);
+        }
+        durableTask = await this.durableTasks.get(durableTask.id) ?? durableTask;
+      } catch (cause) {
+        await this.durableTasks.setStatus(durableTask.id, 'failed').catch(() => undefined);
+        throw new Error(`无法保存持续任务源文件：${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }
     const previous = this.activeAborts.get(sessionId);
     if (previous && !previous.signal.aborted) previous.abort();
     const abort = new AbortController();
     this.activeAborts.set(sessionId, abort);
     session.messages.push(userMessage, assistantMessage);
+    if (durableTask) session.activeDurableTaskId = durableTask.id;
     if (session.title === '新对话') session.title = text.slice(0, 28);
     await this.saveSession(session);
+
+    if (durableTask) await this.durableTasks?.prepareRun(durableTask.id, runId).catch(() => undefined);
 
     const request = this.requestForTurn(session, runContext, turnId);
     void this.settleRun(session.id, runId, turnId, attemptNo, { ...request, runId }, assistantMessage.id, abort.signal);
@@ -306,19 +397,30 @@ export class ChatSessionService {
   private async settleRun(sessionId: string, runId: string, turnId: string, attemptNo: number, request: ChatRequest, assistantMessageId: string, signal: AbortSignal) {
     const ownerSession = await this.getChatSession(sessionId);
     try {
+      const durableTaskId = ownerSession?.messages.find((item) => item.id === assistantMessageId)?.durableTaskId;
+      // Durable file-production tasks routinely include several model/tool turns
+      // plus a long encoder/converter process. Give them a separate ceiling;
+      // ordinary chat continues to honor the employee's configured budget.
+      const timeoutMs = durableTaskId
+        ? Math.max(request.runTimeoutMs ?? 0, 1_800_000)
+        : request.runTimeoutMs;
+      const effectiveRequest = timeoutMs ? { ...request, runTimeoutMs: timeoutMs } : request;
       const run = await this.engine.execute({
         runId,
         sessionId,
         kind: 'chat',
+        taskId: durableTaskId,
         turnId,
         attemptNo,
-        request,
+        request: effectiveRequest,
+        timeoutMs,
         signal,
         orgId: ownerSession?.orgId,
         ownerUserId: ownerSession?.ownerUserId ?? ownerSession?.userId,
         accessScope: ownerSession?.accessScope,
         accessGrants: ownerSession?.accessGrants,
       });
+      if (run.taskId) await this.durableTasks?.settleRun(run.taskId, run).catch(() => undefined);
       const session = await this.getChatSession(sessionId);
       if (!session) return;
       const message = session.messages.find((item) => item.id === assistantMessageId);
@@ -336,7 +438,7 @@ export class ChatSessionService {
       }
       session.updatedAt = Date.now();
       if (run.status !== 'waiting-approval') {
-        await this.refreshSessionMemory(session, request.model, { force: false });
+        await this.refreshSessionMemory(session, effectiveRequest.model, { force: false });
       } else if (session.memory) {
         session.memory = { ...session.memory, dirty: true };
       } else {
@@ -462,6 +564,10 @@ export class ChatSessionService {
     const attemptNo = waiting.attemptNo + 1;
     const resumedRunId = randomUUID();
     const assistantId = this.assistantForTurn(session, turnId, resumedRunId);
+    const durableTaskId = userMessage.durableTaskId;
+    const resumedAssistant = session.messages.find((message) => message.id === assistantId);
+    if (resumedAssistant && durableTaskId) resumedAssistant.durableTaskId = durableTaskId;
+    if (durableTaskId) await this.durableTasks?.prepareRun(durableTaskId, resumedRunId).catch(() => undefined);
     const request = this.requestForTurn(session, resumeContext, turnId);
     void this.settleRun(session.id, resumedRunId, turnId, attemptNo, { ...request, runId: resumedRunId }, assistantId, abort.signal);
     await this.saveSession(session);
