@@ -73,6 +73,8 @@ export interface SendUserMessageInput {
   context?: ChatRunContext;
   /** Override the session employee recorded with the message. */
   employeeId?: string;
+  /** Voice work must not replace an already running or preparing text turn. */
+  rejectIfActive?: boolean;
 }
 
 export interface ResolveApprovalInput {
@@ -107,6 +109,8 @@ export class ChatSessionService {
   private readonly durableTaskSourceResolver?: ChatSessionServiceOptions['durableTaskSourceResolver'];
   /** Active run aborts per session (one run at a time, mirroring the UI). */
   private readonly activeAborts = new Map<string, AbortController>();
+  private readonly abortRunIds = new WeakMap<AbortController, string>();
+  private readonly preparingTurns = new Map<string, number>();
   private readonly runAttempts = new Map<string, number>();
 
   constructor(options: ChatSessionServiceOptions) {
@@ -288,6 +292,18 @@ export class ChatSessionService {
    * same session is aborted first (same semantics as the desktop chat).
    */
   async sendUserMessage(sessionId: string, input: SendUserMessageInput): Promise<{ runId: string; turnId: string; attemptNo: number }> {
+    if (input.rejectIfActive && (this.preparingTurns.get(sessionId) || (this.activeAborts.has(sessionId) && !this.activeAborts.get(sessionId)!.signal.aborted))) {
+      throw new Error('当前对话已有工作正在执行，请等待完成后再提交语音工作。');
+    }
+    this.preparingTurns.set(sessionId, (this.preparingTurns.get(sessionId) || 0) + 1);
+    try { return await this.sendUserMessageTurn(sessionId, input); }
+    finally {
+      const remaining = (this.preparingTurns.get(sessionId) || 1) - 1;
+      if (remaining) this.preparingTurns.set(sessionId, remaining); else this.preparingTurns.delete(sessionId);
+    }
+  }
+
+  private async sendUserMessageTurn(sessionId: string, input: SendUserMessageInput): Promise<{ runId: string; turnId: string; attemptNo: number }> {
     const session = await this.getChatSession(sessionId);
     if (!session) throw new Error('Chat session not found.');
 
@@ -363,9 +379,11 @@ export class ChatSessionService {
       }
     }
     const previous = this.activeAborts.get(sessionId);
+    if (input.rejectIfActive && previous && !previous.signal.aborted) throw new Error('当前对话已有工作正在执行，请等待完成后再提交语音工作。');
     if (previous && !previous.signal.aborted) previous.abort();
     const abort = new AbortController();
     this.activeAborts.set(sessionId, abort);
+    this.abortRunIds.set(abort, runId);
     session.messages.push(userMessage, assistantMessage);
     if (durableTask) session.activeDurableTaskId = durableTask.id;
     if (session.title === '新对话') session.title = text.slice(0, 28);
@@ -378,9 +396,10 @@ export class ChatSessionService {
     return { runId, turnId, attemptNo };
   }
 
-  async abortActiveRun(sessionId: string): Promise<boolean> {
+  async abortActiveRun(sessionId: string, expectedRunId?: string): Promise<boolean> {
     const abort = this.activeAborts.get(sessionId);
     if (!abort || abort.signal.aborted) return false;
+    if (expectedRunId && this.abortRunIds.get(abort) !== expectedRunId) return false;
     abort.abort();
     return true;
   }
@@ -563,6 +582,7 @@ export class ChatSessionService {
 
     const attemptNo = waiting.attemptNo + 1;
     const resumedRunId = randomUUID();
+    this.abortRunIds.set(abort, resumedRunId);
     const assistantId = this.assistantForTurn(session, turnId, resumedRunId);
     const durableTaskId = userMessage.durableTaskId;
     const resumedAssistant = session.messages.find((message) => message.id === assistantId);

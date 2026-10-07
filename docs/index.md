@@ -18,6 +18,9 @@ hero:
     - theme: alt
       text: 项目计划
       link: /planning/README
+    - theme: alt
+      text: 当前功能状态
+      link: /current-state
 
 features:
   - icon: ◈

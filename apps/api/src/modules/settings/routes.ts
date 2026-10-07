@@ -7,6 +7,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { detectBundledPython, doclingEnhancedComponentRoot, pptxEnhancedComponentRoot, pythonArgv } from '@workmate/agent-core';
 import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '../auth/service.js';
 import { executeStorageCleanup, scanStorageCleanup } from './storage-cleanup.js';
+import { publicRealtimeVoiceSettings, saveRealtimeVoiceSettings } from '../voice/settings.js';
+import { publicVoiceInputSettings, saveVoiceInputSettings } from '../voice/asr-settings.js';
+import { publicRealtimeConversationSettings, saveRealtimeConversationSettings } from '../voice/realtime-settings.js';
+import { readVoicePreferences, saveVoicePreferences } from '../voice/voice-preferences.js';
 
 type SettingName =
   | 'model-settings'
@@ -581,6 +585,50 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/settings/runtime', async () => mergeRuntimeSettings(readJson('runtime-settings')));
   app.put('/settings/runtime', async (request) => mergeRuntimeSettings(writeJson('runtime-settings', splitRuntimeSettings(request.body ?? {}))));
+
+  app.get('/settings/voice/realtime', async (request, reply) => {
+    try {
+      ensureAuth(request);
+      requireAuth(request);
+      return publicRealtimeVoiceSettings();
+    } catch (error) {
+      return sendAuthError(reply, error);
+    }
+  });
+  app.put('/settings/voice/realtime', async (request, reply) => {
+    try {
+      ensureAuth(request);
+      requireAdmin(request);
+      const input = asRecord(request.body);
+      return publicRealtimeVoiceSettings(saveRealtimeVoiceSettings(input));
+    } catch (error) {
+      return sendAuthError(reply, error);
+    }
+  });
+  app.get('/settings/voice/input', async (request, reply) => {
+    try { ensureAuth(request); requireAuth(request); return publicVoiceInputSettings(); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.put('/settings/voice/input', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); return publicVoiceInputSettings(saveVoiceInputSettings(asRecord(request.body))); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.get('/settings/voice/conversation', async (request, reply) => {
+    try { ensureAuth(request); requireAuth(request); return publicRealtimeConversationSettings(); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.put('/settings/voice/conversation', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); return publicRealtimeConversationSettings(saveRealtimeConversationSettings(asRecord(request.body))); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.get('/settings/voice/preferences', async (request, reply) => {
+    try { ensureAuth(request); requireAuth(request); return readVoicePreferences(); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.put('/settings/voice/preferences', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); return saveVoicePreferences(asRecord(request.body)); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
 
   app.get('/settings/storage/scan', async (request, reply) => {
     let auth;

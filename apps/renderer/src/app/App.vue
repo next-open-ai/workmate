@@ -77,6 +77,13 @@ const {
 } = useAuth();
 const { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load: loadWorkspace, setView, startChat, startChatWithPrompt, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride, ensureActiveServerSession, pullActiveConversationFromServer, followMobileChatSession } = useWorkspace();
 const serviceReady = ref(false);
+// Navigation hides the existing chat instead of destroying active audio sessions.
+const chatMounted = ref(false);
+const voiceActive = ref(false);
+watch([view, user], () => {
+  if (!user.value) { chatMounted.value = false; voiceActive.value = false; }
+  else if (view.value === 'chat') chatMounted.value = true;
+}, { immediate: true });
 const sidebarCollapsed = ref(false);
 const authBusy = ref(false);
 const { loadTheme } = useTheme();
@@ -268,6 +275,11 @@ function closeEnvironmentPage() {
   setView(isViewAvailable(target) ? target : 'chat');
 }
 
+async function openVoiceWork(conversationId: string, title: string) {
+  await followMobileChatSession(conversationId, title);
+  setView('chat');
+}
+
 function openEnvDetails() {
   showEnvCheckDialog.value = false;
   openEnvironmentPage();
@@ -360,9 +372,9 @@ async function handleLogout() {
   <div v-else class="flex h-screen min-h-[600px] overflow-hidden bg-[var(--background)] text-[var(--text)]">
     <AppSidebar :collapsed="sidebarCollapsed" :view="view" :conversations="conversations" :active-conversation-id="activeConversation?.id ?? null" :service-ready="serviceReady" :current-user="user" @toggle="toggleSidebar" @navigate="setView" @new-chat="startChat()" @select-conversation="selectConversation" @delete-conversation="deleteConversation" @logout="handleLogout" />
     <main :class="['relative min-w-0 flex-1 bg-[var(--background)]', view === 'chat' || view === 'capabilities' || view === 'knowledge' || view === 'assets' || view === 'data' || view === 'automations' || view === 'projects' ? 'overflow-hidden' : 'overflow-auto']">
-      <ChatWorkspace v-if="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" :ensure-server-session="ensureActiveServerSession" :pull-from-server="pullActiveConversationFromServer" :follow-mobile-session="followMobileChatSession" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-data="setView('data')" @open-settings="setView('settings')" />
+      <ChatWorkspace v-if="chatMounted" v-show="view === 'chat'" :visible="view === 'chat'" :employee="activeChatEmployee" :selected-employee-id="activeConversation?.employeeId || currentEmployeeId" :employees="employees" :conversation="activeConversation" :model-configured="configured" :model="modelConfig" :available-models="availableChatModels" :chat-endpoint-token="chatEndpointToken" :permission-tier="permissionTier" :send-message="async (content, collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments, onRunAccepted) => { await addMessage(content, modelConfig, { collaboratorIds, collaborationDelivery, onlineSearch, autoSchedule, attachments, fileAttachments, onRunAccepted }); }" :abort-message="() => { abortActiveRun(); }" :approve="(conversationId, approval, scope) => approveAndRetry(conversationId, approval, scope, modelConfig)" :ensure-server-session="ensureActiveServerSession" :pull-from-server="pullActiveConversationFromServer" :follow-mobile-session="followMobileChatSession" @voice-active="voiceActive = $event" @select-endpoint="selectChatEndpoint" @select-employee="startChat" @set-permission-tier="setPermissionTier" @clear-conversation="clearConversation" @open-assets="setView('assets')" @open-data="setView('data')" @open-settings="setView('settings')" />
       <EmployeesPage
-        v-else-if="view === 'employees'"
+        v-if="view === 'employees'"
         :employees="employees"
         :selected-employee-id="currentEmployeeId"
         :create-employee="createEmployee"
@@ -393,7 +405,7 @@ async function handleLogout() {
       <EnvironmentPage v-else-if="view === 'env'" @close="closeEnvironmentPage" @back="closeEnvironmentPage" />
       <DocsPage v-else-if="view === 'docs'" :anchor="docsAnchor" @anchor-consumed="docsAnchor = null" />
       <SettingsPage
-        v-else
+        v-else-if="view === 'settings'"
         :employees="employees"
         :default-employee-id="currentEmployeeId"
         :current-user="user"
@@ -401,6 +413,7 @@ async function handleLogout() {
         :is-admin="isAdmin"
         :auth-busy="authBusy"
         :focus-tab="settingsFocusTab"
+        :ensure-voice-conversation="ensureActiveServerSession"
         @set-default-employee="setDefaultEmployee"
         @open-environment="openEnvironmentPage"
         @open-check="runCheckInDialog(true)"
@@ -408,7 +421,9 @@ async function handleLogout() {
         @update-local-user="handleUpdateLocalUser"
         @delete-local-user="handleDeleteLocalUser"
         @focus-consumed="settingsFocusTab = null"
+        @open-work="openVoiceWork"
       />
+      <button v-if="voiceActive && view !== 'chat'" type="button" class="fixed bottom-5 right-6 z-40 rounded-full border border-[var(--accent)]/30 bg-[var(--surface)] px-4 py-2 text-xs text-[var(--accent)] shadow-lg" @click="setView('chat')">● 语音进行中 · 返回对话</button>
     </main>
     <AppToastHost />
     <EnvironmentCheckDialog v-if="showEnvCheckDialog" @close="showEnvCheckDialog = false" @go="openEnvDetails" />

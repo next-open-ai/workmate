@@ -2,6 +2,7 @@
 
 > 状态：随实现演进维护；与 `README(.zh-CN)`、`docs/architecture/gateway-m*.md` 保持一致。
 > 目标读者：新成员快速建立全局观、评审人核对模块边界与数据流。
+> 2026-10-07 产品能力快照见 [`docs/current-state.md`](../current-state.md)。
 
 ## 1. 产品定位与总览
 
@@ -40,6 +41,7 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 | `apps/api`（子进程） | Fastify 服务 + orchestrator；持有 domain KV 单写者 | 由 Main fork，随桌面启停 |
 | `apps/gateway`（子进程） | 通道入站/出站、白名单、把线程映射为 `/api/orch` 会话 | `channels.v1` 有启用通道时由 Main fork；可 `gateway-restart` |
 | Renderer | 浏览器内 Vue | 窗口内 |
+| Test Console（工程辅助） | 独立 Python 标准库本机服务；白名单启动回归/并发专项并保存日志与报告 | 由开发者执行 `pnpm quality:console` 启停，不进入产品安装运行链路 |
 
 密钥通道：api 启动后与 gateway 启动后各自向 Main 发起 fork IPC 一次性索取解密快照（模型/搜索配置、通道 token），仅存内存。
 
@@ -51,6 +53,8 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 | `apps/renderer` | 全部 UI；组合式 store（无 Pinia）；`services/api.ts`（旧流式 chat）与 `services/orchestration.ts`（/api/orch 客户端 + SSE） | 无 Node/Electron import |
 | `apps/api` | HTTP 编排接口 + 域 KV 代理 + SSE 事件流 | 只 bind 127.0.0.1 |
 | `apps/gateway` | 通道运行时：`GatewayRuntime`(会话映射/指令面/审批/项目)、适配器(telegram/feishu)、relay 设备链接、配置(KV 或文件) | 凭证不自持（向 Main 索取或显式文件，用于桩/CI） |
+
+语音服务在 API 内采用独立能力边界：`voice/routes.ts` 仅为组合根，`realtime-routes.ts` 管理全双工会话，`asr-routes.ts` 管理单向语音输入，`chat-mobile/voice.ts` 管理手机令牌范围适配。三者配置和会话生命周期相互独立，统一设置页只是客户端聚合入口；详见 `docs/sdd/features/voice-services-modularization-v1/`。
 
 ### 渲染层「远程办公/连接」门户（P1）
 侧栏新增 `remote` 视图：Telegram/飞书凭证卡片、白名单文本、默认员工、网关状态徽标与重启按钮；主进程提供 `get/save-channel-settings`、`gateway-status`、`gateway-restart` IPC。用户/身份体系未实现（按要求暂不建），白名单为字符串列表、默认拒绝。

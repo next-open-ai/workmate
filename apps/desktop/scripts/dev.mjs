@@ -98,6 +98,7 @@ function sharedEnv(extra = {}) {
     WORKMATE_WORKSPACES_DIR: path.join(dataDir, 'workspaces'),
     WORKMATE_KNOWLEDGE_DIR: path.join(dataDir, 'knowledge'),
     WORKMATE_EXPERIENCE_DIR: path.join(dataDir, 'experience'),
+    WORKMATE_MOBILE_HTTPS_ENABLED: process.env.WORKMATE_MOBILE_HTTPS_ENABLED || '1',
     ...extra,
   };
 }

@@ -90,3 +90,4 @@ export { storeAudioInput, deleteAudioInput } from './audio-input.js';
 export { createModelCapabilityTools } from './model-capability-runtime.js';
 export { testVisionCapabilityDataUrl } from './vision-capability.js';
 export { evaluateDecision, createDecisionAgentTool, guardAgentTools } from './decision-runtime.js';
+export { VolcengineAsrStream } from './volcengine-asr.js';

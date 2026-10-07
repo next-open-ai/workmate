@@ -9,6 +9,10 @@ import { requireAuth } from '../auth/service.js';
 import type { AuthPrincipal } from '../auth/service.js';
 import { canReadOwnedResource, canWriteOwnedResource } from '../auth/ownership.js';
 import { getOrchestrator } from '../orchestration/routes.js';
+import { createBoundRealtimeVoice, releaseBoundRealtimeVoice } from '../voice/realtime-routes.js';
+import { readRealtimeVoiceSettings } from '../voice/settings.js';
+import { mobilePublicOrigin, registerMobileVoice } from './voice.js';
+import { mobileCallButton, mobileCallSheet, mobileVoiceScript, mobileVoiceStyle } from './voice-ui.js';
 
 const require = createRequire(import.meta.url);
 
@@ -108,7 +112,7 @@ type MobileLink = {
   expiresAt: number;
 };
 
-function linkPrincipal(link: MobileLink): Pick<AuthPrincipal, 'userId' | 'orgId' | 'role'> {
+function linkPrincipal(link: Pick<MobileLink, 'ownerUserId' | 'orgId'>): Pick<AuthPrincipal, 'userId' | 'orgId' | 'role'> {
   return { userId: link.ownerUserId, orgId: link.orgId, role: 'member' };
 }
 
@@ -178,7 +182,7 @@ async function publicMessagesLive(session: {
   return { ...payload, messages };
 }
 
-function mobileChatHtml(token: string) {
+export function mobileChatHtml(token: string) {
   const safeToken = JSON.stringify(token);
   return `<!doctype html>
 <html lang="zh-CN">
@@ -211,6 +215,7 @@ button.send,button.stop{border:0;border-radius:14px;padding:0 16px;height:44px;f
 .send{background:var(--accent);color:#fff}.send:disabled{opacity:.45}
 .stop{background:#2a3348;color:#dbe4ff}
 .err{color:#fecaca;background:#7f1d1d55;border:1px solid #ef444466;border-radius:12px;padding:10px 12px;margin:0 14px 10px;font-size:13px}
+${mobileVoiceStyle}
 </style>
 </head>
 <body>
@@ -236,10 +241,12 @@ button.send,button.stop{border:0;border-radius:14px;padding:0 16px;height:44px;f
   <main id="list" class="list"></main>
   <form class="composer" id="form">
     <textarea id="input" rows="1" placeholder="说点什么…" enterkeyhint="send"></textarea>
+    ${mobileCallButton}
     <button class="stop" id="stop" type="button" hidden>停止</button>
     <button class="send" id="send" type="submit">发送</button>
   </form>
 </div>
+${mobileCallSheet}
 <script>
 const token=${safeToken};
 const list=document.getElementById('list');
@@ -303,7 +310,7 @@ async function load(){
   busy=Boolean(body.busy);
   stop.hidden=!busy;
   send.disabled=busy;
-  newSession.disabled=busy;
+  newSession.disabled=busy||!document.getElementById('callSheet').hidden;
   metaEl.textContent=busy?'正在回复…':'手机端轻量对话 · 与电脑同步';
   render(body);
 }
@@ -395,6 +402,7 @@ input.addEventListener('keydown',(event)=>{
 
 poll();
 setInterval(poll,1200);
+${mobileVoiceScript}
 </script>
 </body>
 </html>`;
@@ -428,6 +436,7 @@ export const chatMobileRoutes: FastifyPluginAsync = async (app) => {
     if (!session || !canWriteOwnedResource(session, auth, { allowLegacyUnowned: true })) {
       return reply.code(404).send({ message: '对话不存在或无权访问。' });
     }
+    const publicOrigin = mobilePublicOrigin(process.env.WORKMATE_MOBILE_PUBLIC_ORIGIN);
     const db = await database();
     const now = Date.now();
     const expiresAt = now + 8 * 60 * 60_000;
@@ -440,12 +449,20 @@ export const chatMobileRoutes: FastifyPluginAsync = async (app) => {
     flushDatabase(db);
     const port = apiListenPort();
     const lanUrls = listLanIPv4Addresses().map((ip) => `http://${ip}:${port}/api/chat-mobile/${token}`);
+    const managedTls = Boolean(process.env.WORKMATE_MOBILE_HTTPS_CA_FILE?.trim());
+    const caUrl = managedTls && listLanIPv4Addresses()[0]
+      ? `http://${listLanIPv4Addresses()[0]}:${port}/api/chat-mobile-ca`
+      : undefined;
     return {
       token,
       expiresAt,
       sessionId,
-      url: lanUrls[0] || `http://127.0.0.1:${port}/api/chat-mobile/${token}`,
+      url: publicOrigin
+        ? `${publicOrigin}/api/chat-mobile/${token}`
+        : lanUrls[0] || `http://127.0.0.1:${port}/api/chat-mobile/${token}`,
       lanUrls,
+      managedTls,
+      caUrl,
     };
   });
 
@@ -469,6 +486,38 @@ export const chatMobileRoutes: FastifyPluginAsync = async (app) => {
 
 /** Public token endpoints for phone browsers on the same LAN. */
 export const publicChatMobileRoutes: FastifyPluginAsync = async (app) => {
+  // A CA certificate contains no secret. HTTP bootstrap is intentional: the
+  // phone cannot trust the HTTPS listener until this public certificate is installed.
+  app.get('/chat-mobile-ca', async (_request, reply) => {
+    const caFile = process.env.WORKMATE_MOBILE_HTTPS_CA_FILE?.trim();
+    if (!caFile || !fs.existsSync(caFile)) return reply.code(404).send({ message: '本地手机证书不可用。' });
+    return reply
+      .header('cache-control', 'no-store')
+      .header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'")
+      .type('text/html; charset=utf-8')
+      .send(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>安装 Workmate 手机证书</title><style>body{margin:0;background:#f4f7fb;color:#182033;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.65}.card{max-width:520px;margin:36px auto;padding:26px;background:#fff;border:1px solid #dfe6f1;border-radius:20px;box-shadow:0 18px 50px #25385818}h1{font-size:22px;margin:0 0 8px}p{color:#596780}.notice{padding:12px 14px;background:#edf4ff;border-radius:12px;color:#31568e}.download{display:block;margin:20px 0;padding:13px;text-align:center;background:#4267e8;color:#fff;text-decoration:none;border-radius:12px;font-weight:700}ol{padding-left:22px}small{color:#7b879e}</style></head><body><main class="card"><h1>安装 Workmate 手机证书</h1><p class="notice">这是 Workmate 在当前电脑生成的本地 CA 公钥，不包含账号、密钥或聊天数据。</p><a class="download" href="/api/chat-mobile-ca/download">下载 CA 证书</a><ol><li>下载后打开手机“设置/安全/证书管理”。</li><li>选择安装 CA 证书，并选中刚下载的 <b>workmate-mobile-ca.crt</b>。</li><li>按系统提示启用信任。仅点击浏览器的“继续访问”不等于信任证书。</li><li>回到电脑，切换回手机对话二维码并重新扫码。</li></ol><p><b>Android：</b>通常位于“设置 → 安全 → 更多安全设置 → 加密与凭据 → 安装证书 → CA 证书”。<br><b>iPhone：</b>安装描述文件后，还需进入“设置 → 通用 → 关于本机 → 证书信任设置”启用完全信任。</p><small>若地址栏仍显示红色证书标记，说明 CA 尚未成功安装或信任。</small></main></body></html>`);
+  });
+  app.get('/chat-mobile-ca/download', async (_request, reply) => {
+    const caFile = process.env.WORKMATE_MOBILE_HTTPS_CA_FILE?.trim();
+    if (!caFile || !fs.existsSync(caFile)) return reply.code(404).send({ message: '本地手机证书不可用。' });
+    return reply.header('cache-control', 'no-store').header('content-disposition', 'attachment; filename="workmate-mobile-ca.crt"').type('application/x-x509-ca-cert').send(fs.readFileSync(caFile));
+  });
+
+  // Capability URLs must never leak to external referrers or browser/shared caches.
+  app.addHook('onSend', async (_request, reply) => { reply.header('cache-control', 'no-store').header('referrer-policy', 'no-referrer'); });
+  await registerMobileVoice(app, {
+    resolve: resolveLink,
+    authorized: async link => {
+      const session = await getOrchestrator().chat.getChatSession(link.sessionId);
+      return Boolean(session && canWriteOwnedResource(session, linkPrincipal(link), { allowLegacyUnowned: true }));
+    },
+    capabilities: () => {
+      const settings = readRealtimeVoiceSettings();
+      return { enabled: settings.enabled && Boolean(process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() || settings.apiKey), workEnabled: settings.workLinkEnabled };
+    },
+    create: link => createBoundRealtimeVoice({ orgId: link.orgId, userId: link.ownerUserId }, link.sessionId),
+    release: releaseBoundRealtimeVoice,
+  });
   app.get('/chat-mobile/:token', async (request, reply) => {
     const { token } = request.params as { token: string };
     const link = await resolveLink(token);

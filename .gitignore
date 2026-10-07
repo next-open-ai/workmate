@@ -17,3 +17,5 @@ runtimes/agentscope-runtime/python/
 runtimes/agentscope-runtime/.python-install/
 __pycache__/
 *.pyc
+apps/api/test-dist/
+tests/console/data/

@@ -1,11 +1,11 @@
 # Workmate 产品总览
 
 > 状态：当前总览  
-> 更新日期：2026-09-23
+> 更新日期：2026-10-07
 
 ## 产品定位
 
-Workmate 是本地优先的数字员工与 Agent 工作台，统一组织对话、数字员工、Skills、MCP/工具、知识库、项目编排、自动化、资产和多运行时，并通过桌面、Web/API 和消息通道提供一致能力。
+Workmate 是本地优先的数字员工与 Agent 工作台，统一组织对话、持续任务、数字员工、应用模型、Skills、MCP/工具、知识库与本体、项目编排、自动化、资产和多运行时，并通过桌面、Web/API、实时语音、手机网页和消息通道提供一致能力。
 
 ## 核心用户价值
 
@@ -21,13 +21,16 @@ Workmate 是本地优先的数字员工与 Agent 工作台，统一组织对话�
 | 能力域 | 用户入口 | 详细说明 |
 | --- | --- | --- |
 | 对话与会话记忆 | Chat/Workspace | [全局架构](../architecture/architecture.md) |
+| 持续任务与跨 run 恢复 | 源文件、检查点、工作区、自动完成收敛 | [持续任务 SDD](../sdd/features/conversation-durable-task/README.md) |
 | 数字员工与能力授权 | Employees/Capabilities | [历史需求归档](../archive/legacy-global-sdd/requirements.md) |
 | 项目编排 | Plan/Run/ChangeSet、DAG | [项目编排](../architecture/project-orchestration.md) |
-| 模型与 Provider | 多 Provider、多模型、Embedding | [全局架构](../architecture/architecture.md) |
+| 模型与 Provider | 多 Provider、应用模型、Embedding、决策守卫 | [应用模型 SDD](../sdd/features/application-model-capabilities/README.md) |
 | Skills、Tools、MCP | 渐进加载、审批和 MCP 桥 | [全局架构](../architecture/architecture.md) |
-| 知识库和数据能力 | 本地/云知识库、Embedding | [数据能力平台](../architecture/data-capability-platform.md) |
+| 知识库、本体和数据能力 | 文档解析、Embedding、本体构建与增强检索 | [本体 RAG](../sdd/features/ontology-rag-phase-1/README.md) |
 | 自动化 | 定时运行和记录 | [历史需求归档](../archive/legacy-global-sdd/requirements.md) |
 | 通道与远程入口 | Gateway、Telegram、飞书、Relay | [Gateway 设计](../architecture/gateway-m1.md) |
+| 实时语音与手机对话 | 桌面实时/ASR、工作桥、HTTP/HTTPS 手机入口 | [实时语音 SDD](../sdd/features/realtime-voice-v1/status.md) |
 | 多运行时 | pi、AgentScope、dsh | [执行后端](../architecture/execution-backend.md) |
+| 工程质量 | 独立测试控制台、白名单回归、日志与报告 | [测试控制台 SDD](../sdd/features/test-console-v1/requirements.md) |
 
 项目级需求见 [需求总览](requirements-overview.md)。

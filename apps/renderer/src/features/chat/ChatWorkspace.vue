@@ -30,6 +30,13 @@ import { chatBusy } from "../../app/workspace";
 import { qrDataUrl } from "../../app/qr-data-url.js";
 import { markdownToHtml } from "../../app/project-files";
 import { shouldPollServerMirror } from '../../app/chat-run-timing.js';
+import RealtimeVoiceDialog from './RealtimeVoiceDialog.vue';
+import VoiceInputDialog from './VoiceInputDialog.vue';
+import { realtimeVoiceCapabilities } from '../../services/realtime-voice';
+import { VoiceDraftProjection, mergeVoiceCaption, type VoiceCaption } from './voice-presentation';
+import { VoiceCommandCandidate } from './voice-command';
+import { VoiceNoticePlayer, VoiceTaskMonitor, VOICE_NOTICE_TEXT } from '../../services/voice-task-notices';
+import { readStored, writeStored } from '../../app/storage';
 
 type EngineId = "pi" | "agentscope" | "dsh";
 function isEngineId(value: unknown): value is EngineId {
@@ -54,6 +61,7 @@ const props = defineProps<{
     autoSchedule?: boolean,
     attachments?: ChatImageAttachment[],
     fileAttachments?: ChatFileAttachment[],
+    onRunAccepted?: (sessionId: string, runId: string) => void,
   ) => Promise<void>;
   abortMessage?: () => void;
   approve: (
@@ -64,6 +72,7 @@ const props = defineProps<{
   ensureServerSession?: () => Promise<string | null>;
   pullFromServer?: () => Promise<void>;
   followMobileSession?: (sessionId: string, title?: string) => Promise<unknown>;
+  visible?: boolean;
 }>();
 const emit = defineEmits<{
   selectEmployee: [id: EmployeeId];
@@ -73,6 +82,7 @@ const emit = defineEmits<{
   openAssets: [];
   openData: [];
   openSettings: [];
+  voiceActive: [active: boolean];
 }>();
 
 const { t } = useI18n();
@@ -88,6 +98,115 @@ const onlineSearch = ref(true);
 const autoSchedule = ref(false);
 const sending = ref(false);
 const uploadingRecording = ref(false);
+const realtimeVoiceOpen = ref(false);
+const voiceConversationId = ref<string>();
+let voiceRefreshTimer: ReturnType<typeof setInterval> | undefined;
+let voiceRefreshing = false;
+async function refreshVoiceConversation() {
+  if (voiceRefreshing || props.conversation?.serverSessionId !== voiceConversationId.value) return;
+  voiceRefreshing = true;
+  try { await props.pullFromServer?.(); }
+  catch (cause) { notify.error(cause); }
+  finally { voiceRefreshing = false; }
+}
+async function closeRealtimeVoice() {
+  realtimeVoiceOpen.value = false;
+  voiceCaptions.value = [];
+  await refreshVoiceConversation();
+}
+async function voiceWorkUpdated(id: string, title: string) {
+  if (props.conversation?.serverSessionId !== id) await props.followMobileSession?.(id, title);
+  await refreshVoiceConversation();
+}
+const voiceInputOpen = ref(false);
+const voiceInputBusy = ref(false);
+const voiceProjection = new VoiceDraftProjection();
+const voiceCaptions = ref<VoiceCaption[]>([]);
+const voiceMode = ref<'input' | 'realtime'>('realtime');
+const voiceOpening = ref(false);
+const voiceCommandEnabled = ref(false);
+const voiceNoticeEnabled = ref(true);
+const voiceCommandPending = ref(false);
+const voiceNoticePlayer = new VoiceNoticePlayer(() => notify.info('语音播放不可用，请查看任务通知。'));
+const voiceTaskMonitor = new VoiceTaskMonitor(notice => {
+  notify.info(VOICE_NOTICE_TEXT[notice]);
+  voiceNoticePlayer.enqueue(notice);
+});
+const voiceCommandCandidate = new VoiceCommandCandidate(active => { voiceCommandPending.value = active; }, () => {
+  if (canExecuteVoiceCommand()) void submit();
+});
+function canExecuteVoiceCommand() {
+  return voiceCommandEnabled.value && voiceInputOpen.value && !inputBusy.value && props.modelConfigured
+    && props.visible !== false && !autoSchedule.value && !collaboratorIds.value.length;
+}
+function cancelVoiceCommand() { voiceCommandCandidate.cancel(draft.value); }
+function beginVoiceInput() { voiceCommandCandidate.reset(); voiceProjection.begin(draft.value); }
+watch([voiceCommandEnabled, voiceNoticeEnabled], () => {
+  voiceCommandCandidate.cancel(); voiceNoticePlayer.setEnabled(voiceNoticeEnabled.value);
+  void writeStored('voice.command-ui.v1', JSON.stringify({ execute: voiceCommandEnabled.value, notices: voiceNoticeEnabled.value })).catch(() => undefined);
+});
+watch([voiceInputOpen, realtimeVoiceOpen], () => voiceNoticePlayer.setListening(voiceInputOpen.value || realtimeVoiceOpen.value));
+watch(() => props.visible, visible => { if (visible === false) voiceCommandCandidate.cancel(); });
+onMounted(() => {
+  void readStored('voice.command-ui.v1').then(raw => {
+    if (!raw) return;
+    try { const value = JSON.parse(raw); voiceCommandEnabled.value = value.execute === true; voiceNoticeEnabled.value = value.notices !== false; } catch { /* Defaults for invalid UI preferences. */ }
+  });
+});
+let voiceOpenGeneration = 0;
+watch([voiceOpening, voiceInputOpen, realtimeVoiceOpen], () => {
+  emit('voiceActive', voiceOpening.value || voiceInputOpen.value || realtimeVoiceOpen.value);
+});
+async function toggleVoice() {
+  voiceNoticePlayer.unlock();
+  if (voiceOpening.value) { voiceOpenGeneration++; voiceOpening.value = false; return; }
+  if (voiceInputOpen.value) { closeVoiceInput(); return; }
+  if (realtimeVoiceOpen.value) { await closeRealtimeVoice(); return; }
+  await openVoice(voiceMode.value);
+}
+async function openVoice(selectedMode?: 'input' | 'realtime') {
+  if (voiceOpening.value || realtimeVoiceOpen.value || voiceInputOpen.value) return;
+  const token = ++voiceOpenGeneration;
+  voiceOpening.value = true;
+  try {
+    const capabilities = await realtimeVoiceCapabilities();
+    if (token !== voiceOpenGeneration) return;
+    voiceMode.value = selectedMode || capabilities.voiceMode || 'realtime';
+    if (voiceMode.value === 'input') {
+      voiceProjection.begin(draft.value); voiceInputOpen.value = true;
+    }
+    else {
+      const id = await props.ensureServerSession?.();
+      if (token !== voiceOpenGeneration) return;
+      if (props.conversation?.serverSessionId && props.conversation.serverSessionId !== id) return;
+      if (!id) throw new Error('无法关联当前对话，请先创建对话后重试。');
+      voiceConversationId.value = id;
+      realtimeVoiceOpen.value = true;
+      clearInterval(voiceRefreshTimer);
+      voiceRefreshTimer = setInterval(() => { void refreshVoiceConversation(); }, 1500);
+    }
+  } catch (cause) { if (token === voiceOpenGeneration) notify.error(cause instanceof Error ? cause.message : '无法读取语音配置'); }
+  finally { if (token === voiceOpenGeneration) voiceOpening.value = false; }
+}
+function previewVoiceText(text: string) {
+  if (voiceInputOpen.value) {
+    draft.value = voiceProjection.update(draft.value, text);
+    voiceCommandCandidate.update(draft.value, canExecuteVoiceCommand());
+  }
+}
+function closeVoiceInput() { voiceCommandCandidate.cancel(); voiceInputOpen.value = false; voiceInputBusy.value = false; }
+function updateVoiceCaption(caption: VoiceCaption) {
+  if (realtimeVoiceOpen.value) voiceCaptions.value = mergeVoiceCaption(voiceCaptions.value, caption);
+}
+watch(() => props.conversation?.id, (_id, previousId) => {
+  // ensureServerSession may create the very first foreground conversation.
+  if (!previousId && voiceOpening.value && voiceMode.value === 'realtime') return;
+  voiceOpenGeneration++; voiceOpening.value = false;
+  closeVoiceInput(); voiceCaptions.value = [];
+  clearInterval(voiceRefreshTimer); voiceRefreshTimer = undefined;
+  if (realtimeVoiceOpen.value) void closeRealtimeVoice();
+});
+onBeforeUnmount(() => { voiceOpenGeneration++; voiceCommandCandidate.cancel(); voiceTaskMonitor.dispose(); voiceNoticePlayer.stop(); clearInterval(voiceRefreshTimer); emit('voiceActive', false); });
 const recordingInput = ref<HTMLInputElement | null>(null);
 const recording = ref<{ reference: string; name: string; size: number } | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
@@ -259,10 +378,15 @@ async function selectRecording(event: Event) {
 const mobileShareOpen = ref(false);
 const mobileShareBusy = ref(false);
 const mobileShareUrl = ref("");
-const mobileShareQr = ref("");
+const mobileShareHttpsQr = ref("");
+const mobileShareHttpUrl = ref("");
+const mobileShareHttpQr = ref("");
 const mobileShareError = ref("");
 const mobileShareExpiresAt = ref(0);
 const mobileShareToken = ref("");
+const mobileShareManagedTls = ref(false);
+const mobileShareCaUrl = ref("");
+const mobileShareCaQr = ref("");
 const importingAssetId = ref("");
 const promotingAttachmentId = ref('');
 async function saveAttachmentToAssets(file: ChatFileAttachment, openData = false) {
@@ -281,6 +405,7 @@ let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncBusy = false;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
 const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value || uploadingFiles.value);
+watch([inputBusy, autoSchedule, collaboratorIds], () => voiceCommandCandidate.cancel(), { deep: true });
 const expandedBashActivities = ref<Set<string>>(new Set());
 function bashActivityKey(activity: ToolActivity, index: number) {
   return activity.invocationId || `${activity.toolName}-${index}`;
@@ -411,6 +536,9 @@ async function submit() {
   const selected = autoSchedule.value ? [] : [...collaboratorIds.value];
   const delivery = collaborationDelivery.value;
   const useAutoSchedule = autoSchedule.value;
+  const voiceSend = voiceInputOpen.value && !useAutoSchedule && !selected.length;
+  // Send the visible snapshot; late ASR revisions must not recreate a sent draft.
+  if (voiceInputOpen.value) closeVoiceInput();
   draft.value = "";
   recording.value = null;
   images.value = [];
@@ -425,8 +553,10 @@ async function submit() {
   stickToBottom.value = true;
   void nextTick(() => scrollMessagesToBottom(true));
   try {
-    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule, attachedImages, attachedFiles);
+    await props.sendMessage(text, selected, delivery, onlineSearch.value, useAutoSchedule, attachedImages, attachedFiles,
+      voiceSend ? (sessionId, runId) => voiceTaskMonitor.track(sessionId, runId) : undefined);
   } catch (cause) {
+    if (voiceSend) voiceNoticePlayer.enqueue('failed');
     draft.value = text.split('\n\n录音附件：')[0];
     recording.value = attachedRecording;
     images.value = attachedImages;
@@ -505,17 +635,31 @@ async function openMobileShare() {
   mobileShareOpen.value = true;
   mobileShareBusy.value = true;
   mobileShareError.value = "";
-  mobileShareQr.value = "";
+  mobileShareHttpsQr.value = "";
+  mobileShareHttpUrl.value = "";
+  mobileShareHttpQr.value = "";
   mobileShareUrl.value = "";
+  mobileShareCaUrl.value = "";
+  mobileShareCaQr.value = "";
   mobileShareToken.value = "";
   try {
     const sessionId = (await props.ensureServerSession?.()) || props.conversation.serverSessionId;
     if (!sessionId) throw new Error("无法创建服务端对话，请确认已登录并完成模型配置。");
     const created = await createMobileChatSession(sessionId);
     mobileShareToken.value = created.token;
-    mobileShareUrl.value = created.lanUrls[0] || created.url;
+    mobileShareUrl.value = created.url;
     mobileShareExpiresAt.value = created.expiresAt;
-    mobileShareQr.value = await qrDataUrl(mobileShareUrl.value, 200);
+    mobileShareManagedTls.value = created.managedTls;
+    mobileShareCaUrl.value = created.caUrl;
+    mobileShareHttpUrl.value = created.lanUrls[0] || (created.url.startsWith('http://') ? created.url : '');
+    const [httpsQr, httpQr, caQr] = await Promise.all([
+      created.url.startsWith('https://') ? qrDataUrl(created.url, 180) : Promise.resolve(''),
+      mobileShareHttpUrl.value ? qrDataUrl(mobileShareHttpUrl.value, 180) : Promise.resolve(''),
+      created.caUrl ? qrDataUrl(created.caUrl, 180) : Promise.resolve(''),
+    ]);
+    mobileShareHttpsQr.value = httpsQr;
+    mobileShareHttpQr.value = httpQr;
+    mobileShareCaQr.value = caQr;
     if (props.conversation) props.conversation.mobileMirrorEnabled = true;
     ensureServerSync();
     stopMobilePull();
@@ -546,11 +690,11 @@ function mobileShareExpiryLabel() {
   return `约 ${hours} 小时内有效`;
 }
 
-async function copyMobileShareUrl() {
-  if (!mobileShareUrl.value) return;
+async function copyMobileShareUrl(url: string, label: string) {
+  if (!url) return;
   try {
-    await navigator.clipboard.writeText(mobileShareUrl.value);
-    notify.pushRaw('success', '已复制手机对话链接');
+    await navigator.clipboard.writeText(url);
+    notify.pushRaw('success', `已复制${label}`);
   } catch {
     notify.pushRaw('error', '复制失败');
   }
@@ -721,6 +865,7 @@ async function refreshRuntimeDefaultEngine() {
   }
 }
 onMounted(() => {
+  void realtimeVoiceCapabilities().then(value => { if (!voiceOpening.value && !voiceInputOpen.value && !realtimeVoiceOpen.value) voiceMode.value = value.voiceMode || 'realtime'; }).catch(() => undefined);
   void refreshRuntimeDefaultEngine();
   ensureServerSync();
   activityClockTimer = window.setInterval(() => { activityClock.value = Date.now(); }, 250);
@@ -988,27 +1133,44 @@ onBeforeUnmount(() => {
       class="fixed inset-0 z-40 flex items-end justify-center bg-black/35 p-4 sm:items-center"
       @click.self="closeMobileShare"
     >
-      <div class="w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl">
+      <div class="max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl">
         <div class="flex items-start justify-between gap-3">
           <div>
             <h3 class="text-base font-bold">手机扫码对话</h3>
-          <p class="mt-1 text-xs leading-5 text-[var(--muted)]">独立轻量界面，与当前对话同步；也可将手机文件传到电脑的下载目录。请确保手机与电脑在同一局域网。</p>
+          <p class="mt-1 text-xs leading-5 text-[var(--muted)]">手机与电脑保持在同一网络。普通使用直接扫“快速连接”；需要语音时再选择“安全语音”。</p>
           </div>
           <button class="rounded-lg px-2 py-1 text-xs text-[var(--muted)] hover:bg-[var(--surface-muted)]" type="button" @click="closeMobileShare">关闭</button>
         </div>
-        <div class="mt-4 flex flex-col items-center gap-3">
+        <div class="mt-4">
           <p v-if="mobileShareBusy" class="py-10 text-sm text-[var(--muted)]">正在生成二维码…</p>
           <p v-else-if="mobileShareError" class="rounded-xl bg-rose-500/10 px-3 py-3 text-sm text-rose-700">{{ mobileShareError }}</p>
-          <template v-else>
-            <img v-if="mobileShareQr" class="h-[200px] w-[200px] rounded-xl border border-[var(--border)] bg-white p-2" :src="mobileShareQr" alt="手机对话二维码" />
-            <p class="text-center text-[11px] text-[var(--muted)]">{{ mobileShareExpiryLabel() }}</p>
-            <p class="w-full break-all rounded-xl bg-[var(--surface-muted)] px-3 py-2 font-mono text-[10px] text-[var(--muted)]">{{ mobileShareUrl }}</p>
-            <button
-              class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]"
-              type="button"
-              @click="copyMobileShareUrl"
-            >复制链接</button>
-          </template>
+          <div v-else class="grid gap-3 sm:grid-cols-2" :class="mobileShareCaQr ? 'lg:grid-cols-3' : ''">
+            <section v-if="mobileShareHttpQr" class="flex flex-col items-center rounded-2xl border-2 border-[var(--accent)]/35 bg-[var(--accent)]/5 p-4 text-center">
+              <span class="rounded-full bg-[var(--accent)] px-2.5 py-1 text-[10px] font-bold text-white">最简单</span>
+              <h4 class="mt-2 text-sm font-bold">快速连接 · HTTP</h4>
+              <p class="mt-1 min-h-10 text-[11px] leading-5 text-[var(--muted)]">直接扫码使用文字聊天、任务同步和文件传输，无需安装证书。</p>
+              <img class="mt-3 h-36 w-36 rounded-xl border border-[var(--border)] bg-white p-2" :src="mobileShareHttpQr" alt="HTTP 手机对话二维码" />
+              <p class="mt-2 text-[10px] font-medium text-amber-700">不支持手机麦克风语音</p>
+              <button class="mt-2 text-[11px] font-semibold text-[var(--accent)] hover:underline" type="button" @click="copyMobileShareUrl(mobileShareHttpUrl, '快速连接地址')">复制地址</button>
+            </section>
+            <section v-if="mobileShareHttpsQr" class="flex flex-col items-center rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-4 text-center">
+              <span class="rounded-full bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold text-emerald-700">支持语音</span>
+              <h4 class="mt-2 text-sm font-bold">安全语音 · HTTPS</h4>
+              <p class="mt-1 min-h-10 text-[11px] leading-5 text-[var(--muted)]">加密聊天并可使用麦克风。首次使用需先安装右侧证书。</p>
+              <img class="mt-3 h-36 w-36 rounded-xl border border-[var(--border)] bg-white p-2" :src="mobileShareHttpsQr" alt="HTTPS 手机语音二维码" />
+              <p class="mt-2 text-[10px] text-[var(--muted)]">证书已信任后扫描</p>
+              <button class="mt-2 text-[11px] font-semibold text-[var(--accent)] hover:underline" type="button" @click="copyMobileShareUrl(mobileShareUrl, '安全语音地址')">复制地址</button>
+            </section>
+            <section v-if="mobileShareManagedTls && mobileShareCaQr" class="flex flex-col items-center rounded-2xl border border-dashed border-blue-400/50 bg-blue-500/5 p-4 text-center">
+              <span class="rounded-full bg-blue-500/15 px-2.5 py-1 text-[10px] font-bold text-blue-700">仅首次</span>
+              <h4 class="mt-2 text-sm font-bold">安装语音证书</h4>
+              <p class="mt-1 min-h-10 text-[11px] leading-5 text-[var(--muted)]">只有需要手机语音时才操作。扫码后按页面说明安装并信任。</p>
+              <img class="mt-3 h-36 w-36 rounded-xl border border-[var(--border)] bg-white p-2" :src="mobileShareCaQr" alt="手机证书安装二维码" />
+              <p class="mt-2 text-[10px] text-[var(--muted)]">安装一次，后续无需重复</p>
+              <button class="mt-2 text-[11px] font-semibold text-[var(--accent)] hover:underline" type="button" @click="copyMobileShareUrl(mobileShareCaUrl, '证书安装地址')">复制地址</button>
+            </section>
+          </div>
+          <p v-if="!mobileShareBusy && !mobileShareError" class="mt-3 text-center text-[11px] text-[var(--muted)]">三个入口使用同一段当前对话 · {{ mobileShareExpiryLabel() }}</p>
         </div>
       </div>
     </div>
@@ -1435,6 +1597,14 @@ onBeforeUnmount(() => {
         @dragover.prevent
         @drop="dropAttachments"
       >
+        <RealtimeVoiceDialog v-if="realtimeVoiceOpen" inline auto-start :caption-history="voiceCaptions" :conversation-id="voiceConversationId" @close="closeRealtimeVoice" @captions="updateVoiceCaption" @work-updated="voiceWorkUpdated" @open-work="(id, title) => props.followMobileSession?.(id, title)" />
+        <VoiceInputDialog v-if="voiceInputOpen" inline auto-start @close="closeVoiceInput" @session-start="beginVoiceInput" @preview="previewVoiceText" @busy="voiceInputBusy = $event" />
+        <div v-if="voiceMode === 'input'" class="flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--muted)]">
+          <label class="inline-flex items-center gap-1.5"><input v-model="voiceCommandEnabled" type="checkbox" :disabled="autoSchedule || collaboratorIds.length > 0" />口令执行</label>
+          <label class="inline-flex items-center gap-1.5"><input v-model="voiceNoticeEnabled" type="checkbox" />任务语音提示</label>
+          <span v-if="voiceCommandPending" class="text-[var(--accent)]">即将开始执行 <button type="button" class="underline" @click="cancelVoiceCommand">取消</button></span>
+          <span v-else-if="voiceCommandEnabled">说出完整任务，以「开始干活」结尾 · 停顿后自动发送</span>
+        </div>
         <div v-if="images.length || files.length || recording" class="grid gap-2 border-b border-[var(--border)]/70 pb-3 sm:grid-cols-2 lg:grid-cols-3">
           <div v-for="(image, index) in images" :key="image.id" class="relative">
             <ChatImagePreview :image="image" :index="index" :session-id="imageSessionId" />
@@ -1456,7 +1626,9 @@ onBeforeUnmount(() => {
           rows="3"
           class="min-h-[76px] w-full resize-y border-0 bg-transparent px-1 py-0.5 outline-none"
           :placeholder="t('chat.placeholder')"
-          :disabled="!modelConfigured || inputBusy"
+          :disabled="inputBusy || (!modelConfigured && !voiceInputOpen)"
+          :readonly="voiceInputBusy"
+          :aria-label="voiceInputBusy ? '语音实时录入中，结束后可编辑' : '对话输入框'"
           @input="handleDraftInput"
           @keydown="handleDraftKeydown"
           @paste="pasteImages"
@@ -1530,6 +1702,10 @@ onBeforeUnmount(() => {
           </select>
         </div>
         <div class="flex flex-wrap items-center gap-2 border-t border-[var(--border)]/70 pt-3">
+          <div class="inline-flex items-center rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
+            <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--accent)] hover:bg-[var(--surface)]" :class="{ 'bg-[var(--accent-soft)]': voiceOpening || voiceInputOpen || realtimeVoiceOpen }" :aria-pressed="voiceOpening || voiceInputOpen || realtimeVoiceOpen" :aria-label="voiceOpening || voiceInputOpen || realtimeVoiceOpen ? '停止并关闭当前语音' : '开始所选语音模式'" :title="voiceOpening || voiceInputOpen || realtimeVoiceOpen ? '停止并关闭当前语音' : '开始所选语音模式'" @click="toggleVoice"><svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg></button>
+            <select v-model="voiceMode" aria-label="聊天语音模式" class="max-w-[165px] rounded-lg border-0 bg-transparent px-1 py-1.5 text-[11px] text-[var(--muted)] disabled:opacity-60" :disabled="voiceOpening || voiceInputOpen || realtimeVoiceOpen"><option value="input">语音输入 · 手动发送</option><option value="realtime">实时对话 · 自动回复</option></select>
+          </div>
           <div class="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/70 p-1">
             <div class="relative">
               <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface)] hover:text-[var(--accent)] disabled:opacity-35" :disabled="inputBusy || !modelConfigured" aria-label="添加附件" @click="attachmentMenuOpen = !attachmentMenuOpen">
@@ -1687,6 +1863,7 @@ onBeforeUnmount(() => {
             type="submit"
             class="ml-auto grid h-9 w-9 place-items-center rounded-[10px] bg-[var(--accent)] text-xl text-white disabled:opacity-35"
             :disabled="!draft.trim() || !modelConfigured"
+            :title="voiceInputOpen ? '发送当前文字并结束录入' : '发送消息'"
           >
             ↑
           </button>

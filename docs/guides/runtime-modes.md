@@ -142,6 +142,7 @@ docker run --rm -p 47832:47832 -v workmate-data:/opt/workmate-data workmate:glob
 - `deploy/docker/workmate/Dockerfile.global` 不修改 pip 源
 - 容器内默认以 `WORKMATE_API_HOST=0.0.0.0` 对外监听
 - 默认端口为 `47832`
+- 源码开发 Renderer 默认使用 `47831`；工程测试控制台独立使用 `47840`，不随产品运行时自动启动。
 - `WORKMATE_DATA_DIR` 位于 `/opt/workmate-data`（用户数据卷；桌面发布使用 `runtimes/agentscope-runtime/python` 下的可迁移独立 Python，开发和容器环境仍可使用 `.venv`，挂载数据卷不会覆盖运行时）
 - 采用多阶段构建：builder 安装依赖并瘦身后，runtime 只拷贝清理过的树
 - 镜像保持开箱即用（含 Node 依赖、`@lancedb/lancedb`、`apache-arrow`、AgentScope Python runtime），首次启动无需再装依赖

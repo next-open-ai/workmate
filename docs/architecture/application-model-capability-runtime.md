@@ -1,12 +1,12 @@
 # 应用模型能力运行时设计
 
 > 状态：核心实现已同步，待真实 Provider 与安装态三引擎验收  
-> 更新：2026-09-24  
+> 更新：2026-10-07
 > 同步源：`quantummate/docs/architecture/application-model-capability-runtime.md`
 
 ## 1. 定位与目标
 
-应用模型（Capability Model）负责图片生成、Embedding、ASR、TTS、量子代码、有限问题决策等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
+应用模型（Capability Model）负责图片生成与理解、Embedding、ASR、TTS、量子代码、有限问题决策和本体语义匹配等专门能力。它不是主控 Agent 的规划模型，也不替换 Agent Loop；主控模型仍负责理解、规划、选择能力和综合结果。
 
 方案目标：
 

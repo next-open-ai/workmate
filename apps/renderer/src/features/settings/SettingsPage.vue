@@ -15,6 +15,7 @@ import LocalUsersPanel from './LocalUsersPanel.vue';
 import AccountSecurityPanel from './AccountSecurityPanel.vue';
 import PptxEnhancedSettingsCard from './PptxEnhancedSettingsCard.vue';
 import DoclingEnhancedSettingsCard from './DoclingEnhancedSettingsCard.vue';
+import RealtimeVoiceSettingsCard from './RealtimeVoiceSettingsCard.vue';
 import { deleteArchivedAssets, getRuntimeStatus, getServerRuntimeConfig, runStorageCleanup, saveServerRuntimeConfig, scanStorageCleanup, subscribeRuntimeStatus, testDecisionRuntime, type RuntimeStatusResponse, type StorageCleanupReport } from '../../services/api';
 import DshRuntimeInstallCard from '../dsh/DshRuntimeInstallCard.vue';
 import { searchProviderIds, useSearchConfig, type SearchProviderId } from '../../app/search-config';
@@ -38,6 +39,7 @@ const props = defineProps<{
   authBusy?: boolean;
   /** 外部（如启动引导弹窗）指定的初始 tab；消费后通过 focus-consumed 通知清空。 */
   focusTab?: 'providers' | 'models' | null;
+  ensureVoiceConversation?: () => Promise<string | null>;
 }>();
 const emit = defineEmits<{
   setDefaultEmployee: [id: EmployeeId];
@@ -47,6 +49,7 @@ const emit = defineEmits<{
   updateLocalUser: [payload: { userId: string; displayName?: string; password?: string; role?: 'admin' | 'member'; disabled?: boolean }];
   deleteLocalUser: [userId: string];
   'focus-consumed': [];
+  'open-work': [conversationId: string, title: string];
 }>();
 const { t, locale, setLocale } = useI18n();
 const { preference, setTheme } = useTheme();
@@ -148,7 +151,7 @@ const runtimeStatusAutoRefresh = ref(true);
 const runtimeStatusPending = ref(false);
 const runtimeStatusLive = ref(false);
 const languageLabel: Record<Locale, string> = { 'zh-CN': '简体中文', 'en-US': 'English' };
-type SettingsTab = 'appearance' | 'providers' | 'models' | 'decision' | 'search' | 'knowledge' | 'account' | 'usage' | 'environment' | 'users' | 'general';
+type SettingsTab = 'appearance' | 'providers' | 'models' | 'decision' | 'search' | 'knowledge' | 'voice' | 'account' | 'usage' | 'environment' | 'users' | 'general';
 const tab = ref<SettingsTab>('providers');
 
 // 外部指定初始 tab（启动引导弹窗「去配置」跳转）：应用一次后通知父组件清空，
@@ -168,6 +171,7 @@ const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
   { id: 'decision', labelKey: 'settings.tabDecision' },
   { id: 'search', labelKey: 'settings.tabSearch' },
   { id: 'knowledge', labelKey: 'settings.tabKnowledge' },
+  { id: 'voice', labelKey: 'settings.tabVoice' },
   { id: 'account', labelKey: 'settings.tabAccount' },
   { id: 'users', labelKey: 'settings.tabUsers' },
   { id: 'usage', labelKey: 'settings.tabUsage' },
@@ -536,7 +540,7 @@ function handleDefaultEmployeeChange(event: Event) {
 </script>
 
 <template>
-  <section :class="['mx-auto w-full px-6 py-16 sm:px-12', tab === 'users' || tab === 'general' ? 'max-w-6xl' : 'max-w-3xl']">
+  <section :class="['mx-auto w-full px-6 py-16 sm:px-12', tab === 'users' || tab === 'general' || tab === 'voice' ? 'max-w-6xl' : 'max-w-3xl']">
     <header class="mb-8">
       <p class="mb-2 text-[11px] font-extrabold tracking-[.13em] text-[var(--accent)]">Workmate / PREFERENCES</p>
       <h1 class="text-4xl font-bold tracking-[-.045em]">{{ t('settings.title') }}</h1>
@@ -750,6 +754,8 @@ function handleDefaultEmployeeChange(event: Event) {
         <button class="rounded-lg bg-[var(--accent)] px-3 py-2.5 text-[13px] font-semibold text-white" type="button" @click="saveKnowledgeProviderConfig">{{ t('settings.save') }}</button>
       </div>
     </section>
+
+    <RealtimeVoiceSettingsCard v-else-if="tab === 'voice'" :is-admin="isAdmin" :ensure-voice-conversation="ensureVoiceConversation" @open-work="(id, title) => emit('open-work', id, title)" />
 
     <AccountSecurityPanel
       v-else-if="tab === 'account'"

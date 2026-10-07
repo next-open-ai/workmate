@@ -1334,6 +1334,8 @@ function spawnApiProcess(entry) {
     WORKMATE_WORKSPACES_DIR: path.join(storageRoot(), 'workspaces'),
     WORKMATE_KNOWLEDGE_DIR: path.join(storageRoot(), 'knowledge'),
     WORKMATE_EXPERIENCE_DIR: path.join(storageRoot(), 'experience'),
+    // Only the capability-token phone surface is exposed by this TLS listener.
+    WORKMATE_MOBILE_HTTPS_ENABLED: process.env.WORKMATE_MOBILE_HTTPS_ENABLED || '1',
     // Do NOT default-inject WORKMATE_AGENT_ENGINE=pi — that permanently
     // overrides employee/runtime engine settings. Only forward when the
     // parent process already set it (ops / explicit shell export).

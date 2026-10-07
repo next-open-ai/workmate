@@ -2,6 +2,8 @@
 
 本页是产品、架构、开发、测试、评测、部署和编码智能体的统一文档入口。
 
+当前实现快照：[Workmate 当前功能状态](current-state.md)（2026-10-07）。
+
 综合方法与传统项目改造指南：[AI 编程项目的工程文档体系与实践方法论](ai-engineering-documentation-methodology.md)。
 
 ## 按角色进入
@@ -9,6 +11,7 @@
 | 角色 | 首要入口 | 继续阅读 |
 | --- | --- | --- |
 | 产品/需求 | [产品总览](product/product-overview.md) | [项目需求总览](product/requirements-overview.md)、功能 SDD |
+| 当前能力核对 | [当前功能状态](current-state.md) | 用户手册、功能 SDD、质量证据 |
 | 架构/设计 | [架构中心](architecture/README.md) | [全局架构](architecture/architecture.md)、ADR |
 | 开发者/编码智能体 | [智能体规则导读](engineering/agent-guidelines.md) | [工程规则](engineering/README.md)、当前功能 SDD |
 | 项目/评审 | [计划中心](planning/README.md) | [生命周期](lifecycle/README.md)、[阶段成果](deliverables/README.md) |

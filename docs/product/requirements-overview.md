@@ -1,7 +1,7 @@
 # Workmate 项目需求规格总览
 
 > 状态：当前总览  
-> 更新日期：2026-09-23  
+> 更新日期：2026-10-07
 > 说明：本文件是项目级需求和评审导航，不替代功能 SDD 中的详细需求。
 
 ## 项目级需求
@@ -13,6 +13,10 @@
 | WM-REQ-003 | 对话和项目任务可以调用受控工具并产生可追踪资产。 | [项目编排](../architecture/project-orchestration.md) |
 | WM-REQ-004 | Desktop、Web/API、消息通道共享稳定契约并具有明确降级行为。 | [运行形态](../guides/runtime-modes.md) |
 | WM-REQ-005 | 需求、设计、任务、测试、Benchmark、阶段成果和发布结果可追溯。 | [SDD 工作流](../engineering/sdd-workflow.md) |
+| WM-REQ-006 | 复杂对话任务可保存源文件与检查点，并在后续 run 安全恢复，完成后自动收敛。 | [持续任务 SDD](../sdd/features/conversation-durable-task/README.md) |
+| WM-REQ-007 | 应用模型、决策守卫和本体语义匹配统一纳入能力治理，外部服务故障不得拖垮主流程。 | [应用模型](../sdd/features/application-model-capabilities/README.md) |
+| WM-REQ-008 | 桌面与手机实时语音具有可回滚配置、弱网容错、长静音治理和关联工作完成通知。 | [实时语音](../sdd/features/realtime-voice-v1/status.md) |
+| WM-REQ-009 | 工程回归具有本机测试网站、白名单执行、持久日志和可下载报告。 | [测试控制台](../sdd/features/test-console-v1/requirements.md) |
 
 ## 项目级质量属性
 

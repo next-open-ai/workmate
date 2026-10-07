@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | [system-overview.md](system-overview.md) | 系统上下文、进程和模块摘要 | ✅ 当前总览 |
 | [ADR 索引](adr/README.md) | 长期、跨模块且难以逆转的架构决策 | 按 ADR 状态 |
-| [应用模型能力运行时](application-model-capability-runtime.md) | 主控模型、能力路由、统一 Tool Interface、异步进度、URL 产物落盘和多引擎边界 | 📝 已同步设计，待 SDD 落地 |
+| [应用模型能力运行时](application-model-capability-runtime.md) | 主控模型、能力路由、统一 Tool Interface、异步进度、URL 产物落盘和多引擎边界 | ✅ 核心实现已同步，待真实 Provider/安装态验收 |
 | [data-capability-platform.md](data-capability-platform.md) | 数据工作台、统一数据网关、应用数据单元、操作 Spec 与 Skill 的边界和闭环 | ✅ 当前方案 |
 | [architecture.md](architecture.md) | 当前项目架构 / 进程与模块边界 / 主要逻辑（会话·滚动记忆·可续跑审批·**Plan/Run/ChangeSet 项目编排**·存储 keyring·通道） | ✅ 当前权威 |
 | [execution-backend.md](execution-backend.md) | 多引擎统一抽象：`ExecutionBackend` 注册表（pi / agentscope / dsh） | ✅ 当前实现 |
@@ -20,6 +20,7 @@
 | [agentscope-abi.md](agentscope-abi.md) | AgentScope Sidecar：WebSocket JSON-RPC ABI + AgentEvent 映射 | ✅ P0 |
 | [concurrency-runtime.md](concurrency-runtime.md) | 多 session / 多用户 / dispatcher / sidecar 池 的并发执行机制、进程拓扑与隔离模型 | ✅ 当前实现 |
 | [concurrency-verification.md](concurrency-verification.md) | 并发压测与验收清单：限流、优先级、sidecar 池、自愈、观测一致性 | ✅ 当前实现 |
+| [当前功能状态](../current-state.md) | 当前产品能力、默认端口和真实验收边界 | ✅ 2026-10-07 快照 |
 | [project-orchestration.md](project-orchestration.md) | 项目 Plan/Run/ChangeSet 数据模型与调度约定（P0–P1） | ✅ |
 | [embedding-provider-v1.md](embedding-provider-v1.md) | 本地 Docker embedding server 作为标准 provider 接入 `workmate` 的主案；覆盖 provider 抽象、OpenAI-compatible 协议、默认 embedding、知识库 override、索引重建与治理 | 📝 方案稿 |
 | [embedding-provider-v1-implementation-plan.md](embedding-provider-v1-implementation-plan.md) | `embedding-provider-v1` 的实施拆解；覆盖模块边界、配置补强、健康检查、索引签名、重建任务、测试清单与里程碑 | 📝 实施计划 |

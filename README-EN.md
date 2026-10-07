@@ -10,6 +10,8 @@
 
 Workmate is a desktop agent workspace where digital employees can chat, run orchestrated projects, use Skills, search knowledge bases / MCP connectors / the web, manage assets, and coordinate through external channels such as Telegram, Feishu, and a remote relay. Heavy orchestration lives in a server-side state machine, so the desktop UI, gateway processes, and future remote terminals can share one consistent view of sessions, approvals, runs, assets, and project state.
 
+See [docs/current-state.md](docs/current-state.md) for the implementation snapshot and validation boundaries.
+
 The repository deliberately keeps the Electron shell thin:
 
 ```text
@@ -28,8 +30,11 @@ gateway child ------ HTTP / SSE -------^   (Telegram / Feishu / remote relay)
 | Project orchestration | Goal -> **Plan vN** (DAG) -> confirm -> **Run**; follow-up instructions create **ChangeSet** invalidations instead of rewriting everything |
 | Resumable approvals | Tool approvals park a run in `waiting-approval`; resolving an approval resumes the same turn automatically as a new attempt |
 | Session rolling memory | Per-session `memory.summary` plus watermark; long conversations compress automatically while the transcript remains the source of truth |
+| Durable tasks | Complex jobs preserve source files, checkpoints, and workspaces across runs, then settle automatically when complete |
 | Dual workspaces | Per-run workspaces for process files; final deliverables are promoted into a shared project workspace via `publish_to_project` |
-| Knowledge / MCP / web search | Local LanceDB, cloud knowledge connectors, MCP (`http` / `sse` / `stdio`), and multiple web-search providers |
+| Application models and decision guards | Image, vision, speech, embedding, quantum-code, decision, and ontology matching are unified capability tools |
+| Knowledge / ontology / MCP / web search | Local LanceDB, ontology construction and enhanced retrieval, cloud knowledge, MCP, and web search |
+| Realtime voice and mobile chat | Desktop realtime/ASR modes, current-chat work bridge and completion notices; mobile HTTP chat plus scoped HTTPS voice |
 | Channels and remote office | Gateway child process with Telegram, Feishu, personal allowlists, and a remote relay device link |
 | Local embedding sidecar | Experimental desktop-managed local embedding runtime/proxy with provider registration scaffolding and dedicated design docs |
 | Local-first storage | Domain data has a single durable writer (the API process); secrets stay encrypted in the desktop main process and are released only over fork IPC |
@@ -86,9 +91,10 @@ Useful local validation commands:
 pnpm agentscope:smoke
 pnpm dsh:regression
 pnpm concurrency:regression
+pnpm quality:console
 ```
 
-Default local API port: `47832`.
+Default renderer/API/test-console ports: `47831` / `47832` / `47840`.
 Default data directory: `~/.workmate`.
 
 ## Runtime shapes

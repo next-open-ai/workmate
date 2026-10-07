@@ -52,6 +52,7 @@ export default defineConfig({
         items: [
           { text: '首页', link: '/' },
           { text: '完整导航', link: '/README' },
+          { text: '当前功能状态', link: '/current-state' },
           { text: 'AI 编程文档方法论', link: '/ai-engineering-documentation-methodology' },
           { text: '产品总览', link: '/product/product-overview' },
           { text: '项目需求', link: '/product/requirements-overview' }
@@ -66,6 +67,11 @@ export default defineConfig({
           { text: 'UTI-001 · 统一 Tool Interface', link: '/sdd/features/unified-tool-interface/README' },
           { text: 'AMC-001 · 通用应用模型', link: '/sdd/features/application-model-capabilities/README' },
           { text: 'AMC-IMG-001 · 图片生成协议', link: '/sdd/features/application-model-capabilities/image-generation-protocols' },
+          { text: '持续任务', link: '/sdd/features/conversation-durable-task/README' },
+          { text: '本体增强 RAG', link: '/sdd/features/ontology-rag-phase-1/README' },
+          { text: '实时语音 V1', link: '/sdd/features/realtime-voice-v1/status' },
+          { text: '语音服务模块化', link: '/sdd/features/voice-services-modularization-v1/status' },
+          { text: '测试控制台 V1', link: '/sdd/features/test-console-v1/README' },
           { text: '计划中心', link: '/planning/README' },
           { text: '项目路线图', link: '/planning/roadmap' },
           { text: '生命周期', link: '/lifecycle/README' },
@@ -79,6 +85,7 @@ export default defineConfig({
           { text: '质量中心', link: '/quality/README' },
           { text: '测试策略', link: '/quality/test-strategy' },
           { text: '回归套件', link: '/quality/regression-suite' },
+          { text: '测试控制台', link: '/sdd/features/test-console-v1/requirements' },
           { text: '功能测试产物', link: '/quality/features/README' },
           { text: '版本测试产物', link: '/quality/releases/README' }
         ]

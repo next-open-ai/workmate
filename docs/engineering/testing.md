@@ -46,6 +46,8 @@ pnpm concurrency:regression
 pnpm dsh:regression
 ```
 
+需要图形化运行、查看实时日志或保留本地执行记录时，使用 `pnpm quality:console` 打开统一测试控制台（默认 `http://127.0.0.1:47840`）。控制台只运行代码内白名单命令；并发测试默认预览，显式选择实测后才访问本地 Workmate API。
+
 发布前清单见 `docs/releases/checklist.md`。
 
 ## 6. 测试证据

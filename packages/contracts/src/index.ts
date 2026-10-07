@@ -719,3 +719,6 @@ export const DurableTaskSchema = z.object({
 export type DurableTask = z.infer<typeof DurableTaskSchema>;
 
 export * from './data-schema.js';
+export * from './voice-work.js';
+export * from './mobile-voice.js';
+export * from './voice-asr.js';

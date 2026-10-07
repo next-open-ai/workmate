@@ -10,6 +10,8 @@
 
 Workmate 是一套桌面级 Agent 工作台：其中的“数字员工”可以对话、运行**项目编排**、使用 **Skills**、检索**知识库 / MCP 连接 / 联网搜索**、管理**资产与自动化**，并且能通过**本地通道网关**被外部 IM（Telegram / 飞书）乃至**远程中继终端**调度。与常见“聊天壳 + 状态都在前端”的 Agent 应用不同，Workmate 把重编排放进**服务端状态机**：桌面 UI、网关进程与未来的远程终端共享同一份会话、审批、运行、资产与项目状态。
 
+当前实现快照与验收边界见 [docs/current-state.md](docs/current-state.md)。
+
 协作约定（人与 AI）：根目录 [AGENTS.md](./AGENTS.md) · [文档中心](./docs/README.md) · [工程规则](./docs/engineering/README.md)
 
 仓库刻意保持 Electron 壳“薄”：
@@ -40,8 +42,11 @@ AgentScope 迁移说明见 `docs/migrations/agentscope.md`；协议 ABI 见 `doc
 | 项目编排 | 目标 → **Plan vN**（DAG）→ 确认 → **Run**；补充指令走 **ChangeSet** 增量失效下游；成员变更升 Plan 并尽量保留已完成节点 |
 | 可续跑审批 | 工具审批把运行停在 `waiting-approval`；决议后自动以同 turn 新 attempt 续跑 |
 | 会话滚动记忆 | 本会话 `memory.summary` + 水位线；超预算自动摘要，切换会话 flush；消息全文仍是真相 |
+| 持续任务 | 复杂任务保存源文件、检查点和工作区，可跨 run 继续；完成后自动收敛，清空消息不删除 Session |
 | 项目双工作区 | 过程产物在员工 run 空间；最终交付经 `publish_to_project` 晋升到项目目录并显示在文件树 |
-| 知识库 / MCP / 搜索 | 本地 LanceDB + 云端知识库、MCP(http/sse/stdio)、多搜索商（含敏感词脱敏与降级） |
+| 应用模型与决策守卫 | 图片、视觉、语音、Embedding、量子代码、决策和本体匹配统一作为能力工具；员工仅需一个应用模型总开关 |
+| 知识库 / 本体 / MCP / 搜索 | 本地 LanceDB、文档本体构建与增强检索、云端知识库、MCP(http/sse/stdio)、多搜索商 |
+| 实时语音与手机对话 | 桌面实时对话/独立 ASR、当前会话工作桥、完成语音通知；手机提供 HTTP 快捷入口与 HTTPS 安全语音入口 |
 | 通道与远程办公 | 独立网关子进程：Telegram/飞书适配器 + 个人白名单；远程中继设备出连(WS)供终端调度 |
 | 本地 embedding sidecar | 实验性本地 embedding runtime / proxy：已具备桌面管理、状态、provider 注册脚手架与设计文档 |
 | 本地优先存储 | 域数据单一写者（api 进程）；密钥在主进程 `safeStorage` 加密、仅经 fork IPC 一次性下发 |
@@ -124,9 +129,10 @@ workmate start
 pnpm dsh:regression
 pnpm concurrency:regression
 pnpm agentscope:smoke
+pnpm quality:console       # 打开本机测试控制台 http://127.0.0.1:47840
 ```
 
-默认本地服务端口为 `47832`（`workmate`），刻意与 `opcai` / `easyai` 的默认 `4318` 区分，避免并行开发时端口冲突。
+默认开发界面端口为 `47831`，本地 API 为 `47832`，测试控制台为 `47840`；刻意避开常被占用的 `5173`。
 默认数据目录为 `~/.workmate`。
 
 在“设置 → 模型”配置 Provider 之前不会存储/使用任何模型密钥。无头/CI 冒烟脚本见 `scripts/*-smoke.mjs` 与设计文档。

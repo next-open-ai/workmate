@@ -8,12 +8,19 @@
 - [ ] `pnpm dsh:regression`（dsh MCP + Skills 桥接）
 - [ ] `pnpm orch:smoke`
 - [ ] `pnpm concurrency:regression`
+- [ ] `pnpm durable-task:regression`
+- [ ] `pnpm voice:ui:regression && pnpm voice:command:regression`
+- [ ] `pnpm quality:console:test`
+- [ ] 可选使用 `pnpm quality:console` 查看本机执行记录和日志
 - [ ] 数据目录 `~/.workmate` 可正常读写
 
 ## Electron 桌面模式
 
 - [ ] `pnpm dev` 可启动
 - [ ] 可发送一轮普通对话
+- [ ] 实时对话与独立语音输入分别可启动、停止，收起字幕只显示最新一句
+- [ ] 关联工作完成后仅播报一次简短通知，完整结果留在当前对话
+- [ ] 手机 HTTP 文字/文件入口和 HTTPS 安全语音入口说明准确
 - [ ] 可触发工具审批并正常允许 / 拒绝
 - [ ] `Capabilities` 页面可搜索 Skills、安装 Skills、Git 导入 Skills
 - [ ] `Projects` 页面可创建项目并运行任务

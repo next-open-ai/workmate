@@ -1791,6 +1791,8 @@ export async function createMobileChatSession(sessionId: string) {
     lanUrls?: string[];
     expiresAt?: number;
     sessionId?: string;
+    managedTls?: boolean;
+    caUrl?: string;
     message?: string;
   };
   if (!response.ok || !body.url || !body.token) throw new Error(body.message || `Create mobile chat session failed: ${response.status}`);
@@ -1800,6 +1802,8 @@ export async function createMobileChatSession(sessionId: string) {
     lanUrls: Array.isArray(body.lanUrls) ? body.lanUrls : [],
     expiresAt: Number(body.expiresAt || 0),
     sessionId: String(body.sessionId || sessionId),
+    managedTls: body.managedTls === true,
+    caUrl: String(body.caUrl || ''),
   };
 }
 

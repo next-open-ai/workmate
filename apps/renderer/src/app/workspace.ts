@@ -386,7 +386,9 @@ export function useWorkspace() {
           base.activities = run?.activities?.length
             ? run.activities.map((activity) => ({ ...activity }))
             : old?.activities ?? [];
-          base.approvals = old?.approvals ?? [];
+          base.approvals = run
+            ? run.approvals.filter((approval) => approval.status === 'pending').map(({ id, skillId, capability, summary }) => ({ id, skillId, capability, summary }))
+            : old?.approvals ?? [];
           base.assets = old?.assets ?? [];
           base.sources = old?.sources ?? [];
           base.collaborations = old?.collaborations;
@@ -489,6 +491,7 @@ export function useWorkspace() {
     text: string,
     model: ProviderConfig,
     skillIds?: string[],
+    onRunAccepted?: (sessionId: string, runId: string) => void,
   ) {
     const sessionId = await ensureServerSession(conversation, text);
     const previous = serverActiveRuns.get(conversation.id);
@@ -629,6 +632,8 @@ export function useWorkspace() {
       });
       const runId = result.runId;
       currentRunId = runId;
+      // Observer failures must never turn an accepted task into a send failure.
+      try { onRunAccepted?.(sessionId, runId); } catch (cause) { console.warn('Run observer failed', cause); }
       for (const event of pendingEvents) applyServerEvent(event);
       pendingEvents.length = 0;
       await waitForServerSettled(sessionId, runId, abort, assistantMessage, () => ({ sseLive, sseResolved, sseError }), settledViaSse, opts.runTimeoutMs);
@@ -1027,7 +1032,7 @@ export function useWorkspace() {
       void writeStored('workspace.default-employee', currentEmployeeId.value);
     }
   };
-  const addMessage = async (content: string, model: ProviderConfig, options: { attachments?: import('@workmate/contracts').ChatImageAttachment[]; fileAttachments?: import('@workmate/contracts').ChatFileAttachment[]; employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean } = {}) => {
+  const addMessage = async (content: string, model: ProviderConfig, options: { attachments?: import('@workmate/contracts').ChatImageAttachment[]; fileAttachments?: import('@workmate/contracts').ChatFileAttachment[]; employeeId?: EmployeeId; skillIds?: string[]; collaboratorIds?: EmployeeId[]; collaborationDelivery?: CollaborationDelivery; newConversation?: boolean; onlineSearch?: boolean; autoSchedule?: boolean; onRunAccepted?: (sessionId: string, runId: string) => void } = {}) => {
     const text = content.trim(); if (!text) return undefined;
     const hasImages = Boolean(options.attachments?.length || activeConversation.value?.messages.some((message) => message.attachments?.length));
     if (hasImages && (options.autoSchedule || options.collaboratorIds?.length)) throw new Error('含图片的会话暂只支持单员工对话，请关闭自动调度并移除协作者。');
@@ -1418,14 +1423,14 @@ export function useWorkspace() {
     }
 
     const plannedCollaborators = [...new Set(options.collaboratorIds ?? [])].filter((cid) => cid !== employee.id).slice(0, 3);
-    if ((serverChatActive() || hasImages) && !plannedCollaborators.length) {
+    if ((serverChatActive() || hasImages || options.onRunAccepted) && !plannedCollaborators.length) {
       // M0 server-backed turn: the orchestration server owns the run/approval
       // state machine; UI only mirrors deltas and persists the local copy.
       // Skill hydration happens once inside serverChatTurn (avoid double IO here).
       const runAbortCtl = new AbortController();
       activeRunAbort = runAbortCtl;
       try {
-        const outcome = await serverChatTurn(conversation, userMessage, assistantMessage, text, model, options.skillIds);
+        const outcome = await serverChatTurn(conversation, userMessage, assistantMessage, text, model, options.skillIds, options.onRunAccepted);
         assistantMessage.elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
         conversations.value = [...conversations.value];
         return outcome;

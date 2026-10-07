@@ -1,7 +1,7 @@
 # 自动化回归套件目录
 
 > 状态：按仓库当前脚本整理  
-> 更新日期：2026-09-23
+> 更新日期：2026-10-07
 
 | 回归 | 命令/脚本 | 覆盖 | 触发条件 |
 | --- | --- | --- | --- |
@@ -19,6 +19,14 @@
 | AgentScope smoke | `scripts/agentscope-smoke.mjs` | hello、health、事件流 | AgentScope 变更 |
 | MCP user scope | `scripts/mcp-user-scope-regression.mjs` | MCP 用户隔离 | MCP 权限变更 |
 | 模板任务 | `pnpm tasks:smoke` | 模板任务运行 | 模板/任务变更 |
+| 持续任务 | `pnpm durable-task:regression` | 源文件、检查点、恢复、继续与自动完成 | 持续任务/会话清理变更 |
+| 实时语音界面 | `pnpm voice:ui:regression` | 草稿、字幕、生命周期、ASR、导航保活、完成通知 | 语音 UI/ASR 变更 |
+| 实时语音命令 | `pnpm voice:command:regression` | 命令安全、任务状态、提示音、审批续跑 | 语音工作桥/通知变更 |
+| 测试控制台自检 | `pnpm quality:console:test` | 参数、命令白名单、状态恢复、HTTP 安全、网页脚本 | 测试网站变更 |
+
+## 统一测试网站
+
+`pnpm quality:console` 启动 `127.0.0.1:47840` 的本机控制台，可选择快速、语音、核心编排和完整仓库回归，也可预览或显式执行并发专项。控制台是回归入口与证据聚合层，不替代真实 Provider、真实设备、安装包和生产容量验收。
 
 ## 维护规则
 

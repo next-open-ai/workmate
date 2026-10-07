@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON=${TEST_CONSOLE_PYTHON:-python3}
+exec "$PYTHON" "$SCRIPT_DIR/console/launcher.py" "$@"

@@ -72,6 +72,7 @@ export interface ServerRunArtifact {
 
 export interface ServerRunRecord {
   id: string;
+  turnId?: string;
   orgId?: string;
   ownerUserId?: string;
   userId?: string;
