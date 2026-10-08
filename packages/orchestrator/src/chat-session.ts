@@ -449,9 +449,15 @@ export class ChatSessionService {
           if (other.role === 'assistant' && other.turnId === turnId && other.id !== message.id && !other.superseded) other.superseded = true;
         }
         const text = run.transcript.trim();
-        if (text) message.content = text;
-        else if (run.status === 'cancelled') message.content = `⏹ ${run.error ?? '已中止当前执行。'}`;
-        else if (run.status === 'failed') message.content = `⚠ ${run.error ?? 'Model request failed.'}`;
+        const terminalError = run.status === 'cancelled'
+          ? `⏹ ${run.error ?? '已中止当前执行。'}`
+          : run.status === 'failed'
+            ? `⚠ 本次执行未完成：${run.error ?? 'Model request failed.'}`
+            : '';
+        // A provider may emit a partial sentence before its stream fails. That
+        // sentence is useful context, but must never hide the terminal error.
+        if (terminalError) message.content = text ? `${text}\n\n${terminalError}` : terminalError;
+        else if (text) message.content = text;
         else if (run.status !== 'waiting-approval') message.content = FALLBACK_EMPTY_REPLY;
         message.runId = run.id;
       }

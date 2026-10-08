@@ -14,7 +14,7 @@ description: 用内置渲染脚本生成并校验中文 PDF。
 
 首选路径：调用本 Skill 专属的 \`render_pdf_report\` 适配器，并传入 \`title\`、\`content\` 和 \`filename\`。它会在隔离工作区中处理输入 JSON、Python 依赖、渲染、PDF 校验和唯一交付物登记。
 
-不要自行编写 JSON、复制渲染器、调用 \`run_workspace_script\`，也不要将过程文件写入 \`output/\`。适配器成功后，面向用户只说文件名，不要暴露内部的 \`output/\` 路径。
+不要自行编写 JSON、复制渲染器、调用 \`run_workspace_script\`，也不要将过程文件写入 \`output/\`。适配器成功后，不要暴露内部的 \`output/\` 路径；除文件名外，还要在聊天回答中给出便于用户直接阅读的结构化内容摘要。行程、方案、报告等文档至少列出主要章节或逐日核心安排，不要只回复“已生成文件”。无需逐字复制特别长的全文。
 `;
 
 const PDF_RENDERER = String.raw`import json, os, sys

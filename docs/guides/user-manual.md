@@ -106,8 +106,9 @@ Workmate 使用本地账号体系。首次启动时：
 1. 打开左侧「设置」，进入 **Provider** 标签页。
 2. 点击「新增服务商」，选择类型并填写：
    - **服务商类型**：共支持 10 种——OpenAI、Anthropic（Claude）、Google（Gemini）、DeepSeek、GLM（智谱）、通义千问（Qwen）、火山引擎、科大讯飞、Ollama（本机，无需 API Key）、OpenAI 兼容（任意兼容接口，适合企业网关或自建代理）。
+   - **服务类型**：只在确实需要分产品线时才出现。通义千问和 OpenAI 固定使用综合服务，一次填写密钥即可配置全部已适配能力，主界面和高级设置都不再显示该选项。如需用不同密钥、业务空间或网关做隔离，新增另一个 Provider 连接即可。火山引擎因产品线与凭证可能不同，仍需选择大模型、语音或实时语音。
    - **API Key**：云端服务需要填入你从服务商官网申请的密钥；Ollama 不需要。
-   - **Base URL**：一般保持默认；使用代理或兼容接口时按需修改。
+   - **Base URL**：官方地址由系统按厂商、服务类型、地域和业务空间自动生成，普通用户无需填写；只有代理、私有网关或兼容接口需要在高级设置中覆盖。
 3. 点击「测试连通」，看到成功提示后再保存。就绪的服务商显示绿色「已就绪」标签，缺少必填项则显示黄色「待完善」。新增连接时可使用 **Provider 自动配置**，按照内置推荐补齐常用模型和缺失的能力绑定；已有手工配置不会被覆盖。
 4. 保存后仍可随时点「编辑」修改：切换供应商类型时，默认地址与必填项会自动联动；展开编辑面板还可勾选「禁用思考模式」（对部分推理模型生效，可减少思考过程输出）。
 
@@ -119,7 +120,7 @@ Workmate 使用本地账号体系。首次启动时：
 
 有两种使用方式：
 
-1. **新增 Provider 时自动配置**：在“新增服务商”窗口保持“添加后自动采用推荐配置”勾选，保存连接后立即生成推荐配置。
+1. **新增 Provider 时自动配置**：已适配的服务商保存连接后会直接生成推荐配置，无需额外勾选；OpenAI 兼容等无法可靠推断模型的连接仍进入手工登记。
 2. **为已有 Provider 自动配置**：在 Provider 卡片右上角点击“自动配置”。适合以前只配置了对话模型、后来需要补齐图片、向量或语音能力的连接。
 
 自动配置会执行以下操作：
@@ -149,8 +150,8 @@ Workmate 使用本地账号体系。首次启动时：
 | Google（Gemini） | [Google AI Studio：API Keys](https://aistudio.google.com/api-keys)；[官方密钥说明](https://ai.google.dev/gemini-api/docs/api-key) | API Key；Base URL 通常保持默认 | 密钥绑定 Google Cloud 项目。组织账号可能需要管理员开放 AI Studio，并授予创建密钥、启用 Gemini API 等 IAM 权限；同时确认所在地区受支持。 |
 | DeepSeek | [DeepSeek 开放平台：API Keys](https://platform.deepseek.com/api_keys) | API Key；Base URL 通常保持默认 | 登录开放平台、充值或取得可用额度后创建密钥。网页聊天会员权益不等同于 API 额度。 |
 | GLM（智谱） | [智谱开放平台：API Key](https://open.bigmodel.cn/usercenter/apikeys) | API Key；Base URL 通常保持默认 | 普通模型调用使用开放平台 API Key；“编程套餐”等专项 Key 可能使用独立额度与端点，不要混用。 |
-| 通义千问（Qwen） | [阿里云百炼：API Key](https://bailian.console.aliyun.com/?tab=model#/api-key)；[官方获取说明](https://help.aliyun.com/zh/model-studio/get-api-key)；[Workspace ID 获取说明](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id) | API Key；按需填写 Workspace ID；Base URL 必须与地域一致 | API Key、模型和 Base URL 都有地域属性，不能跨地域混用。使用子业务空间、知识库、调优模型或要求工作空间专属域名的能力时填写 Workspace ID；可在百炼控制台右上角的业务空间信息中复制。RAM 用户还需被加入目标业务空间并获得相应模型/API 权限。 |
-| 火山引擎 | [火山方舟：API Key 管理](https://console.volcengine.com/ark/apiKey)；[火山引擎控制台](https://console.volcengine.com/) | 当前主要用于语音能力：API Key、App ID；按模型要求配置端点 | 先开通对应语音或方舟服务，再从目标应用/项目复制凭证。不同语音产品的 App ID、鉴权方式和可用地域可能不同，应使用与所选模型同一产品下的凭证。 |
+| 通义千问（Qwen） | [阿里云百炼：API Key](https://bailian.console.aliyun.com/?tab=model#/api-key)；[官方获取说明](https://help.aliyun.com/zh/model-studio/get-api-key)；[Workspace ID 获取说明](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id) | API Key；按需填写 Workspace ID；通常选择“综合服务” | API Key、模型和端点都有地域属性，不能跨地域混用。Workmate 会自动派生 OpenAI 兼容、原生 HTTP 和实时 WebSocket 端点；业务空间资源需填写对应 Workspace ID。 |
+| 火山引擎 | [火山方舟：API Key 管理](https://console.volcengine.com/ark/apiKey)；[火山引擎控制台](https://console.volcengine.com/) | 方舟选择“大模型与生成能力”；实时语音只填写 API Key；当前旧版语音合成适配才需要 App ID | 方舟和语音可能使用不同凭证与鉴权协议，建议在同一“火山引擎”厂商下分别建立连接，系统自动使用各自端点。 |
 | 科大讯飞 | [讯飞开放平台控制台](https://console.xfyun.cn/) | 当前主要用于语音能力：API Key、API Secret、App ID | 先在控制台创建应用并开通所需的语音识别或语音合成服务，然后从该应用的接口认证信息中复制三项凭证；不同应用或服务的凭证不能随意混用。 |
 | Ollama | [Ollama 下载](https://ollama.com/download)；[模型库](https://ollama.com/search) | 不需要 API Key；默认 Base URL 为本机 Ollama 地址 | 先安装并启动 Ollama，再执行 `ollama pull <模型名>` 下载模型。若 Workmate 与 Ollama 不在同一主机，需要填写可访问的地址，并自行限制网络访问范围。 |
 | OpenAI 兼容 | 由实际服务商、企业网关或自建服务提供 | Base URL、模型 ID；API Key 是否必填取决于上游 | Base URL 应指向 OpenAI 兼容 API 根路径，通常以 `/v1` 结尾。确认上游至少兼容项目所使用的模型列表、对话或 Embedding 接口；代理登录密码不能替代 API Key。 |
@@ -254,13 +255,19 @@ JEV 是首个兼容的决策模型，但配置与运行机制不绑定单一厂�
 
 #### 5.2.1 实时语音与语音输入
 
+实时语音不再单独填写密钥，也不再提供独立语音设置页：在「Provider 与模型」配置统一连接和实时模型即可。火山引擎选择「实时语音」，系统准备 SeedDuplex 模型与兼容音色；通义千问综合连接可以直接登记 `qwen-audio-3.1-realtime-plus` 或 `qwen3.8-omni-flash-realtime`，系统自动派生 WebSocket 地址、使用对应鉴权并展示阿里兼容音色。Omni Realtime 建议在 Provider 高级设置填写百炼业务空间 ID。“模型”页下方统一提供启停、工作关联、会话策略、声音表现和完整通话测试；实时模型行或实时语音模型卡片均可直接进入配置。旧版火山实时密钥仍会安全迁移并保留回滚来源。
+
+两家供应商均可通过 Function Calling 调度 Workmate 工作能力。阿里实时模型的原生联网搜索不能与工具调用同时启用，因此 Workmate 使用自己的联网搜索 Tool，避免实时会话丢失智能体能力。当前内置音色复刻训练面板仍属于火山专属能力；阿里复刻音色需先在百炼创建，再把返回的音色 ID 填入实时模型配置。
+
+通话状态条会显示实际 Provider、模型和用量。阿里结算帧提供 Token 或字符时显示上游真实计量；火山或其他未返回 usage 的会话显示本地统计的输入/输出 PCM 音频时长，并明确标注“本地计时”。Workmate 不依据易变化的公开单价自动生成货币账单，最终费用仍以供应商控制台账单为准。
+
 输入框左下角的语音入口提供两种相互独立的能力：
 
 - **实时对话**：与当前数字员工进行双向语音交流，可在当前会话启动工作。关联工作完成后会播放一次不超过 50 字的简短通知，并提示到关联对话查看完整成果；不会朗读整份报告。
 - **语音输入**：只把录音转成输入框文字，确认后再发送，不自动启动数字员工任务。
 - **字幕**：收起时只显示最新一句，不自动轮播；点击“展开字幕”查看本次通话完整内容。
 - **静音与长时间无声**：手动静音立即停止上传；持续约 5 秒没有有效声音时自动进入上游静音状态，恢复说话后自动继续，减少无效音频与异常静音错误。
-- **兼容回退**：实时对话和语音输入分别配置；本机语音通知失败时回退内置提示音，旧配置仍可兼容读取。
+- **兼容回退**：实时对话优先使用 Provider/模型配置，语音输入仍保持独立能力边界；本机语音通知失败时回退内置提示音，旧配置仍可兼容读取。
 
 手机扫码弹窗提供三类入口：HTTP 快速连接用于文字、任务同步和文件上传；HTTPS 安全连接支持麦克风实时语音；首次使用自签名 HTTPS 时按证书安装说明完成信任。HTTP 不会绕过浏览器安全规则开启麦克风。
 
@@ -567,7 +574,7 @@ Workmate 启动时会自动体检本地环境，缺少组件会弹出提示，�
 | 决策守卫 | 决策模型、开关、观察/强制模式、超时、失败策略和 Tool 前置安检 |
 | 搜索 | 联网搜索服务商与端点配置 |
 | 知识库 | 知识库服务商与默认配置 |
-| 语音服务 | 实时对话、独立 ASR、默认语音入口、工作桥、音色和兼容设置 |
+| Provider 与模型 · 实时语音 | 实时对话、独立 ASR、默认语音入口、工作桥、音色和兼容设置 |
 | 账号 | 修改密码、会话安全设置 |
 | 用户 | 本地用户管理（仅管理员） |
 | 用量 | 主模型与应用模型按实际 Provider、模型和能力分别统计 |

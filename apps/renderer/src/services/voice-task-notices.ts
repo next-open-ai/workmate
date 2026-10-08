@@ -10,6 +10,14 @@ export const VOICE_NOTICE_TEXT: Record<VoiceNotice, string> = {
   failed: '这次执行失败了，请在关联对话查看原因。', approval: '这一步需要审批，请在关联对话确认。', cancelled: '工作已停止。',
 };
 
+const claimedTaskNotices = new Set<string>();
+export function claimVoiceTaskNotice(taskId: string, notice: VoiceNotice) {
+  const key = `${taskId}:${notice}`;
+  if (claimedTaskNotices.has(key)) return false;
+  claimedTaskNotices.add(key);
+  return true;
+}
+
 export class VoiceNoticePlayer {
   private audio?: HTMLAudioElement;
   private queue: Array<{ notice: VoiceNotice; text?: string }> = [];
@@ -32,12 +40,16 @@ export class VoiceNoticePlayer {
     else void this.drain();
   }
   enqueue(notice: VoiceNotice) { if (!this.enabled) return; this.queue.push({ notice }); this.queue = this.queue.slice(-12); void this.drain(); }
-  speak(text: string, fallbackNotice: VoiceNotice = 'completed') { if (!this.enabled) return; this.queue.push({ notice: fallbackNotice, text: text.trim().slice(0, 50) }); this.queue = this.queue.slice(-12); void this.drain(); }
+  speak(text: string, fallbackNotice: VoiceNotice = 'completed') {
+    if (!this.enabled) return;
+    this.queue.push({ notice: fallbackNotice, text: text.trim().slice(0, 50) });
+    this.queue = this.queue.slice(-12); void this.drain();
+  }
   private async drain() {
     if (this.playing || this.listening || !this.enabled || !this.queue.length) return;
     this.playing = true;
     const item = this.queue.shift()!;
-    if (item.text && await this.speakText(item.text)) { this.playing = false; void this.drain(); return; }
+    if (item.text && await this.speakSystem(item.text)) { this.playing = false; void this.drain(); return; }
     const notice = item.notice;
     const files = VOICE_NOTICE_FILES[notice]; const index = this.counters.get(notice) || 0;
     this.counters.set(notice, index + 1);
@@ -52,15 +64,25 @@ export class VoiceNoticePlayer {
     });
     this.playing = false; void this.drain();
   }
-  private speakText(text: string) {
+  private speakSystem(text: string) {
     if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return Promise.resolve(false);
     return new Promise<boolean>(resolve => {
-      const utterance = new SpeechSynthesisUtterance(text); utterance.lang = 'zh-CN'; utterance.rate = 1.02; utterance.pitch = 1.04;
-      let settled = false;
-      const finish = (ok: boolean) => { if (settled) return; settled = true; clearTimeout(timeout); utterance.onend = null; utterance.onerror = null; this.release = undefined; resolve(ok); };
-      const timeout = setTimeout(() => { window.speechSynthesis.cancel(); finish(false); }, 12_000);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'zh-CN'; utterance.rate = 1.02; utterance.pitch = 1.04;
+      let settled = false; let started = false;
+      const finish = (played: boolean) => {
+        if (settled) return;
+        settled = true; clearTimeout(startTimeout); clearTimeout(watchdog);
+        utterance.onstart = null; utterance.onend = null; utterance.onerror = null; this.release = undefined; resolve(played);
+      };
+      // Only fall back when speech never started. Once audible, a missing onend
+      // must not cause the fixed WAV to repeat the same completion notice.
+      const startTimeout = setTimeout(() => { if (!started) { window.speechSynthesis.cancel(); finish(false); } }, 2_500);
+      const watchdog = setTimeout(() => finish(started), 20_000);
       this.release = () => { window.speechSynthesis.cancel(); finish(true); };
-      utterance.onend = () => finish(true); utterance.onerror = () => finish(false);
+      utterance.onstart = () => { started = true; };
+      utterance.onend = () => finish(true);
+      utterance.onerror = () => finish(started);
       try { window.speechSynthesis.speak(utterance); } catch { finish(false); }
     });
   }
@@ -82,7 +104,10 @@ export class VoiceTaskMonitor {
         const matching = runs.filter(run => run.id === runId || (turnId && run.turnId === turnId));
         const run = matching.sort((a, b) => b.attemptNo - a.attemptNo || b.startedAt - a.startedAt)[0];
         const notice = run && noticeForRun(run);
-        if (notice && !seen.has(notice)) { seen.add(notice); this.notify(notice); }
+        if (notice && !seen.has(notice)) {
+          seen.add(notice);
+          if (claimVoiceTaskNotice(runId, notice)) this.notify(notice);
+        }
         if (run && ['completed', 'failed', 'cancelled'].includes(run.status)) { this.timers.delete(runId); return; }
       } catch { /* Retry read failures; never infer completion from transport loss. */ }
       if (!this.disposed && Date.now() - began < 86400000) this.timers.set(runId, setTimeout(tick, 2000));

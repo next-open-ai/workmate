@@ -11,7 +11,7 @@ import type {
 import ChatReplyPending from "./ChatReplyPending.vue";
 import ChatImagePreview from './ChatImagePreview.vue';
 import ChatAssetMediaPreview from './ChatAssetMediaPreview.vue';
-import type { ChatFileAttachment, ChatImageAttachment, DurableTask } from '@workmate/contracts';
+import type { ChatFileAttachment, ChatImageAttachment, DurableTask, VoiceWorkResult } from '@workmate/contracts';
 import { deleteChatFile, sessionDurableTasks, updateDurableTaskStatus, uploadChatFile, uploadChatImage } from '../../services/orchestration';
 import ChatAutoScheduleRail from "./ChatAutoScheduleRail.vue";
 import { useModelConfig, type ProviderConfig } from "../../app/model-config";
@@ -114,8 +114,16 @@ async function closeRealtimeVoice() {
   voiceCaptions.value = [];
   await refreshVoiceConversation();
 }
-async function voiceWorkUpdated(id: string, title: string) {
-  if (props.conversation?.serverSessionId !== id) await props.followMobileSession?.(id, title);
+const activeVoiceWork = ref<VoiceWorkResult | null>(null);
+const voiceWorkBusy = computed(() => {
+  const status = activeVoiceWork.value?.status;
+  return status === 'accepted' || status === 'queued' || status === 'running' || status === 'waiting-approval' || status === 'cancellation_requested';
+});
+async function voiceWorkUpdated(result: VoiceWorkResult) {
+  const id = result.conversationId;
+  if (!id) return;
+  activeVoiceWork.value = result;
+  if (props.conversation?.serverSessionId !== id) await props.followMobileSession?.(id, result.title || '语音工作');
   await refreshVoiceConversation();
 }
 const voiceInputOpen = ref(false);
@@ -130,7 +138,8 @@ const voiceCommandPending = ref(false);
 const voiceNoticePlayer = new VoiceNoticePlayer(() => notify.info('语音播放不可用，请查看任务通知。'));
 const voiceTaskMonitor = new VoiceTaskMonitor(notice => {
   notify.info(VOICE_NOTICE_TEXT[notice]);
-  voiceNoticePlayer.enqueue(notice);
+  if (notice === 'completed') voiceNoticePlayer.speak(VOICE_NOTICE_TEXT.completed, 'completed');
+  else voiceNoticePlayer.enqueue(notice);
 });
 const voiceCommandCandidate = new VoiceCommandCandidate(active => { voiceCommandPending.value = active; }, () => {
   if (canExecuteVoiceCommand()) void submit();
@@ -404,7 +413,7 @@ let mobilePullTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncTimer: ReturnType<typeof setInterval> | undefined;
 let serverSyncBusy = false;
 /** Local submit flag or workspace-level run (survives remount during auto-schedule). */
-const inputBusy = computed(() => sending.value || chatBusy.value || uploadingRecording.value || uploadingImages.value || uploadingFiles.value);
+const inputBusy = computed(() => sending.value || chatBusy.value || voiceWorkBusy.value || uploadingRecording.value || uploadingImages.value || uploadingFiles.value);
 watch([inputBusy, autoSchedule, collaboratorIds], () => voiceCommandCandidate.cancel(), { deep: true });
 const expandedBashActivities = ref<Set<string>>(new Set());
 function bashActivityKey(activity: ToolActivity, index: number) {
@@ -933,8 +942,11 @@ const pendingAssistantId = computed(() => {
   if (!inputBusy.value || !props.conversation?.messages.length) return null;
   const last =
     props.conversation.messages[props.conversation.messages.length - 1];
-  // Hide as soon as any visible progress arrives (answer text, reasoning, or tool UI).
-  if (last.role !== "assistant" || hasAssistantVisibleProgress(last)) return null;
+  // Keep a visible continuation state after an introductory sentence. Some
+  // providers spend a long time preparing a tool call after streaming that
+  // sentence, and previously the UI looked idle until every tool result arrived.
+  // A running tool has its own activity state, so do not duplicate it here.
+  if (last.role !== "assistant" || hasRunningActivities(last.activities)) return null;
   return last.id;
 });
 
@@ -953,9 +965,7 @@ const showStandalonePending = computed(() => {
 
 function isAwaitingReply(message: Message) {
   if (message.role !== "assistant" || pendingAssistantId.value !== message.id) return false;
-  // Render-time guard: never keep the waiting bar once this message already
-  // shows progress (also covers stale computed after raw-object stream writes).
-  return !hasAssistantVisibleProgress(message);
+  return !hasRunningActivities(message.activities);
 }
 
 const messageScrollRef = ref<HTMLElement | null>(null);
@@ -1273,6 +1283,7 @@ onBeforeUnmount(() => {
               v-if="isAwaitingReply(message)"
               :accent="employee.color"
               :started-at="message.startedAt"
+              :has-progress="hasAssistantVisibleProgress(message)"
             />
             <details
               v-if="
@@ -1592,12 +1603,12 @@ onBeforeUnmount(() => {
 
     <div class="mx-auto mb-7 w-full max-w-[1560px] shrink-0 px-6 lg:px-10">
       <form
-        class="relative grid gap-3 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-3 shadow-lg transition focus-within:border-[var(--accent)]/35 focus-within:shadow-xl"
+        class="relative grid min-w-0 gap-3 rounded-[19px] border border-[var(--border)] bg-[var(--surface)] p-3 shadow-lg transition focus-within:border-[var(--accent)]/35 focus-within:shadow-xl"
         @submit.prevent="submit"
         @dragover.prevent
         @drop="dropAttachments"
       >
-        <RealtimeVoiceDialog v-if="realtimeVoiceOpen" inline auto-start :caption-history="voiceCaptions" :conversation-id="voiceConversationId" @close="closeRealtimeVoice" @captions="updateVoiceCaption" @work-updated="voiceWorkUpdated" @open-work="(id, title) => props.followMobileSession?.(id, title)" />
+        <RealtimeVoiceDialog v-if="realtimeVoiceOpen" class="min-w-0 max-w-full overflow-hidden" inline auto-start :caption-history="voiceCaptions" :conversation-id="voiceConversationId" @close="closeRealtimeVoice" @captions="updateVoiceCaption" @work-updated="voiceWorkUpdated" @open-work="(id, title) => props.followMobileSession?.(id, title)" />
         <VoiceInputDialog v-if="voiceInputOpen" inline auto-start @close="closeVoiceInput" @session-start="beginVoiceInput" @preview="previewVoiceText" @busy="voiceInputBusy = $event" />
         <div v-if="voiceMode === 'input'" class="flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--muted)]">
           <label class="inline-flex items-center gap-1.5"><input v-model="voiceCommandEnabled" type="checkbox" :disabled="autoSchedule || collaboratorIds.length > 0" />口令执行</label>
@@ -1850,7 +1861,7 @@ onBeforeUnmount(() => {
               {{ item.providerLabel }} · {{ item.chatModel }}
             </option></select
           >          <button
-            v-if="inputBusy"
+            v-if="inputBusy && !voiceWorkBusy"
             type="button"
             class="ml-auto grid h-9 w-9 place-items-center rounded-[10px] bg-[var(--danger,#c0392b)] text-sm font-semibold text-white"
             :title="t('chat.stop')"
@@ -1858,6 +1869,11 @@ onBeforeUnmount(() => {
           >
             ■
           </button>
+          <span
+            v-else-if="voiceWorkBusy"
+            class="ml-auto inline-flex h-9 items-center gap-2 rounded-[10px] bg-[var(--surface-muted)] px-3 text-[11px] font-semibold text-[var(--muted)]"
+            title="语音关联工作执行期间，输入区暂时锁定"
+          ><span class="h-2 w-2 animate-pulse rounded-full bg-[var(--accent)]"></span>工作执行中</span>
           <button
             v-else
             type="submit"

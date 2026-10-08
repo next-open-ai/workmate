@@ -29,6 +29,13 @@ const executablePattern = /^scripts\/.+\.(sh|js|mjs|cjs|py)$/i;
 /** Canonical directory for finished business deliverables inside a run workspace. */
 export const WORKSPACE_OUTPUT_DIR = 'output';
 
+/** Keep enough generated source in the tool result for the final chat answer. */
+export function pdfChatPreview(content: string, maxChars = 2_400) {
+  const normalized = content.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
 /** Process / cache directories — never auto-archived or promoted. */
 const PROCESS_ONLY_DIRS = new Set(['tools', 'scripts', 'tmp', 'deps', '.python-packages', '__pycache__', 'node_modules']);
 
@@ -195,7 +202,7 @@ async function listSkillFiles(root: string, folder = root, depth = 0, entries: s
 /**
  * List finished deliverables under output/ only.
  */
-async function listOutputDeliverables(root: string, folder = path.join(root, WORKSPACE_OUTPUT_DIR), depth = 0, entries: string[] = []): Promise<string[]> {
+export async function listOutputDeliverables(root: string, folder = path.join(root, WORKSPACE_OUTPUT_DIR), depth = 0, entries: string[] = []): Promise<string[]> {
   if (depth > 5 || entries.length >= 40) return entries;
   let listing: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
   try {
@@ -297,6 +304,34 @@ export async function harvestWorkspaceDeliverables(
     for (const item of await listOutputDeliverables(root).catch(() => [])) before.add(item);
   }
   return collectScriptDeliverables(root, before, startedAtMs);
+}
+
+/**
+ * Finalize the explicit conversation delivery boundary at successful run end.
+ *
+ * Writing a file under output/ is itself a declaration of delivery intent. The
+ * explicit commit tool can publish it earlier, but run completion must not
+ * depend on a probabilistic second model action. Unlike the legacy harvester,
+ * this function never promotes files from the workspace root.
+ */
+export async function finalizeOutputDeliverables(
+  workspaceRoot: string,
+  options: { startedAtMs: number; before: Iterable<string> },
+): Promise<string[]> {
+  const root = path.resolve(workspaceRoot);
+  const before = new Set(options.before);
+  const finalized: string[] = [];
+  for (const relative of await listOutputDeliverables(root).catch(() => [])) {
+    const absolute = path.join(root, ...relative.split('/'));
+    let info: { mtimeMs: number };
+    try {
+      info = await stat(absolute);
+    } catch {
+      continue;
+    }
+    if (!before.has(relative) || info.mtimeMs >= options.startedAtMs - 1_000) finalized.push(relative);
+  }
+  return finalized;
 }
 
 function approvedSkillRoot(skill: AgentSkillRuntime) {
@@ -1052,7 +1087,18 @@ export function createSkillExecutionTools(input: {
         try {
           const bytes = await readFile(outputFile);
           if (bytes.length < 512 || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('invalid PDF header');
-          return { ok: true, path: outputRel, bytes: bytes.length, artifacts: [outputRel], installedDependency, stdout: result.stdout, stderr: result.stderr };
+          return {
+            ok: true,
+            path: outputRel,
+            bytes: bytes.length,
+            title: title.trim(),
+            contentPreview: pdfChatPreview(content),
+            presentationHint: '最终回答除文件名外，应给出结构化内容摘要；行程类至少列出逐日核心安排。',
+            artifacts: [outputRel],
+            installedDependency,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          };
         } catch {
           return { ok: false, error: 'PDF renderer completed but did not produce a valid PDF file.', artifacts: [] };
         }

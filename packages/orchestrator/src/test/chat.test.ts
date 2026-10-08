@@ -57,6 +57,29 @@ test('application-model activities persist their elapsed duration', async () => 
   }
 });
 
+test('a failed run keeps partial model text and exposes the terminal error in chat', async () => {
+  const runner: AgentRunner = {
+    async start(request, emit) {
+      const runId = request.runId ?? 'failed-run';
+      emit({ type: 'run.started', runId });
+      emit({ type: 'message.delta', runId, text: '我来重新生成 PDF。' });
+      emit({ type: 'run.failed', runId, message: '模型请求被上游服务中断。' });
+    },
+  };
+  const orch = Orchestrator.memory({ runner });
+  try {
+    const session = await orch.chat.createChatSession();
+    const sent = await orch.chat.sendUserMessage(session.id, { content: '生成 PDF', context: runContext() });
+    await waitFor(async () => (await orch.chat.getRun(sent.runId))?.status === 'failed');
+    await waitFor(async () => (await orch.chat.getChatSession(session.id))?.messages.some((item) => item.runId === sent.runId) === true);
+    const saved = await orch.chat.getChatSession(session.id);
+    const reply = saved?.messages.find((item) => item.runId === sent.runId)?.content ?? '';
+    assert.match(reply, /我来重新生成 PDF/);
+    assert.match(reply, /本次执行未完成/);
+    assert.match(reply, /上游服务中断/);
+  } finally { await orch.close(); }
+});
+
 test('durable chat tasks receive a long-run budget while ordinary chat keeps its configured timeout', async () => {
   const observed: number[] = [];
   const runner: AgentRunner = {

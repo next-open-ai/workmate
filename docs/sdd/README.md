@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | 统一 Agent Tool Interface | [features/unified-tool-interface/README.md](features/unified-tool-interface/README.md) | 已同步实现，待 Workmate 真实引擎验收 |
 | 通用应用模型机制 | [features/application-model-capabilities/README.md](features/application-model-capabilities/README.md) | 已同步实现，待真实 Provider 验收 |
+| 统一 Provider 连接 | [requirements](features/unified-provider-connections-v1/requirements.md) | 厂商模板、服务端点、兼容迁移已实现；待真实阿里/火山/智谱账号验收 |
 | 应用模型耗时与进度 | [requirements](features/application-model-timing/requirements.md) | 已形成需求与回归规格 |
 | 对话多媒体资产预览 | [M1](features/assets/M1-chat-media-preview.md) | 图片缩略图、音频播放等已接入 |
 | 对话附件 | [requirements](features/chat-attachments/requirements.md) | 已接入受控附件与资产晋升 |

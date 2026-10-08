@@ -1,5 +1,5 @@
 import type { ChatRunContext, KeyValueStore, ProjectTask } from '@workmate/orchestrator';
-import { ProviderIdSchema, resolveProviderBaseUrl } from '@workmate/contracts';
+import { ProviderIdSchema, resolveProviderServiceEndpoint } from '@workmate/contracts';
 import type { DecisionGuardPolicy, DecisionRuntimeConfig, ModelCapabilityRuntime } from '@workmate/contracts';
 import { ensureModelSecrets } from './secrets.js';
 
@@ -55,7 +55,7 @@ interface PrefsRow {
 }
 interface ModelSettings {
   decisionRuntime?: DecisionGuardPolicy & Partial<Pick<DecisionRuntimeConfig, 'provider' | 'protocol' | 'baseUrl' | 'apiKey' | 'model'>>;
-  providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; workspaceId?: string; appId?: string; apiSecret?: string; apiKey?: string; disableThinking?: boolean }>;
+  providerInstances?: Array<{ id?: string; type?: string; name?: string; baseUrl?: string; workspaceId?: string; service?: 'language' | 'speech' | 'realtime' | 'unified'; endpoints?: Record<string, string>; appId?: string; apiSecret?: string; apiKey?: string; disableThinking?: boolean }>;
   models?: Array<{
     supportsVision?: boolean;
     id?: string;
@@ -98,7 +98,7 @@ function decisionRuntimeFor(raw: unknown): DecisionRuntimeConfig | undefined {
       applicationModelId: model.id,
       provider: provider.name?.trim() || provider.type,
       protocol: 'system-one-v1',
-      baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+      baseUrl: resolveProviderServiceEndpoint({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId, service: provider.service, endpoints: provider.endpoints, endpoint: 'chat' }),
       apiKey: provider.apiKey || '',
       model: model.modelId.trim(),
     };
@@ -132,7 +132,7 @@ function modelCapabilitiesFor(employeeId: string, raw: unknown, enabled = true):
       capability: capability as ModelCapabilityRuntime['capability'],
       provider: provider.type as ModelCapabilityRuntime['provider'],
       providerLabel: provider.name,
-      baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+      baseUrl: resolveProviderServiceEndpoint({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId, service: provider.service, endpoints: provider.endpoints, endpoint: capability === 'image' ? 'image' : capability === 'embedding' ? 'embedding' : capability === 'asr' ? 'asr' : capability === 'tts' ? 'tts' : 'chat' }),
       apiKey: provider.apiKey || (provider.type === 'ollama' ? 'ollama' : ''),
       ...(provider.appId ? { appId: provider.appId } : {}),
       ...(provider.apiSecret ? { apiSecret: provider.apiSecret } : {}),
@@ -243,7 +243,7 @@ function modelFor(employeeId: string, prefs: PrefsRow, raw: unknown): ChatRunCon
   const embeddingFields = embedPick?.modelId?.trim() && embedInstance
     ? {
         embeddingModel: embedPick.modelId.trim(),
-        ...(embedInstance.baseUrl?.trim() ? { embeddingBaseUrl: embedInstance.baseUrl.trim() } : {}),
+        ...(embedInstance.baseUrl?.trim() ? { embeddingBaseUrl: resolveProviderServiceEndpoint({ provider: embedInstance.type || '', baseUrl: embedInstance.baseUrl, workspaceId: embedInstance.workspaceId, service: embedInstance.service, endpoints: embedInstance.endpoints, endpoint: 'embedding' }) } : {}),
         ...(embedInstance.apiKey?.trim() || embedInstance.type === 'ollama'
           ? { embeddingApiKey: embedInstance.apiKey?.trim() || 'ollama' }
           : {}),
@@ -254,7 +254,7 @@ function modelFor(employeeId: string, prefs: PrefsRow, raw: unknown): ChatRunCon
   if (pick && provider && PROVIDER_IDS.has(provider)) {
     return {
       provider: provider as ChatRunContext['model']['provider'],
-      ...(instance?.baseUrl?.trim() ? { baseUrl: instance.baseUrl.trim() } : {}),
+      ...(instance?.baseUrl?.trim() ? { baseUrl: resolveProviderServiceEndpoint({ provider, baseUrl: instance.baseUrl, workspaceId: instance.workspaceId, service: instance.service, endpoints: instance.endpoints, endpoint: 'chat' }) } : {}),
       chatModel: pick.modelId || pick.id || '',
       supportsVision: Boolean(pick.supportsVision),
       ...(instance?.disableThinking ? { disableThinking: true } : {}),
@@ -305,9 +305,27 @@ function searchProvidersFor(prefs: PrefsRow, raw: unknown): ChatRunContext['sear
     }));
 }
 
-async function skillRuntimeFor(store: KeyValueStore, task: ProjectTask, tier: string): Promise<ChatRunContext['skills']> {
-  const skills = rows(await kvJson(store, SKILLS_KEY)) as SkillRow[];
-  const policies = rows(await kvJson(store, POLICIES_KEY)) as PolicyRow[];
+async function scopedRows(
+  store: KeyValueStore,
+  key: string,
+  ownerUserId?: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const scoped = ownerUserId?.trim() ? rows(await kvJson(store, `user:${ownerUserId.trim()}:${key}`)) : [];
+  return scoped.length > 0 ? scoped : rows(await kvJson(store, key));
+}
+
+/** Resolve the exact employee Skill grants used by server-originated runs. */
+export async function resolveSkillRuntimeFor(
+  store: KeyValueStore,
+  task: ProjectTask,
+  tier: string,
+  ownerUserId?: string | null,
+): Promise<ChatRunContext['skills']> {
+  // Desktop storage is forwarded to domain KV under a per-user namespace.
+  // Reading only the legacy unscoped keys made voice/mobile runs silently lose
+  // every employee-associated Skill while ordinary desktop runs still had it.
+  const skills = await scopedRows(store, SKILLS_KEY, ownerUserId) as SkillRow[];
+  const policies = await scopedRows(store, POLICIES_KEY, ownerUserId) as PolicyRow[];
   const policiesFor = policies.filter((policy) => policy.employeeId === task.employeeId && policy.mode && policy.mode !== 'disabled');
   const selectedIds = new Set(task.skillIds ?? []);
   const runtime: ChatRunContext['skills'] = [];
@@ -500,7 +518,7 @@ export async function resolveTaskContext(
   return {
     profile: profileFor(task.employeeId, employees, overrides),
     model: enableSearch ? { ...model, enableSearch: true } : model,
-    skills: await skillRuntimeFor(store, task, tier),
+    skills: await resolveSkillRuntimeFor(store, task, tier, ownerUserId),
     searchProviders: enableSearch ? [] : searchProvidersFor(prefs, secrets.search),
     mcpConnections: await mcpConnectionsFor(store, prefs, ownerUserId),
     knowledgeBases: await knowledgeBasesFor(store, prefs, secrets.model),

@@ -13,6 +13,9 @@ test('VWB-R8: completion notice is concise and terminal-only', () => {
   assert.equal(completionNotice({ ...base, status: 'completed' })?.text, notice?.text);
   assert.equal(completionNotice({ ...base, status: 'running' }), null);
   assert.equal(completionNotice({ ...base, ok: false, status: 'completed' }), null);
+  const noArtifact = completionNotice({ ...base, status: 'completed', artifactCount: 0 });
+  assert.equal(noArtifact?.text, '测试已完成，请查看关联对话。');
+  assert.ok(!noArtifact?.text.includes('成果'));
 });
 async function waitStatus(bridge: VoiceWorkBridge, id: string, expected: string) {
   for (let i = 0; i < 100; i++) { const result = await bridge.status(id); if (result.status === expected) return result; await new Promise((resolve) => setTimeout(resolve, 10)); }

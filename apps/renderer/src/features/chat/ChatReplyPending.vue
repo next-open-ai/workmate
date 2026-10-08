@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from '../../app/i18n';
 
-const props = defineProps<{ accent?: string; startedAt?: number }>();
+const props = defineProps<{ accent?: string; startedAt?: number; hasProgress?: boolean }>();
 const { t } = useI18n();
 
 const now = ref(Date.now());
@@ -21,6 +21,7 @@ const elapsedMs = computed(() => Math.max(0, now.value - origin.value));
 const elapsedLabel = computed(() => formatElapsed(elapsedMs.value));
 const phase = computed(() => {
   const seconds = elapsedMs.value / 1000;
+  if (props.hasProgress) return seconds < 8 ? '正在整理任务并准备下一步操作' : '模型仍在处理，完成后会自动更新';
   if (seconds < 2) return '正在准备智能体资源';
   if (seconds < 8) return '正在连接模型服务';
   return '正在等待模型返回首字';
@@ -56,7 +57,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="min-w-0 flex-1">
         <div class="flex items-baseline justify-between gap-3">
-          <p class="text-sm font-semibold tracking-tight text-[var(--text)]">{{ t('chat.generating') }}</p>
+          <p class="text-sm font-semibold tracking-tight text-[var(--text)]">{{ hasProgress ? '正在继续处理任务' : t('chat.generating') }}</p>
           <p class="shrink-0 tabular-nums text-xs font-medium text-[var(--muted)]">
             {{ t('chat.waitingElapsed', { time: elapsedLabel }) }}
           </p>

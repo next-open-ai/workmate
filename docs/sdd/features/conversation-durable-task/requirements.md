@@ -15,6 +15,7 @@
 - DT-11: “Continue” on the task card must create a visible continuation message and a new run; “Pause” must cancel the active run instead of only changing metadata.
 - DT-12: Changes made to restored files under `.task/` must be captured back into the working set without losing source-file provenance.
 - DT-13: The platform and new digital employees default to a 30-minute wall-clock ceiling; durable-task attempts receive at least that budget, while other explicit employee timeout values remain supported. Timeout cancellation must not be reported as a user action.
+- DT-14: One provider turn may remain silent for up to 180 seconds before the stream-idle guard aborts it. Any provider event re-arms this guard. This per-turn guard is independent of, and must never extend beyond, the 30-minute whole-run ceiling.
 
 ## Non-functional
 
@@ -23,3 +24,14 @@
 - DT-N03: Capture is bounded by file count and total bytes; excluded caches and dependencies are never copied.
 - DT-N04: Orchestrator remains the single writer for durable-task state.
 - DT-N05: Failure to persist a required task source must stop that run with a clear error instead of silently creating a non-resumable task.
+# DT-15 — 工具调用前的持续可见状态
+
+- 数字员工已输出引导语、但仍在生成工具调用或后续结论时，界面必须继续显示运行状态与耗时。
+- 工具开始后，以工具活动状态替代通用等待状态，避免重复进度提示。
+- 运行结束后等待状态必须立即消失。
+
+# DT-16 — 文档交付的聊天摘要
+
+- 文档生成工具成功后，完整正文进入交付文件，同时向最终模型回合保留有界内容预览。
+- 最终聊天回答必须展示可直接阅读的结构化摘要；行程类至少列出逐日核心安排，不得只报告文件名。
+- 长文无需在聊天中逐字复制，且不得暴露内部工作区路径。

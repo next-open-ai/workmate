@@ -21,6 +21,9 @@ const result = await build({
     builder.onResolve({ filter: /services\/voice-task-notices$/ }, () => ({ path: 'voice-notices', namespace: 'notice-mock' }));
     builder.onLoad({ filter: /.*/, namespace: 'mock' }, () => ({ loader: 'js', contents: `
       const mock=globalThis.__voiceComposerMock;
+      export const REALTIME_AUDIO_BATCH_BYTES=3200;
+      export const REALTIME_AUDIO_PUMP_INTERVAL_MS=40;
+      export const RealtimeVoiceUsageSchema={safeParse(value){return {success:true,data:value}}};
       export async function realtimeVoiceCapabilities(){return {voiceMode:'input',asr:{enabled:true},realtime:{enabled:true}};}
       export async function asrCommand(type,input){mock.request(type,input);return type==='session'?{session_id:'asr-test'}:{};}
       export async function createRealtimeVoiceSession(input){mock.request('realtime-session',input);return {sessionId:'realtime-test'};}
@@ -31,7 +34,7 @@ const result = await build({
       export async function consumeAsrEvents(id,signal,handler){mock.asr=handler;handler({type:'connected'});await new Promise(r=>signal.addEventListener('abort',r,{once:true}));}
       export async function consumeRealtimeVoiceEvents(id,signal,handler){mock.realtime=handler;handler({type:'local.connected'});await new Promise(r=>signal.addEventListener('abort',r,{once:true}));}
     ` }));
-    builder.onLoad({ filter: /.*/, namespace: 'notice-mock' }, () => ({ loader: 'js', contents: `const mock=globalThis.__voiceComposerMock;export class VoiceNoticePlayer{unlock(){} enqueue(value){mock.notices.push(value)} speak(text,value){mock.notices.push({text,value})} stop(){}}` }));
+    builder.onLoad({ filter: /.*/, namespace: 'notice-mock' }, () => ({ loader: 'js', contents: `const mock=globalThis.__voiceComposerMock;const claimed=new Set();export function claimVoiceTaskNotice(id,type){const key=id+':'+type;if(claimed.has(key))return false;claimed.add(key);return true}export class VoiceNoticePlayer{unlock(){} enqueue(value){mock.notices.push(value)} speak(text,value){mock.notices.push({text,value})} stop(){}}` }));
     builder.onLoad({ filter: /\.vue$/ }, args => {
       const { descriptor } = parse(fs.readFileSync(args.path, 'utf8'), { filename: args.path });
       const script = compileScript(descriptor, { id: args.path, inlineTemplate: true });
@@ -50,6 +53,9 @@ assert.equal(projection.update('用户手动修改', '迟到结果'), '用户手
 assert.deepEqual(ui.voiceEnvelope(new Float32Array(1024)), Array(28).fill(0));
 assert.ok(ui.voiceEnvelope(new Float32Array(1024).fill(1)).every(v => v === 1));
 assert.ok(ui.voiceEnvelope([NaN, Infinity]).every(Number.isFinite));
+assert.equal(ui.hasRealtimeVoiceActivity(0.0001), false, 'idle microphone noise must not hold a turn open');
+assert.equal(ui.hasRealtimeVoiceActivity(0.0029), false);
+assert.equal(ui.hasRealtimeVoiceActivity(0.003), true, 'audible speech opens the realtime gate');
 let rows = ui.mergeVoiceCaption([], { id: 'a', question: '你好', answer: '' });
 rows = ui.mergeVoiceCaption(rows, { id: 'a', question: '你好啊', answer: '你好' });
 assert.equal(rows.length, 1); assert.equal(rows[0].question, '你好啊');
@@ -144,8 +150,11 @@ const captions = [];
 const realtime = mount(ui.Realtime, { inline: true, autoStart: true, conversationId: 'test-conversation', onCaptions: value => captions.push(value) });
 await flush();
 assert.ok(requests.some(r => r.type === 'realtime-session' && r.input.conversationId === 'test-conversation'));
-mock.realtime({ type: 'local.work_notice', notice: { type: 'completed', taskId: '11111111-1111-4111-8111-111111111111', text: '任务舱回传：行程规划完成，1份成果已就位。你的判断很准！' } }); await flush();
-assert.deepEqual(mock.notices, [{ text: '任务舱回传：行程规划完成，1份成果已就位。你的判断很准！', value: 'completed' }], 'completed work emits one platform voice notice');
+mock.realtime({ type: 'local.work_notice', notice: { type: 'completed', taskId: '11111111-1111-4111-8111-111111111111', text: '任务舱回传：行程规划完成，1份成果已就位。你的判断很准！', delivery: 'provider' } }); await flush();
+assert.deepEqual(mock.notices, [], 'provider-owned completion does not invoke browser or fixed local speech');
+mock.realtime({ type: 'local.work_notice', notice: { type: 'completed', taskId: '22222222-2222-4222-8222-222222222222', text: '工作已完成。', delivery: 'fallback' } }); await flush();
+mock.realtime({ type: 'local.work_notice', notice: { type: 'completed', taskId: '22222222-2222-4222-8222-222222222222', text: '工作已完成。', delivery: 'fallback' } }); await flush();
+assert.deepEqual(mock.notices, ['completed'], 'fallback completion is fixed-audio only and deduplicated by task');
 for (const event of [{ type: 'conversation.item.input_audio_transcription.started' }, { type: 'conversation.item.input_audio_transcription.completed', text: '帮我写报告' }, { type: 'response.output_text.delta', text: '工作已接受' }]) { mock.realtime({ type: 'upstream.event', event }); await flush(); }
 assert.equal(captions.at(-1).question, '帮我写报告'); assert.equal(captions.at(-1).answer, '工作已接受');
 assert.ok(find(realtime.root, n => n.props['aria-label'] === '语音字幕'), 'realtime captions render inside the dock');
@@ -180,7 +189,7 @@ const voiceEnv = {
   refreshVoiceConversation: async () => {}, mergeVoiceCaption: ui.mergeVoiceCaption, notify: { error: error => { throw error; } },
   setInterval: () => 1, clearInterval() {},
 };
-const closeSource = chatSource.slice(chatSource.indexOf('async function closeRealtimeVoice()'), chatSource.indexOf('async function voiceWorkUpdated('));
+const closeSource = chatSource.slice(chatSource.indexOf('async function closeRealtimeVoice()'), chatSource.indexOf('const activeVoiceWork'));
 const toggleSource = chatSource.slice(chatSource.indexOf('async function toggleVoice()'), chatSource.indexOf('function previewVoiceText('));
 const captionSource = chatSource.slice(chatSource.indexOf('function updateVoiceCaption('), chatSource.indexOf('watch(() => props.conversation?.id'));
 const voiceFunctions = viteRequire('esbuild').transformSync('let voiceOpenGeneration = 0; let voiceRefreshTimer;\n' + closeSource + toggleSource + previewSource + captionSource, { loader: 'ts', target: 'es2022' }).code;
@@ -230,6 +239,23 @@ await flush();
 const preview = () => find(strip.root, n => n.props.class === 'voice-caption-preview').text;
 const expand = () => find(strip.root, n => n.props['aria-controls']);
 assert.equal(preview(), '回复二');
+const captionComponentSource = fs.readFileSync('apps/renderer/src/features/chat/VoiceCaptionStrip.vue', 'utf8');
+const controlSource = fs.readFileSync('apps/renderer/src/features/chat/VoiceControlBar.vue', 'utf8');
+assert.match(captionComponentSource, /\.voice-captions\{width:100%;max-width:100%;min-width:0;overflow:hidden/);
+assert.match(captionComponentSource, /\.voice-caption-preview\{display:block;flex:1 1 0;min-width:0;max-width:100%;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap/);
+assert.match(controlSource, /\.voice-dock\{width:100%;max-width:100%;min-width:0;overflow:hidden/);
+const realtimeSource = fs.readFileSync('apps/renderer/src/features/chat/RealtimeVoiceDialog.vue', 'utf8');
+const noticeSource = fs.readFileSync('apps/renderer/src/services/voice-task-notices.ts', 'utf8');
+assert.match(realtimeSource, /class="voice-inline-root"/);
+assert.match(realtimeSource, /\.voice-inline-root\{box-sizing:border-box;width:100%;max-width:100%;min-width:0;overflow:hidden/);
+assert.match(realtimeSource, /upstreamTurnOpen && !turnCommitSent && !turnCommitPending/);
+assert.match(realtimeSource, /claimVoiceTaskNotice\(parsed\.data\.taskId/);
+assert.doesNotMatch(realtimeSource, /speechSynthesis|SpeechSynthesisUtterance/);
+assert.match(noticeSource, /utterance\.onstart = \(\) => \{ started = true/);
+assert.match(noticeSource, /if \(!started\).*finish\(false\)/);
+assert.match(noticeSource, /utterance\.onerror = \(\) => finish\(started\)/);
+assert.match(chatSource, /relative grid min-w-0 gap-3/);
+assert.match(chatSource, /notice === 'completed'.*voiceNoticePlayer\.speak\(VOICE_NOTICE_TEXT\.completed/s);
 assert.equal(find(strip.root, n => n.props['aria-label'] === '上一条字幕'), undefined);
 assert.equal(find(strip.root, n => n.props['aria-label'] === '下一条字幕'), undefined);
 expand().props.onClick(); await flush(); assert.equal(expand().props['aria-expanded'], true);

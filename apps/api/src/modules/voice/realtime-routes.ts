@@ -3,22 +3,22 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import WebSocket from 'ws';
 import { VoiceSessionCreateSchema } from '@workmate/contracts';
 import { getOrchestrator } from '../orchestration/routes.js';
-import { completionNotice, VoiceWorkBridge, VOICE_WORK_INSTRUCTIONS, VOICE_WORK_TOOLS } from './work-bridge.js';
+import { completionNotice, VoiceWorkBridge } from './work-bridge.js';
 import {
   DEFAULT_REALTIME_VOICE_ID,
   DEFAULT_REALTIME_VOICE_INSTRUCTIONS,
   DEFAULT_REALTIME_VOICE_MODEL,
   readRealtimeConversationSettings,
   resolveRealtimeKey,
+  resolveRealtimeRuntime,
 } from './realtime-settings.js';
 import { publicVoiceInputSettings } from './asr-settings.js';
 import { readVoicePreferences } from './voice-preferences.js';
+import { realtimeProviderAdapter, RealtimeUsageMeter, type RealtimeFunctionResult, type RealtimeProtocolConfig } from './realtime-provider-adapters.js';
 
 type VoiceEvent = { type: string; ts: number; event?: Record<string, unknown>; message?: string; [key: string]: unknown };
 type Owner = { orgId: string; userId: string };
 
-const UPSTREAM_URL = process.env.WORKMATE_VOLCENGINE_REALTIME_URL?.trim()
-  || 'wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue';
 const MAX_SESSIONS = 20;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const VOICE_CLONE_TRAIN_URL = 'https://openspeech.bytedance.com/api/v3/tts/voice_clone';
@@ -41,11 +41,17 @@ export class RealtimeVoiceSession {
   private workTimer: ReturnType<typeof setInterval> | undefined;
   private pollingWork = false;
   private workStates = new Map<string, string>();
+  private adapter;
+  private usageMeter;
 
   constructor(readonly owner: Owner, private config: Record<string, unknown>, apiKey: string) {
+    this.adapter = realtimeProviderAdapter(String(config.provider || 'volcengine'));
+    this.usageMeter = new RealtimeUsageMeter(this.adapter.id, String(config.model || DEFAULT_REALTIME_VOICE_MODEL), this.createdAt);
     if (this.config.workLinkEnabled) {
       this.workBridge = new VoiceWorkBridge(getOrchestrator(), owner, () => Boolean(this.config.workLinkEnabled) && readRealtimeConversationSettings().workLinkEnabled, this.config.conversationId as string | undefined);
-      this.workTimer = setInterval(() => { void this.pollWork(); }, 2_000);
+      // Completion notices are user-facing realtime events. A short bounded
+      // poll keeps them prompt without coupling task lifetime to the voice UI.
+      this.workTimer = setInterval(() => { void this.pollWork(); }, 600);
       this.workTimer.unref();
     }
     this.readyPromise = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -63,14 +69,15 @@ export class RealtimeVoiceSession {
   }
 
   private connect(apiKey: string) {
-    const socket = new WebSocket(UPSTREAM_URL, {
-      headers: { 'X-Api-Key': apiKey, 'X-Api-Connect-Id': this.id },
+    const upstreamUrl = this.adapter.connectionUrl(this.protocolConfig());
+    const socket = new WebSocket(upstreamUrl, {
+      headers: this.adapter.headers(apiKey, this.id),
       handshakeTimeout: 15_000,
     });
     this.socket = socket;
     socket.once('open', () => {
-      this.emit({ type: 'local.connected', session_id: this.id, upstream: UPSTREAM_URL });
-      const create = this.sessionCreatePayload();
+      this.emit({ type: 'local.connected', session_id: this.id, upstream: upstreamUrl });
+      const create = this.adapter.initialEvent(this.protocolConfig());
       this.emit({ type: 'local.session_create', event: create });
       socket.send(JSON.stringify(create));
       this.resolveReady();
@@ -78,21 +85,22 @@ export class RealtimeVoiceSession {
     socket.on('message', (raw) => {
       try {
         const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+        const usage = this.usageMeter.record(event); if (usage) this.emit({ type: 'local.usage', usage });
         this.emit({ type: 'upstream.event', event });
-        if (event.type === 'response.function_call_arguments.done') void this.handleWorkCalls(event);
+        if (this.adapter.functionCalls(event).length) void this.handleWorkCalls(event);
         if (event.type === 'session.closed' || event.type === 'error') this.close(false);
       } catch {
-        this.emit({ type: 'local.error', message: '火山实时语音返回了无法解析的事件。' });
+        this.emit({ type: 'local.error', message: `${this.adapter.label}返回了无法解析的事件。` });
       }
     });
     socket.once('unexpected-response', (_request, response) => {
       const status = `HTTP ${response.statusCode} ${response.statusMessage || ''}`.trim();
-      const error = new Error(`火山实时语音握手失败：${status}`);
+      const error = new Error(`${this.adapter.label}握手失败：${status}`);
       this.rejectReady(error); this.emit({ type: 'local.error', message: error.message, status });
     });
     socket.once('error', (cause) => {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      this.rejectReady(error); this.emit({ type: 'local.error', message: `火山实时语音连接失败：${error.message}` });
+      this.rejectReady(error); this.emit({ type: 'local.error', message: `${this.adapter.label}连接失败：${error.message}` });
     });
     socket.once('close', () => {
       clearInterval(this.workTimer);
@@ -100,46 +108,24 @@ export class RealtimeVoiceSession {
     });
   }
 
-  private sessionCreatePayload() {
-    const session: Record<string, unknown> = {
-      model: String(this.config.model || DEFAULT_REALTIME_VOICE_MODEL),
-      instructions: String(this.config.instructions || DEFAULT_REALTIME_VOICE_INSTRUCTIONS) + (this.config.workLinkEnabled ? VOICE_WORK_INSTRUCTIONS : ''),
-      audio: {
-        input: { format: { type: 'pcm', sample_rate: 16000 } },
-        output: {
-          format: { type: 'pcm_s16le', sample_rate: 24000 },
-          voice: String(this.config.voice || DEFAULT_REALTIME_VOICE_ID),
-          speed: Math.max(-50, Math.min(100, Number(this.config.speed) || 0)),
-          loudness: Math.max(-50, Math.min(100, Number(this.config.loudness) || 0)),
-        },
-      },
-      tools: this.config.workLinkEnabled ? VOICE_WORK_TOOLS : [],
-    };
-    if (this.config.dialogId) session.id = String(this.config.dialogId);
-    const voice = String(this.config.voice || '');
-    const enableMusic = Boolean(this.config.enableMusic) && !/^S[_-]/i.test(voice) && voice !== 'saturn_zh_female_aojiaonvyou_tob';
+  private protocolConfig(): RealtimeProtocolConfig {
     return {
-      type: 'session.create',
-      session,
-      extension: { extra: { enable_proactive_speak: Boolean(this.config.enableProactiveSpeak) }, dialog: { extra: { enable_music: enableMusic } } },
+      provider: this.adapter.id, endpoint: String(this.config.endpoint || ''),
+      model: String(this.config.model || DEFAULT_REALTIME_VOICE_MODEL), voice: String(this.config.voice || DEFAULT_REALTIME_VOICE_ID),
+      instructions: String(this.config.instructions || DEFAULT_REALTIME_VOICE_INSTRUCTIONS), workLinkEnabled: Boolean(this.config.workLinkEnabled),
+      dialogId: String(this.config.dialogId || ''), speed: Number(this.config.speed) || 0, loudness: Number(this.config.loudness) || 0,
+      enableMusic: Boolean(this.config.enableMusic), enableProactiveSpeak: Boolean(this.config.enableProactiveSpeak),
     };
   }
 
   private async handleWorkCalls(event: Record<string, unknown>) {
-    const raw = event.items;
-    const items = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
-    const results: Record<string, unknown>[] = [];
-    for (const item of items) {
-      if (!item || typeof item !== 'object') continue;
-      const row = item as Record<string, unknown>; const callId = String(row.call_id || '');
-      const spec = row.function && typeof row.function === 'object' ? row.function as Record<string, unknown> : {};
-      const name = String(row.name || spec.name || '');
+    const results: RealtimeFunctionResult[] = [];
+    for (const call of this.adapter.functionCalls(event)) {
+      const { callId, name } = call;
       let result: unknown;
       try {
         if (!this.workBridge) throw new Error('工作能力关联已关闭。');
-        const rawArgs = row.arguments ?? spec.arguments ?? '{}';
-        const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
-        result = await this.workBridge.call(callId, name, args);
+        result = await this.workBridge.call(callId, name, call.arguments);
         const value = result as Record<string, unknown>;
         if (value.taskId) this.workTasks.add(String(value.taskId));
         this.emit({ type: 'local.work_result', name, result });
@@ -147,10 +133,10 @@ export class RealtimeVoiceSession {
         result = { ok: false, status: 'failed', spokenSummary: cause instanceof Error ? cause.message.slice(0, 240) : '工作调用失败。' };
         this.emit({ type: 'local.work_result', name, result });
       }
-      if (callId) results.push({ call_id: callId, role: 'tool', content: [{ type: 'input_text', text: JSON.stringify(result) }] });
+      if (callId) results.push({ callId, result });
     }
     if (results.length && !this.closed) {
-      await this.send({ type: 'conversation.item.create', items: results }).catch(() => undefined);
+      for (const response of this.adapter.functionResultEvents(results)) await this.send(response).catch(() => undefined);
     }
   }
 
@@ -165,7 +151,15 @@ export class RealtimeVoiceSession {
             this.workStates.set(taskId, result.status);
             this.emit({ type: 'local.work_result', result });
             const notice = completionNotice(result);
-            if (notice) this.emit({ type: 'local.work_notice', notice });
+            if (notice) {
+              let delivery: 'provider' | 'fallback' = 'provider';
+              try {
+                for (const event of this.adapter.notificationEvents(notice.text)) await this.send(event);
+              } catch {
+                delivery = 'fallback';
+              }
+              this.emit({ type: 'local.work_notice', notice: { ...notice, delivery } });
+            }
           }
           if (['completed', 'failed', 'cancelled'].includes(result.status)) this.workTasks.delete(taskId);
         } catch { this.workTasks.delete(taskId); }
@@ -176,27 +170,19 @@ export class RealtimeVoiceSession {
   private async send(value: Record<string, unknown>) {
     await Promise.race([
       this.readyPromise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('火山实时语音连接超时。')), 15_000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${this.adapter.label}连接超时。`)), 15_000)),
     ]);
     if (this.closed || !this.socket || this.socket.readyState !== WebSocket.OPEN) throw new Error('实时语音会话已关闭。');
     this.socket.send(JSON.stringify(value));
   }
 
-  sendAudio(audio: string) { return this.send({ type: 'input_audio_buffer.append', event_id: randomUUID().replaceAll('-', ''), audio }); }
-  commitAudio() { return this.send({ type: 'input_audio_buffer.commit', event_id: randomUUID().replaceAll('-', '') }); }
-  setAudioMuted(muted: boolean) { return this.send({ type: muted ? 'input_audio_mute.commit' : 'input_audio_unmute.commit', event_id: randomUUID().replaceAll('-', '') }); }
-  sendText(text: string) { return this.send({ type: 'speech_text_buffer.commit', event_id: randomUUID().replaceAll('-', ''), text }); }
+  sendAudio(audio: string) { this.usageMeter.addInputBase64(audio); return this.send(this.adapter.audioEvent(audio)); }
+  commitAudio() { const event = this.adapter.commitEvent(); return event ? this.send(event) : Promise.resolve(); }
+  setAudioMuted(muted: boolean) { const event = this.adapter.muteEvent(muted); return event ? this.send(event) : Promise.resolve(); }
+  async sendText(text: string) { for (const event of this.adapter.textEvents(text)) await this.send(event); }
   update(input: Record<string, unknown>) {
     this.config = { ...this.config, ...input };
-    return this.send({
-      type: 'session.update',
-      session: {
-        model: String(this.config.model || DEFAULT_REALTIME_VOICE_MODEL),
-        instructions: String(this.config.instructions || '') + (this.config.workLinkEnabled ? VOICE_WORK_INSTRUCTIONS : ''),
-        audio: { output: { format: { type: 'pcm_s16le', sample_rate: 24000 }, voice: String(this.config.voice || DEFAULT_REALTIME_VOICE_ID), speed: 0, loudness: 0 } },
-        tools: this.config.workLinkEnabled ? VOICE_WORK_TOOLS : [],
-      },
-    });
+    return this.send(this.adapter.updateEvent(this.protocolConfig()));
   }
 
   subscribe(listener: (event: VoiceEvent) => void) {
@@ -207,9 +193,11 @@ export class RealtimeVoiceSession {
 
   close(notifyUpstream = true) {
     if (this.closed) return;
+    this.emit({ type: 'local.usage', usage: this.usageMeter.snapshot() });
     this.closed = true;
     clearInterval(this.workTimer);
-    if (notifyUpstream && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'session.close' }));
+    const closeEvent = this.adapter.closeEvent();
+    if (notifyUpstream && closeEvent && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(closeEvent));
     const timer = setTimeout(() => this.socket?.close(), notifyUpstream ? 800 : 0);
     timer.unref();
   }
@@ -219,7 +207,7 @@ const sessions = new Map<string, RealtimeVoiceSession>();
 
 function apiKey() {
   const value = resolveRealtimeKey();
-  if (!value) throw new Error('尚未配置火山实时语音 API Key。请前往“设置 > 语音”完成配置。');
+  if (!value) throw new Error('尚未配置实时语音 Provider 的 API Key。请前往“设置 > Provider 与模型”完成配置。');
   return value;
 }
 
@@ -243,15 +231,17 @@ function reapSessions() {
 
 /** Shared capacity/configuration; callers must authorize the conversation first. */
 export async function createBoundRealtimeVoice(owner: Owner, conversationId: string): Promise<RealtimeVoiceSession> {
-  const settings = readRealtimeConversationSettings();
+  const settings = resolveRealtimeRuntime();
   if (!settings.enabled) throw new Error('实时语音已在设置中关闭。');
   await new VoiceWorkBridge(getOrchestrator(), owner, () => settings.workLinkEnabled, conversationId).validateConversation();
   reapSessions();
   if (sessions.size >= MAX_SESSIONS) throw new VoiceCapacityError('实时语音会话已达到容量上限。');
   const session = new RealtimeVoiceSession(owner, {
+    provider: settings.provider,
     model: settings.model, voice: settings.voice, instructions: settings.instructions,
     enableProactiveSpeak: settings.enableProactiveSpeak, dialogId: '', speed: settings.speed,
     loudness: settings.loudness, enableMusic: settings.enableMusic, workLinkEnabled: settings.workLinkEnabled, conversationId,
+    endpoint: settings.endpoint,
   }, apiKey());
   sessions.set(session.id, session);
   return session;
@@ -288,8 +278,8 @@ function cloneStatusName(status: unknown) {
 
 export async function registerRealtimeVoiceRoutes(app: FastifyInstance) {
   app.get('/voice/realtime/capabilities', async (_request, reply) => {
-    const settings = readRealtimeConversationSettings();
-    const configured = Boolean(process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() || settings.apiKey);
+    const settings = resolveRealtimeRuntime();
+    const configured = Boolean(resolveRealtimeKey());
     const enabled = configured && settings.enabled;
     const asr = publicVoiceInputSettings();
     // SeedDuplex expects a continuous real-time audio clock. The previous
@@ -298,14 +288,14 @@ export async function registerRealtimeVoiceRoutes(app: FastifyInstance) {
     // Keep the persisted setting compatible with older installations, but do
     // not advertise the retired gate in the stable transport.
     const audioGateEnabled = false;
-    return reply.send({ voiceMode: readVoicePreferences().defaultMode, realtime: { enabled, configured, audioGateEnabled, providers: enabled ? ['volcengine'] : [] }, asr: { enabled: asr.enabled && asr.configured, configured: asr.configured } });
+    return reply.send({ voiceMode: readVoicePreferences().defaultMode, realtime: { enabled, configured, audioGateEnabled, providers: enabled ? [settings.provider] : [] }, asr: { enabled: asr.enabled && asr.configured, configured: asr.configured } });
   });
 
   app.post('/voice/realtime/session', async (request, reply) => {
     try {
       reapSessions();
       if (sessions.size >= MAX_SESSIONS) return failure(reply, new Error('实时语音会话已达到容量上限。'), 429);
-      const auth = principal(request); const settings = readRealtimeConversationSettings();
+      const auth = principal(request); const settings = resolveRealtimeRuntime();
       const input = VoiceSessionCreateSchema.parse(body(request));
       if (input.conversationId) await new VoiceWorkBridge(getOrchestrator(), { orgId: auth.orgId, userId: auth.userId }, () => settings.workLinkEnabled, input.conversationId).validateConversation();
       if (!settings.enabled) return failure(reply, new Error('实时语音已在设置中关闭。'));
@@ -314,17 +304,18 @@ export async function registerRealtimeVoiceRoutes(app: FastifyInstance) {
       if (sessions.size >= MAX_SESSIONS) return failure(reply, new Error('实时语音会话已达到容量上限。'), 429);
       const session = new RealtimeVoiceSession(
         { orgId: auth.orgId, userId: auth.userId },
-        { model: settings.model, voice: settings.voice, instructions: settings.instructions, enableProactiveSpeak: settings.enableProactiveSpeak, dialogId: settings.dialogId, speed: settings.speed, loudness: settings.loudness, enableMusic: settings.enableMusic, workLinkEnabled: settings.workLinkEnabled, conversationId: input.conversationId },
+        { provider: settings.provider, model: settings.model, voice: settings.voice, instructions: settings.instructions, enableProactiveSpeak: settings.enableProactiveSpeak, dialogId: settings.dialogId, speed: settings.speed, loudness: settings.loudness, enableMusic: settings.enableMusic, workLinkEnabled: settings.workLinkEnabled, conversationId: input.conversationId, endpoint: settings.endpoint },
         apiKey(),
       );
       sessions.set(session.id, session);
-      return reply.send({ ok: true, session_id: session.id });
+      return reply.send({ ok: true, session_id: session.id, provider: settings.provider, providerName: settings.providerName, model: settings.model });
     } catch (cause) { return failure(reply, cause); }
   });
 
   app.post('/voice/realtime/clone/train', async (request, reply) => {
     try {
       if (principal(request).role !== 'admin') return failure(reply, new Error('仅管理员可以训练复刻音色。'), 403);
+      if (resolveRealtimeRuntime().provider !== 'volcengine') return failure(reply, new Error('当前音色复刻面板仅支持火山实时语音；阿里音色请先在百炼创建，再将音色 ID 填入模型配置。'));
       const input = body(request); const voiceId = String(input.voiceId || '').trim();
       if (!voiceId || /\s/.test(voiceId)) throw new Error('请填写有效的预付费音色槽位 ID。');
       const audio = input.audio && typeof input.audio === 'object' ? input.audio as Record<string, unknown> : {};
@@ -344,6 +335,7 @@ export async function registerRealtimeVoiceRoutes(app: FastifyInstance) {
   app.post('/voice/realtime/clone/status', async (request, reply) => {
     try {
       if (principal(request).role !== 'admin') return failure(reply, new Error('仅管理员可以查询复刻音色。'), 403);
+      if (resolveRealtimeRuntime().provider !== 'volcengine') return failure(reply, new Error('当前音色状态查询仅支持火山实时语音。'));
       const voiceId = String(body(request).voiceId || '').trim(); if (!voiceId || /\s/.test(voiceId)) throw new Error('请填写有效的音色 ID。');
       const result = await postVolcengine(VOICE_CLONE_STATUS_URL, apiKey(), { speaker_id: voiceId });
       const response = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
@@ -351,7 +343,9 @@ export async function registerRealtimeVoiceRoutes(app: FastifyInstance) {
     } catch (cause) { return failure(reply, cause); }
   });
 
-  app.post('/voice/realtime/audio', async (request, reply) => {
+  // Audio batches are high-frequency transport traffic. Per-request access logs
+  // drown out actionable diagnostics; session/error logs remain enabled.
+  app.post('/voice/realtime/audio', { logLevel: 'silent' }, async (request, reply) => {
     const input = body(request); const session = ownedSession(request, String(input.session_id || ''));
     if (!session) return failure(reply, new Error('Voice session not found.'), 404);
     const audio = String(input.audio || '');

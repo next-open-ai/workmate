@@ -62,6 +62,12 @@ const {
 } = useKnowledgeConfig();
 const notify = useNotify();
 const dirty = ref(false);
+const realtimeTestRequest = ref(0);
+const configuredModelsEditor = ref<InstanceType<typeof ConfiguredModelsEditor> | null>(null);
+
+function openRealtimeModelConfig() {
+  configuredModelsEditor.value?.openDefaultRealtimeConfig();
+}
 const decisionTest = ref('');
 const decisionTesting = ref(false);
 const decisionModels = computed(() => settings.value.models.filter((item) => item.capability === 'decision'));
@@ -151,7 +157,7 @@ const runtimeStatusAutoRefresh = ref(true);
 const runtimeStatusPending = ref(false);
 const runtimeStatusLive = ref(false);
 const languageLabel: Record<Locale, string> = { 'zh-CN': '简体中文', 'en-US': 'English' };
-type SettingsTab = 'appearance' | 'providers' | 'models' | 'decision' | 'search' | 'knowledge' | 'voice' | 'account' | 'usage' | 'environment' | 'users' | 'general';
+type SettingsTab = 'appearance' | 'providers' | 'models' | 'decision' | 'search' | 'knowledge' | 'account' | 'usage' | 'environment' | 'users' | 'general';
 const tab = ref<SettingsTab>('providers');
 
 // 外部指定初始 tab（启动引导弹窗「去配置」跳转）：应用一次后通知父组件清空，
@@ -171,7 +177,6 @@ const tabs: Array<{ id: SettingsTab; labelKey: string }> = [
   { id: 'decision', labelKey: 'settings.tabDecision' },
   { id: 'search', labelKey: 'settings.tabSearch' },
   { id: 'knowledge', labelKey: 'settings.tabKnowledge' },
-  { id: 'voice', labelKey: 'settings.tabVoice' },
   { id: 'account', labelKey: 'settings.tabAccount' },
   { id: 'users', labelKey: 'settings.tabUsers' },
   { id: 'usage', labelKey: 'settings.tabUsage' },
@@ -540,7 +545,7 @@ function handleDefaultEmployeeChange(event: Event) {
 </script>
 
 <template>
-  <section :class="['mx-auto w-full px-6 py-16 sm:px-12', tab === 'users' || tab === 'general' || tab === 'voice' ? 'max-w-6xl' : 'max-w-3xl']">
+  <section :class="['mx-auto w-full px-6 py-16 sm:px-12', tab === 'users' || tab === 'general' || tab === 'models' ? 'max-w-6xl' : 'max-w-3xl']">
     <header class="mb-8">
       <p class="mb-2 text-[11px] font-extrabold tracking-[.13em] text-[var(--accent)]">Workmate / PREFERENCES</p>
       <h1 class="text-4xl font-bold tracking-[-.045em]">{{ t('settings.title') }}</h1>
@@ -637,6 +642,7 @@ function handleDefaultEmployeeChange(event: Event) {
       <p class="mt-2 text-[13px] leading-relaxed text-[var(--muted)]">{{ t('settings.configuredModelsHelp') }}</p>
       <div class="mt-6">
         <ConfiguredModelsEditor
+          ref="configuredModelsEditor"
           :instances="settings.providerInstances"
           :models="settings.models"
           :active-chat-model-id="settings.activeChatModelId"
@@ -647,12 +653,16 @@ function handleDefaultEmployeeChange(event: Event) {
           @update:active-embedding-model-id="settings.activeEmbeddingModelId = $event"
           @update:capability-bindings="settings.capabilityBindings = $event"
           @configure-provider="tab = 'providers'"
+          @test-realtime="realtimeTestRequest += 1"
           @dirty="onDirty"
         />
       </div>
       <div class="mt-6 flex items-center justify-between gap-3">
         <span class="text-[13px] text-[var(--muted)]">{{ dirty ? t('settings.saveHint') : t('settings.tabModelsHint') }}</span>
         <button class="rounded-lg bg-[var(--accent)] px-3 py-2.5 text-[13px] font-semibold text-white" type="button" @click="saveModelConfig">{{ t('settings.save') }}</button>
+      </div>
+      <div class="mt-8 border-t border-[var(--border)] pt-8">
+        <RealtimeVoiceSettingsCard :is-admin="isAdmin" :ensure-voice-conversation="ensureVoiceConversation" :test-request="realtimeTestRequest" @configure-model="openRealtimeModelConfig" @open-work="(id, title) => emit('open-work', id, title)" />
       </div>
     </section>
 
@@ -754,8 +764,6 @@ function handleDefaultEmployeeChange(event: Event) {
         <button class="rounded-lg bg-[var(--accent)] px-3 py-2.5 text-[13px] font-semibold text-white" type="button" @click="saveKnowledgeProviderConfig">{{ t('settings.save') }}</button>
       </div>
     </section>
-
-    <RealtimeVoiceSettingsCard v-else-if="tab === 'voice'" :is-admin="isAdmin" :ensure-voice-conversation="ensureVoiceConversation" @open-work="(id, title) => emit('open-work', id, title)" />
 
     <AccountSecurityPanel
       v-else-if="tab === 'account'"

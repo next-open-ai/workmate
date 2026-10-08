@@ -4,11 +4,26 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { resolveProviderBaseUrl } from '@workmate/contracts';
+import { resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
 import type { ModelCapabilityRuntime } from '@workmate/contracts';
 import { createModelCapabilityTools } from '../model-capability-runtime.js';
 import { iflytekTtsUrl } from '../speech-provider-adapters.js';
 import { transcribeDashScope, transcribeIflytek } from '../speech-provider-adapters.js';
+
+test('Volcengine realtime models expose curated popular voices while preserving custom IDs', () => {
+  assert.deepEqual(suggestedSpeechVoices('volcengine', '1.2.6.1'), [
+    'zh_female_vv_jupiter_bigtts',
+    'zh_female_xiaohe_jupiter_bigtts',
+    'zh_male_yunzhou_jupiter_bigtts',
+    'zh_male_xiaotian_jupiter_bigtts',
+    'saturn_zh_female_aojiaonvyou_tob',
+  ]);
+});
+
+test('Qwen realtime models expose model-specific voices', () => {
+  assert.deepEqual(suggestedSpeechVoices('qwen', 'qwen-audio-3.1-realtime-plus').slice(0, 2), ['longanqian_v3.1', 'longanhuan_v3.1']);
+  assert.deepEqual(suggestedSpeechVoices('qwen', 'qwen3.8-omni-flash-realtime'), ['Tina']);
+});
 
 test('local Alibaba ASR uploads temporary audio, resolves OSS and saves a text deliverable', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'workmate-local-asr-'));

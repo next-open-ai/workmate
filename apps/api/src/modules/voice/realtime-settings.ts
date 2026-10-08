@@ -1,5 +1,7 @@
 import { readRealtimeVoiceSettings as readLegacySettings } from './legacy-settings.js';
 import { readSettingsFile, writeSettingsFile } from './settings-files.js';
+import { resolveProviderServiceEndpoint } from '@workmate/contracts';
+import { getSecrets } from '../orchestration/secrets.js';
 
 export const DEFAULT_REALTIME_VOICE_MODEL = '1.2.6.1';
 export const DEFAULT_REALTIME_VOICE_ID = 'zh_female_vv_jupiter_bigtts';
@@ -32,8 +34,57 @@ export function saveRealtimeConversationSettings(input: Record<string, unknown>)
   const current = readRealtimeConversationSettings();
   return writeSettingsFile(FILE, normalize({ ...current, ...input, apiKey: input.clearApiKey ? '' : String(input.apiKey || '').trim() || current.apiKey, clonedVoices: Array.isArray(input.clonedVoices) ? input.clonedVoices as RealtimeConversationSettings['clonedVoices'] : current.clonedVoices }));
 }
-export function resolveRealtimeKey(value = readRealtimeConversationSettings()) { return process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() || value.apiKey; }
+type ProviderVoiceRuntime = { provider: 'volcengine' | 'qwen'; apiKey: string; model: string; voice: string; endpoint: string; providerName: string };
+function record(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+export function resolveProviderRealtimeVoice(): ProviderVoiceRuntime | null {
+  const settings = record(getSecrets().model);
+  const models = Array.isArray(settings.models) ? settings.models.map(record) : [];
+  const bindings = Array.isArray(settings.capabilityBindings) ? settings.capabilityBindings.map(record) : [];
+  const boundId = String(bindings.find(item => item.capability === 'realtime' && item.enabled !== false)?.modelId || '');
+  const model = models.find(item => item.capability === 'realtime' && (!boundId || item.id === boundId));
+  if (!model) return null;
+  const providers = Array.isArray(settings.providerInstances) ? settings.providerInstances.map(record) : [];
+  const provider = providers.find(item => item.id === model.providerInstanceId);
+  if (!provider || !['volcengine', 'qwen'].includes(String(provider.type)) || !String(provider.apiKey || '').trim()) return null;
+  const providerId = String(provider.type) as ProviderVoiceRuntime['provider'];
+  const endpoints = record(provider.endpoints);
+  const endpoint = resolveProviderServiceEndpoint({
+    provider: providerId, baseUrl: String(provider.baseUrl || (providerId === 'qwen' ? 'https://dashscope.aliyuncs.com' : 'https://openspeech.bytedance.com')),
+    workspaceId: String(provider.workspaceId || ''), service: provider.service === 'unified' ? 'unified' : 'realtime', endpoint: 'realtime',
+    endpoints: Object.fromEntries(Object.entries(endpoints).filter(([, value]) => typeof value === 'string')),
+  });
+  return {
+    provider: providerId, apiKey: String(provider.apiKey).trim(), model: String(model.modelId || (providerId === 'qwen' ? 'qwen-audio-3.1-realtime-plus' : DEFAULT_REALTIME_VOICE_MODEL)).trim(),
+    voice: String(model.voice || (providerId === 'qwen' ? 'longanqian_v3.1' : DEFAULT_REALTIME_VOICE_ID)).trim(), endpoint,
+    providerName: String(provider.name || (providerId === 'qwen' ? '通义千问' : '火山引擎')).trim(),
+  };
+}
+export function resolveRealtimeKey(value = readRealtimeConversationSettings()) {
+  const provider = resolveProviderRealtimeVoice();
+  return (provider?.provider === 'volcengine' ? process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() : '') || provider?.apiKey || process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() || value.apiKey;
+}
+export function resolveRealtimeRuntime(value = readRealtimeConversationSettings()) {
+  const provider = resolveProviderRealtimeVoice();
+  return {
+    ...value,
+    provider: provider?.provider || 'volcengine' as const,
+    model: provider?.model || value.model,
+    voice: provider?.voice || value.voice,
+    endpoint: (provider?.provider === 'volcengine' ? process.env.WORKMATE_VOLCENGINE_REALTIME_URL?.trim() : '') || provider?.endpoint || process.env.WORKMATE_VOLCENGINE_REALTIME_URL?.trim() || 'wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue',
+    providerName: provider?.providerName || '旧版语音配置',
+    source: provider ? 'provider' as const : 'legacy' as const,
+  };
+}
 export function publicRealtimeConversationSettings(value = readRealtimeConversationSettings()) {
   const key = resolveRealtimeKey(value);
-  return { ...value, apiKey: undefined, configured: Boolean(key), apiKeyMasked: key ? `••••••••${key.slice(-4)}` : '', apiKeySource: process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() ? 'environment' : 'settings', audioGateEnabled: false };
+  const runtime = resolveRealtimeRuntime(value);
+  return { ...value, model: runtime.model, voice: runtime.voice, apiKey: undefined, configured: Boolean(key), apiKeyMasked: key ? `••••••••${key.slice(-4)}` : '', apiKeySource: process.env.WORKMATE_VOLCENGINE_REALTIME_API_KEY?.trim() ? 'environment' : runtime.source, providerName: runtime.providerName, audioGateEnabled: false };
+}
+/** One-time desktop migration source. The authenticated admin immediately moves this secret into safeStorage. */
+export function legacyRealtimeMigrationSource(value = readRealtimeConversationSettings()) {
+  return {
+    available: Boolean(value.apiKey), apiKey: value.apiKey, model: value.model, voice: value.voice,
+    instructions: value.instructions, enableProactiveSpeak: value.enableProactiveSpeak,
+    speed: value.speed, loudness: value.loudness, enableMusic: value.enableMusic,
+  };
 }

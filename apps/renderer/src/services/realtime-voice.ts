@@ -1,5 +1,7 @@
 import { getStoredSessionToken } from './auth';
-import { AsrEventSchema, type AsrPublicSettings, type AsrEvent } from '@workmate/contracts';
+import { AsrEventSchema, RealtimeVoiceUsageSchema, type AsrPublicSettings, type AsrEvent, type RealtimeVoiceUsage } from '@workmate/contracts';
+export { RealtimeVoiceUsageSchema };
+export type { RealtimeVoiceUsage };
 
 export type RealtimeVoiceEvent = {
   type: string;
@@ -14,7 +16,8 @@ export type RealtimeVoiceSettings = AsrPublicSettings & {
   audioGateEnabled: boolean;
   configured: boolean;
   apiKeyMasked: string;
-  apiKeySource: 'settings' | 'environment';
+  apiKeySource: 'settings' | 'environment' | 'provider' | 'legacy';
+  providerName?: string;
   model: string;
   voice: string;
   instructions: string;
@@ -25,6 +28,11 @@ export type RealtimeVoiceSettings = AsrPublicSettings & {
   enableMusic: boolean;
   clonedVoices: Array<{ id: string; status: number | null; statusName: string; updatedAt: number }>;
 };
+
+/** 100 ms of mono PCM16 at 16 kHz. Batching avoids one HTTP request per 20 ms frame. */
+export const REALTIME_AUDIO_BATCH_BYTES = 3_200;
+/** Poll slightly faster than a batch fills without adding perceptible speech latency. */
+export const REALTIME_AUDIO_PUMP_INTERVAL_MS = 40;
 
 function apiBase() {
   return window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';
@@ -71,6 +79,11 @@ export async function getRealtimeVoiceSettings() {
   } as RealtimeVoiceSettings;
 }
 
+export async function getLegacyRealtimeMigrationSource() {
+  const response = await fetch(`${apiBase()}/api/settings/voice/conversation/migration-source`, { headers: authHeaders() });
+  return checkedJson(response) as Promise<{ available: boolean; apiKey: string; model: string; voice: string; instructions: string; enableProactiveSpeak: boolean; speed: number; loudness: number; enableMusic: boolean }>;
+}
+
 export async function saveRealtimeVoiceSettings(input: {
   enabled: boolean;
   workLinkEnabled: boolean;
@@ -112,7 +125,7 @@ export async function queryRealtimeVoiceClone(voiceId: string) {
 
 export async function createRealtimeVoiceSession(input: { conversationId?: string }) {
   const body = await command('session', input);
-  return { sessionId: String(body.session_id || '') };
+  return { sessionId: String(body.session_id || ''), provider: String(body.provider || ''), providerName: String(body.providerName || ''), model: String(body.model || '') };
 }
 
 export async function sendRealtimeVoiceAudio(sessionId: string, bytes: Uint8Array) {

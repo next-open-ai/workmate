@@ -9,7 +9,7 @@ import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '.
 import { executeStorageCleanup, scanStorageCleanup } from './storage-cleanup.js';
 import { publicRealtimeVoiceSettings, saveRealtimeVoiceSettings } from '../voice/settings.js';
 import { publicVoiceInputSettings, saveVoiceInputSettings } from '../voice/asr-settings.js';
-import { publicRealtimeConversationSettings, saveRealtimeConversationSettings } from '../voice/realtime-settings.js';
+import { legacyRealtimeMigrationSource, publicRealtimeConversationSettings, saveRealtimeConversationSettings } from '../voice/realtime-settings.js';
 import { readVoicePreferences, saveVoicePreferences } from '../voice/voice-preferences.js';
 
 type SettingName =
@@ -166,6 +166,8 @@ function splitModelSettings(value: unknown): SettingsEnvelope {
     type: String(provider.type || ''),
     name: String(provider.name || ''),
     baseUrl: String(provider.baseUrl || ''),
+    ...(provider.service ? { service: String(provider.service) } : {}),
+    ...(provider.endpoints && typeof provider.endpoints === 'object' ? { endpoints: asRecord(provider.endpoints) } : {}),
     ...(provider.workspaceId ? { workspaceId: String(provider.workspaceId) } : {}),
     ...(provider.appId ? { appId: String(provider.appId) } : {}),
     disableThinking: Boolean(provider.disableThinking),
@@ -611,6 +613,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
   app.put('/settings/voice/input', async (request, reply) => {
     try { ensureAuth(request); requireAdmin(request); return publicVoiceInputSettings(saveVoiceInputSettings(asRecord(request.body))); }
+    catch (error) { return sendAuthError(reply, error); }
+  });
+  app.get('/settings/voice/conversation/migration-source', async (request, reply) => {
+    try { ensureAuth(request); requireAdmin(request); return legacyRealtimeMigrationSource(); }
     catch (error) { return sendAuthError(reply, error); }
   });
   app.get('/settings/voice/conversation', async (request, reply) => {

@@ -8,16 +8,19 @@ export const VOICE_WORK_TOOLS = [
   { type: 'function', name: 'cancel_work', description: '仅在用户明确要求取消指定工作时调用。用户插话或停止播音不表示取消任务。', parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'], additionalProperties: false } },
 ];
 
-export const VOICE_WORK_INSTRUCTIONS = '\n你可以通过 Workmate 工具执行用户明确要求的工作。一般聊天直接回答。未指定其他员工时，start_work 省略 employeeId，使用当前对话员工。工作接受后只简短告知已开始；只有 get_work_status 返回 completed 才能宣称已完成。完整结果保存在关联对话，不朗读工作全文。审批需要用户在关联对话操作。打断讲话不取消后台工作。';
+export const VOICE_WORK_INSTRUCTIONS = '\n你可以通过 Workmate 工具执行用户明确要求的工作。一般聊天直接回答。未指定其他员工时，start_work 省略 employeeId，使用当前对话员工。工作接受后只简短告知已开始；不要主动轮询已接受任务，完成时由平台用当前音色统一播报一次。用户主动询问进度时可调用 get_work_status，但不要重复平台已经播报的完成提示。完整结果保存在关联对话，不朗读工作全文。审批需要用户在关联对话操作。打断讲话不取消后台工作。';
 
 type Owner = { orgId: string; userId: string };
 export function completionNotice(result: VoiceWorkResult): VoiceWorkNotice | null {
   if (!result.ok || result.status !== 'completed' || !result.taskId) return null;
   const title = String(result.title || '关联工作').replace(/^语音工作[:：]?\s*/, '').replace(/\s+/g, ' ').slice(0, 14) || '关联工作';
   const count = Math.max(0, Number(result.artifactCount) || 0);
+  if (!count) {
+    return VoiceWorkNoticeSchema.parse({ type: 'completed', taskId: result.taskId, text: `${title}已完成，请查看关联对话。`.slice(0, 50) });
+  }
   const variants = [
-    `任务舱回传：${title}完成，${count ? `${count}份成果已就位。` : ''}你的判断很准！`,
-    `好消息，${title}已收官。${count ? `${count}份成果等你检阅，` : ''}漂亮的决策！`,
+    `任务舱回传：${title}完成，${count}份成果已就位。你的判断很准！`,
+    `好消息，${title}已收官。${count}份成果等你检阅，漂亮的决策！`,
     `执行链闭环：${title}完成。你的耐心换来了好结果！`,
     `成果已抵达：${title}完成。干得漂亮，去关联对话看看吧！`,
   ];

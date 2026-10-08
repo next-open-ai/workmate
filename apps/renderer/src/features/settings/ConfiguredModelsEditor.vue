@@ -39,6 +39,7 @@ const emit = defineEmits<{
   'update:activeEmbeddingModelId': [value: string | null];
   'update:capabilityBindings': [value: CapabilityBinding[]];
   'configure-provider': [providerId: string];
+  'test-realtime': [];
   dirty: [];
 }>();
 
@@ -58,11 +59,73 @@ const showAllRemoteModels = ref(false);
 const testingEmbeddingId = ref('');
 const embeddingTestMessage = ref<Record<string, { ok: boolean; text: string }>>({});
 const testingModel = ref<ConfiguredModel | null>(null);
+const realtimeConfigModel = ref<ConfiguredModel | null>(null);
+const realtimeVoiceDraft = ref('');
+const volcengineRealtimeVoices = [
+  { id: 'zh_female_vv_jupiter_bigtts', name: 'VV 女声', detail: '自然亲和，适合通用助手', tone: '自然' },
+  { id: 'zh_female_xiaohe_jupiter_bigtts', name: '小荷女声', detail: '清晰年轻，适合客服与陪伴', tone: '清晰' },
+  { id: 'zh_male_yunzhou_jupiter_bigtts', name: '云舟男声', detail: '沉稳自然，适合专业工作场景', tone: '沉稳' },
+  { id: 'zh_male_xiaotian_jupiter_bigtts', name: '小天男声', detail: '明快有活力，适合轻松交流', tone: '活力' },
+  { id: 'saturn_zh_female_aojiaonvyou_tob', name: '傲娇女友', detail: '情感表现丰富，使用前需确认已开通', tone: '情感' },
+];
+const qwenRealtimeVoices = [
+  { id: 'longanqian_v3.1', name: '龙安浅 3.1', detail: '自然均衡，适合通用语音助手', tone: '自然' },
+  { id: 'longanhuan_v3.1', name: '龙安欢 3.1', detail: '明快亲和，适合轻松交流', tone: '亲和' },
+  { id: 'longanlingxin_v3.1', name: '龙安聆心 3.1', detail: '细腻温和，适合陪伴与服务场景', tone: '温和' },
+  { id: 'longanfengyue_v3.1', name: '龙安风悦 3.1', detail: '清晰有表现力，适合内容讲解', tone: '清晰' },
+  { id: 'xunanchuan_v3.1', name: '巡南川 3.1', detail: '沉稳专业，适合工作与知识问答', tone: '沉稳' },
+];
+const qwenOmniRealtimeVoices = [
+  { id: 'Tina', name: '甜甜 Tina', detail: '温暖自然，适合多语言实时助手', tone: '温暖' },
+];
+
+function openRealtimeConfig(model: ConfiguredModel) {
+  realtimeConfigModel.value = model;
+  realtimeVoiceDraft.value = model.voice || suggestedSpeechVoices(instanceById.value[model.providerInstanceId]?.type ?? '', model.modelId)[0] || '';
+}
+
+function openDefaultRealtimeConfig() {
+  const boundId = boundModelId('realtime');
+  const model = visibleModels.value.find((item) => item.capability === 'realtime' && item.id === boundId)
+    ?? visibleModels.value.find((item) => item.capability === 'realtime');
+  if (model) openRealtimeConfig(model);
+}
+
+defineExpose({ openDefaultRealtimeConfig });
+
+function saveRealtimeConfig() {
+  const model = realtimeConfigModel.value;
+  if (!model) return;
+  patchModel(model.id, { voice: realtimeVoiceDraft.value.trim() || undefined });
+  realtimeConfigModel.value = null;
+}
+
+function testRealtimeFromConfig() {
+  realtimeConfigModel.value = null;
+  emit('test-realtime');
+}
+
+function realtimeVoiceName(voice?: string) {
+  if (!voice) return '尚未选择';
+  return [...volcengineRealtimeVoices, ...qwenRealtimeVoices, ...qwenOmniRealtimeVoices].find((item) => item.id === voice)?.name || voice;
+}
 function boundModelId(capability: ModelCapability) {
   return props.capabilityBindings.find((item) => item.capability === capability && item.enabled)?.modelId ?? null;
 }
 
 const instanceById = computed(() => Object.fromEntries(props.instances.map((item) => [item.id, item])));
+const realtimeConfigProvider = computed(() => realtimeConfigModel.value ? instanceById.value[realtimeConfigModel.value.providerInstanceId] : undefined);
+const realtimeVoices = computed(() => {
+  if (realtimeConfigProvider.value?.type !== 'qwen') return volcengineRealtimeVoices;
+  return /omni/i.test(realtimeConfigModel.value?.modelId || '') ? qwenOmniRealtimeVoices : qwenRealtimeVoices;
+});
+const realtimeProviderLabel = computed(() => realtimeConfigProvider.value?.type === 'qwen' ? '通义千问实时语音' : '火山实时语音');
+const realtimeProtocolSummary = computed(() => realtimeConfigProvider.value?.type === 'qwen'
+  ? '支持实时双向语音与 Function Calling；联网搜索由 Workmate Tool 提供，避免与工具调用冲突。'
+  : '支持实时双向语音与 Function Calling；通话参数由火山 SeedDuplex 协议适配。');
+const realtimeMeteringSummary = computed(() => realtimeConfigProvider.value?.type === 'qwen'
+  ? '计量：优先显示阿里结算帧返回的 Token/字符，同时保留本地音频时长。'
+  : '计量：上游返回用量时显示真实计量；否则显示输入/输出音频时长，不推算账单金额。');
 const readyInstances = computed(() => props.instances.filter((item) => providerInstanceReady(item)));
 const visibleModels = computed(() =>
   props.models.filter((item) => {
@@ -74,7 +137,8 @@ const visibleModels = computed(() =>
 const draftInstance = computed(() => readyInstances.value.find((item) => item.id === draftProviderId.value) ?? null);
 const draftCapabilities = computed<ModelCapability[]>(() => {
   const type = draftInstance.value?.type;
-  return type === 'volcengine' || type === 'iflytek' ? ['asr', 'tts'] : modelCapabilities;
+  if (type === 'volcengine') return draftInstance.value?.service === 'realtime' ? ['realtime'] : draftInstance.value?.service === 'speech' ? ['asr', 'tts'] : ['chat'];
+  return type === 'iflytek' ? ['asr', 'tts'] : modelCapabilities;
 });
 
 const recommendedModels = computed(() => {
@@ -298,8 +362,8 @@ async function fetchRemoteModels() {
   try {
     remoteModels.value = await listProviderModels({
       type: instance.type,
-      baseUrl: instance.baseUrl,
-      workspaceId: instance.workspaceId,
+      baseUrl: effectiveProviderBaseUrl(instance, draftCapability.value),
+      workspaceId: undefined,
       apiKey: instance.apiKey,
     });
   } catch (cause) {
@@ -421,7 +485,8 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
             <span class="text-[var(--muted)]">{{ capabilityLabel(model.capability) }}</span>
           </label>
           <div class="flex items-center gap-1">
-            <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]" type="button" @click="testingModel = model">测试</button>
+            <button v-if="model.capability === 'realtime'" class="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-soft)] px-2.5 py-1.5 text-xs font-semibold text-[var(--accent)] hover:border-[var(--accent)]" type="button" @click="openRealtimeConfig(model)">配置实时语音</button>
+            <button class="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]" type="button" @click="model.capability === 'realtime' ? emit('test-realtime') : testingModel = model">测试</button>
             <button class="rounded-md px-2 py-1 text-lg leading-none text-[var(--muted)] hover:bg-[var(--surface-muted)] hover:text-rose-600" type="button" @click="removeModel(model.id)">×</button>
           </div>
         </div>
@@ -513,6 +578,10 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
             </p>
           </details>
         </div>
+        <div v-else-if="model.capability === 'realtime'" class="flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-2.5 text-[11px]">
+          <span class="text-[var(--muted)]">当前音色 <strong class="ml-1 text-[var(--text)]">{{ realtimeVoiceName(model.voice) }}</strong></span>
+          <button class="font-semibold text-[var(--accent)] hover:underline" type="button" @click="openRealtimeConfig(model)">更换音色与配置</button>
+        </div>
         <div v-else-if="model.capability === 'tts'" class="border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3">
           <label class="grid gap-1.5 text-[11px] font-semibold text-[var(--muted)] sm:grid-cols-[minmax(0,1fr)_2fr] sm:items-center">
             <span>{{ t('settings.defaultVoice') }}</span>
@@ -535,6 +604,45 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
       {{ t('settings.activeEmbeddingModelHint') }}
     </p>
     <p v-if="!visibleModels.length" class="text-xs text-[var(--muted)]">{{ t('settings.configuredModelsEmpty') }}</p>
+
+    <div v-if="realtimeConfigModel" class="fixed inset-0 z-[60] grid place-items-center bg-slate-950/45 p-4" @click.self="realtimeConfigModel = null">
+      <article class="flex max-h-[min(88vh,760px)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="realtime-config-title">
+        <header class="flex items-start justify-between gap-4 border-b border-[var(--border)] px-5 py-4">
+          <div>
+            <h3 id="realtime-config-title" class="text-lg font-bold">配置实时语音</h3>
+            <p class="mt-1 text-xs leading-relaxed text-[var(--muted)]">{{ instanceById[realtimeConfigModel.providerInstanceId]?.name }} · {{ realtimeConfigModel.modelId }}</p>
+          </div>
+          <button class="grid h-8 w-8 place-items-center rounded-lg text-lg text-[var(--muted)] hover:bg-[var(--surface-muted)]" type="button" aria-label="关闭" @click="realtimeConfigModel = null">×</button>
+        </header>
+        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          <div class="flex items-start justify-between gap-3 rounded-xl border border-[var(--accent)]/20 bg-[var(--accent-soft)]/45 px-4 py-3">
+            <div><strong class="text-sm">选择默认音色</strong><p class="mt-1 text-xs text-[var(--muted)]">已筛选常用中文音色，保存后用于新建的实时语音会话。</p></div>
+            <span class="shrink-0 rounded-lg bg-[var(--surface)] px-2 py-1 text-[10px] font-semibold text-[var(--accent)]">{{ realtimeProviderLabel }}</span>
+          </div>
+          <p class="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{{ realtimeProtocolSummary }}</p>
+          <p class="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{{ realtimeMeteringSummary }}</p>
+          <p v-if="realtimeConfigProvider?.type === 'qwen' && /omni/i.test(realtimeConfigModel.modelId) && !realtimeConfigProvider.workspaceId?.trim()" class="mt-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+            当前 Omni Realtime 建议在 Provider 高级设置中填写百炼业务空间 ID；Qwen Audio Realtime 可继续使用共享地址。
+          </p>
+          <div class="mt-4 grid gap-2 sm:grid-cols-2">
+            <button v-for="voice in realtimeVoices" :key="voice.id" type="button" :class="['rounded-xl border p-3 text-left transition active:scale-[.99]', realtimeVoiceDraft === voice.id ? 'border-[var(--accent)] bg-[var(--accent-soft)] shadow-sm' : 'border-[var(--border)] hover:border-[var(--accent)]/45 hover:bg-[var(--surface-muted)]/55']" @click="realtimeVoiceDraft = voice.id">
+              <span class="flex items-center justify-between gap-3"><strong class="text-sm">{{ voice.name }}</strong><span class="rounded-md bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">{{ voice.tone }}</span></span>
+              <span class="mt-1 block text-[11px] leading-relaxed text-[var(--muted)]">{{ voice.detail }}</span>
+              <code class="mt-2 block truncate text-[10px] text-[var(--muted)]">{{ voice.id }}</code>
+            </button>
+          </div>
+          <label class="mt-5 grid gap-1.5 text-xs font-semibold text-[var(--text)]">
+            <span>自定义或克隆音色 ID</span>
+            <input v-model="realtimeVoiceDraft" class="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 font-mono text-xs font-normal focus:border-[var(--accent)] focus:outline-none" placeholder="选择上方音色，或填写已开通的音色 ID" />
+            <small class="font-normal leading-relaxed text-[var(--muted)]">自定义音色需要已在供应商控制台授权。选择不兼容的音色时，连接测试会返回明确错误。</small>
+          </label>
+        </div>
+        <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] px-5 py-4">
+          <button class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:border-[var(--accent)]" type="button" @click="testRealtimeFromConfig">进入通话测试</button>
+          <div class="flex gap-2"><button class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" type="button" @click="realtimeConfigModel = null">取消</button><button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-45" type="button" :disabled="!realtimeVoiceDraft.trim()" @click="saveRealtimeConfig">应用配置</button></div>
+        </footer>
+      </article>
+    </div>
 
     <div v-if="pickerOpen" class="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4" @click.self="pickerOpen = false">
       <article class="flex max-h-[min(85vh,680px)] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl">

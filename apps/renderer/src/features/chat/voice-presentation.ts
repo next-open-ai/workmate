@@ -9,6 +9,17 @@ export function voiceEnvelope(samples: ArrayLike<number>, count = 28): number[] 
   });
 }
 
+/**
+ * Microphone RMS below this floor is treated as room/device noise.
+ * 0.0001 was below the idle noise of common laptop microphones, so a quiet
+ * room could keep a realtime turn open forever and the model never replied.
+ */
+export const REALTIME_VOICE_ACTIVITY_FLOOR = 0.003;
+
+export function hasRealtimeVoiceActivity(level: number): boolean {
+  return Number.isFinite(level) && level >= REALTIME_VOICE_ACTIVITY_FLOOR;
+}
+
 /** ASR sends full revisions, not append-only deltas. Protect manual edits. */
 export class VoiceDraftProjection {
   private base = '';

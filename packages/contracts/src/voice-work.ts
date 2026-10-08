@@ -21,5 +21,7 @@ export const VoiceWorkResultSchema = z.object({
 export type VoiceWorkResult = z.infer<typeof VoiceWorkResultSchema>;
 export const VoiceWorkNoticeSchema = z.object({
   type: z.literal('completed'), taskId: z.string().uuid(), text: z.string().trim().min(1).max(50),
+  /** Provider means the active realtime session owns playback; fallback uses one built-in sound. */
+  delivery: z.enum(['provider', 'fallback']).optional(),
 }).strict();
 export type VoiceWorkNotice = z.infer<typeof VoiceWorkNoticeSchema>;

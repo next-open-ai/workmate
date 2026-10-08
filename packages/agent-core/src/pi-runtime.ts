@@ -8,7 +8,7 @@ import {
   type SimpleStreamOptions,
 } from '@mariozechner/pi-ai';
 import type { AgentEvent, AgentProfile, AgentSkillRuntime, ModelConfig, RunModelRef, TokenUsage } from '@workmate/contracts';
-import { createSkillExecutionTools, isBusinessDeliverablePath } from './skill-runtime.js';
+import { createSkillExecutionTools, finalizeOutputDeliverables, isBusinessDeliverablePath, listOutputDeliverables } from './skill-runtime.js';
 import { withLenientJsonParse } from './json-repair.js';
 import { sanitizeToolPayloadsInMessages } from './context-sanitize.js';
 import {
@@ -45,7 +45,7 @@ import { createModelCapabilityToolSession, MODEL_CAPABILITY_BY_TOOL } from './mo
 
 export const DEFAULT_RUN_TIMEOUT_MS = 1_800_000;
 /** Maximum silence for one provider turn, including the turn after a tool result. */
-export const DEFAULT_MODEL_TURN_IDLE_MS = 75_000;
+export const DEFAULT_MODEL_TURN_IDLE_MS = 180_000;
 
 /**
  * pi-agent-core has a whole-run timeout, but a provider can stall between tool
@@ -121,6 +121,9 @@ function friendlyModelError(raw: string) {
   }
   if (/connection\s*error|failed to fetch|fetch failed|terminated|econnreset|econnrefused|enotfound|eai_again|broken pipe|network|ssl|tls|timed?\s*out|timeout|stream idle|remote end closed|temporarily unavailable|socket hang up|ECONNABORTED|UND_ERR/i.test(raw)) {
     return '网络连接超时或中断了，这次没能完成回答。请检查网络后重试；若正在使用 VPN，也可先切换网络再试。';
+  }
+  if (/request was aborted|aborted request|request aborted/i.test(raw)) {
+    return '模型请求在生成内容前被上游服务中断，尚未开始执行 PDF 导出。请重试；若频繁发生，请测试当前模型连接或切换模型。';
   }
   return raw;
 }
@@ -565,6 +568,20 @@ function modelRefFromConfig(model: ModelConfig): RunModelRef {
 
 const MODEL_CAPABILITY_TOOLS: Record<string, import('@workmate/contracts').ModelCapability> = MODEL_CAPABILITY_BY_TOOL;
 
+/**
+ * Completion gate for requests whose success necessarily includes a file.
+ * Keep this deliberately narrower than general task classification: ordinary
+ * writing/advice may finish as text, while an explicit export/file request may
+ * not claim success without a filesystem deliverable.
+ */
+export function requiresFileDeliverable(text: string): boolean {
+  const value = text.trim();
+  if (!value) return false;
+  const action = /(?:生成|制作|创建|导出|输出|转换|转成|保存|交付|create|generate|export|convert|save)/i.test(value);
+  const file = /(?:\.?(?:pdf|docx?|pptx?|xlsx?|csv|html|md|mp3|wav|mp4)\b|PDF|Word|PPT|PowerPoint|Excel|文件|文档|报告|表格|网页|网站|图片|图像|音频|视频)/i.test(value);
+  return action && file;
+}
+
 export async function toPiHistoryMessages(
   messages: import('@workmate/contracts').ChatModelMessage[],
   model: ModelConfig,
@@ -814,6 +831,10 @@ export async function* streamAgentReply(input: {
     let usageSteps = 0;
     const modelRef = modelRefFromConfig(input.model);
     const emittedArtifactPaths = new Set<string>();
+    const runStartedAtMs = Date.now();
+    const outputDeliverablesBefore = projectBound
+      ? []
+      : await listOutputDeliverables(workspaceRoot).catch(() => [] as string[]);
     const projectFilesBefore = projectBound
       ? await snapshotWorkspaceFiles(projectRoot).catch(() => new Map<string, string>())
       : null;
@@ -1020,7 +1041,28 @@ export async function* streamAgentReply(input: {
           enqueue({ type: 'run.failed', runId, message: 'Missing user message for agent run.' });
           return;
         }
-        await agent.prompt(input.model.supportsVision ? imageMessageText(last) : visionAttachmentText(last), input.model.supportsVision ? await resolveChatImages(last, conversationId) : []);
+        const userPrompt = input.model.supportsVision ? imageMessageText(last) : visionAttachmentText(last);
+        await agent.prompt(userPrompt, input.model.supportsVision ? await resolveChatImages(last, conversationId) : []);
+        if (!projectBound && requiresFileDeliverable(last.content)) {
+          const firstPassDeliverables = await finalizeOutputDeliverables(workspaceRoot, {
+            startedAtMs: runStartedAtMs,
+            before: outputDeliverablesBefore,
+          }).catch(() => [] as string[]);
+          if (!firstPassDeliverables.length && !abortSignal.aborted && !runFailed) {
+            enqueue({
+              type: 'message.delta',
+              runId,
+              text: '\n\n系统校验发现尚未生成实际文件，正在继续完成交付。',
+            });
+            await agent.prompt([
+              'SYSTEM DELIVERY VERIFICATION FAILED.',
+              'The user explicitly requested a file, but no new or modified file exists under output/.',
+              'Your previous prose is not evidence of execution. Do not repeat or summarize it.',
+              'Use the available authorized tools now to create and verify the real deliverable under output/.',
+              'Only after the file exists may you report completion.',
+            ].join(' '));
+          }
+        }
         if (abortSignal.aborted) {
           const timedOut = (timeoutController.signal.aborted && !input.abortSignal?.aborted) || abortWasTimeout(input.abortSignal);
           enqueue({
@@ -1052,6 +1094,29 @@ export async function* streamAgentReply(input: {
         if (projectBound && projectFilesBefore) {
           // Project mode: cwd is project root — publish changed files (aligned with dsh).
           await publishProjectDiff();
+        } else {
+          // output/ is the explicit conversation delivery boundary. Finalize
+          // this run's new/changed files transactionally; commit_artifact may
+          // publish earlier, but correctness cannot depend on a second,
+          // probabilistic model action. Never promote unrelated root files.
+          const recovered = await finalizeOutputDeliverables(workspaceRoot, {
+            startedAtMs: runStartedAtMs,
+            before: outputDeliverablesBefore,
+          }).catch(() => [] as string[]);
+          for (const relative of recovered) {
+            if (emittedArtifactPaths.has(relative)) continue;
+            emittedArtifactPaths.add(relative);
+            enqueue({ type: 'artifact.created', runId, path: relative });
+          }
+          if (requiresFileDeliverable(last.content) && emittedArtifactPaths.size === 0) {
+            enqueue({
+              type: 'message.delta',
+              runId,
+              text: '\n\n本次未生成经过验证的文件，系统已阻止虚假完成。请查看执行记录后重试。',
+            });
+            enqueue({ type: 'run.failed', runId, message: '文件交付校验失败：任务要求生成文件，但运行工作区中没有本轮产物。' });
+            return;
+          }
         }
         enqueue({ type: 'run.completed', runId });
       } catch (error) {

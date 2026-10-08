@@ -45,6 +45,8 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 
 密钥通道：api 启动后与 gateway 启动后各自向 Main 发起 fork IPC 一次性索取解密快照（模型/搜索配置、通道 token），仅存内存。
 
+模型连接采用统一的 Provider 结构：厂商模板定义动态凭证与端点规则，连接实例持有一组可复用凭证，服务端点按 chat/image/embedding/asr/tts/realtime 区分，模型归属连接并按能力解析端点。阿里百炼可在一个综合连接中共享凭证并派生 HTTP/WebSocket 地址；火山方舟与火山语音可拆为同厂商的多个连接；智谱使用正式 GLM 模板。旧的单 `baseUrl` 连接继续作为兼容回退。详见 `docs/sdd/features/unified-provider-connections-v1/`。
+
 ## 3. 模块与边界（apps）
 
 | 模块 | 关键职责 | 边界/约定 |
@@ -54,7 +56,7 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 | `apps/api` | HTTP 编排接口 + 域 KV 代理 + SSE 事件流 | 只 bind 127.0.0.1 |
 | `apps/gateway` | 通道运行时：`GatewayRuntime`(会话映射/指令面/审批/项目)、适配器(telegram/feishu)、relay 设备链接、配置(KV 或文件) | 凭证不自持（向 Main 索取或显式文件，用于桩/CI） |
 
-语音服务在 API 内采用独立能力边界：`voice/routes.ts` 仅为组合根，`realtime-routes.ts` 管理全双工会话，`asr-routes.ts` 管理单向语音输入，`chat-mobile/voice.ts` 管理手机令牌范围适配。三者配置和会话生命周期相互独立，统一设置页只是客户端聚合入口；详见 `docs/sdd/features/voice-services-modularization-v1/`。
+语音服务在 API 内采用独立能力边界：`voice/routes.ts` 仅为组合根，`realtime-routes.ts` 管理全双工会话，`asr-routes.ts` 管理单向语音输入，`chat-mobile/voice.ts` 管理手机令牌范围适配。会话生命周期保持隔离；实时语音的凭证、端点、模型和音色由统一 Provider/模型配置提供，通话行为仍由语音偏好管理，旧独立配置只作兼容回退。详见 `docs/sdd/features/voice-services-modularization-v1/` 与 `unified-provider-connections-v1/`。
 
 ### 渲染层「远程办公/连接」门户（P1）
 侧栏新增 `remote` 视图：Telegram/飞书凭证卡片、白名单文本、默认员工、网关状态徽标与重启按钮；主进程提供 `get/save-channel-settings`、`gateway-status`、`gateway-restart` IPC。用户/身份体系未实现（按要求暂不建），白名单为字符串列表、默认拒绝。

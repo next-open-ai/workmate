@@ -952,6 +952,7 @@ export async function testProviderConnection(input: {
   type: string;
   baseUrl?: string;
   workspaceId?: string;
+  service?: string;
   apiKey?: string;
 }) {
   const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : '';

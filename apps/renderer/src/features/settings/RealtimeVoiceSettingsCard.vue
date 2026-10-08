@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import RealtimeVoiceDialog from '../chat/RealtimeVoiceDialog.vue';
 import VoiceInputDialog from '../chat/VoiceInputDialog.vue';
 import { getRealtimeVoiceSettings, queryRealtimeVoiceClone, saveRealtimeVoiceSettings, trainRealtimeVoiceClone, type RealtimeVoiceSettings } from '../../services/realtime-voice';
 
-const props = withDefaults(defineProps<{ isAdmin?: boolean; ensureVoiceConversation?: () => Promise<string | null> }>(), { isAdmin: false });
+const props = withDefaults(defineProps<{ isAdmin?: boolean; ensureVoiceConversation?: () => Promise<string | null>; testRequest?: number }>(), { isAdmin: false, testRequest: 0 });
 const voiceConversationId = ref<string>();
 const crypto = window.crypto;
-const emit = defineEmits<{ 'open-work': [conversationId: string, title: string] }>();
+const emit = defineEmits<{ 'open-work': [conversationId: string, title: string]; 'configure-model': [] }>();
 const loading = ref(true); const saving = ref(false); const testing = ref(false); const cloneBusy = ref(false);
-const message = ref(''); const error = ref(''); const showKey = ref(false); const apiKey = ref('');
+const message = ref(''); const error = ref(''); const apiKey = ref('');
 const asrApiKey = ref(''); const clearAsrApiKey = ref(false);
 const cloneVoiceId = ref(''); const cloneFile = ref<File | null>(null); const cloneText = ref(''); const cloneDemoText = ref('');
 const cloneDenoise = ref(false); const cloneKeepVolume = ref(false);
@@ -24,7 +24,16 @@ const settings = ref<RealtimeVoiceSettings>({ voiceMode: 'realtime', asrEnabled:
 const selectedVoiceName = computed(() => builtInVoices.find((item) => item.id === settings.value.voice)?.name || settings.value.voice || '未选择');
 const modeKeyConfigured = computed(() => settings.value.voiceMode === 'realtime' || settings.value.asrReuseKey ? settings.value.configured : settings.value.asrKeySource !== 'realtime' && settings.value.asrConfigured);
 
-async function load() { loading.value = true; error.value = ''; try { settings.value = await getRealtimeVoiceSettings(); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { loading.value = false; } }
+async function openRealtimeTest() {
+  if (!settings.value.configured) { error.value = '请先在 Provider 与模型中配置实时语音模型。'; return; }
+  if (props.ensureVoiceConversation) {
+    const id = await props.ensureVoiceConversation();
+    if (!id) throw new Error('无法关联当前对话，请创建对话后重试。');
+    voiceConversationId.value = id;
+  }
+  testing.value = true;
+}
+async function load() { loading.value = true; error.value = ''; try { settings.value = await getRealtimeVoiceSettings(); if (props.testRequest > 0) await openRealtimeTest(); } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { loading.value = false; } }
 function payload() { return { voiceMode: settings.value.voiceMode, asrEnabled: settings.value.asrEnabled, asrReuseKey: settings.value.asrReuseKey, asrResourceId: settings.value.asrResourceId, asrEnablePunc: settings.value.asrEnablePunc, asrEnableItn: settings.value.asrEnableItn, ...(asrApiKey.value.trim() ? { asrApiKey: asrApiKey.value.trim() } : {}), clearAsrApiKey: clearAsrApiKey.value, enabled: settings.value.enabled, workLinkEnabled: settings.value.workLinkEnabled, audioGateEnabled: settings.value.audioGateEnabled, ...(apiKey.value.trim() ? { apiKey: apiKey.value.trim() } : {}), model: settings.value.model, voice: settings.value.voice, instructions: settings.value.instructions, enableProactiveSpeak: settings.value.enableProactiveSpeak, dialogId: settings.value.dialogId, speed: settings.value.speed, loudness: settings.value.loudness, enableMusic: settings.value.enableMusic, clonedVoices: settings.value.clonedVoices }; }
 async function save(openTest = false) {
   if (!props.isAdmin) return;
@@ -32,14 +41,9 @@ async function save(openTest = false) {
   try {
     settings.value = await saveRealtimeVoiceSettings(payload());
     apiKey.value = ''; asrApiKey.value = ''; clearAsrApiKey.value = false;
-    message.value = settings.value.voiceMode === 'input' ? '语音输入配置已独立保存。' : '实时通话配置已独立保存。';
+    message.value = settings.value.voiceMode === 'input' ? '语音输入配置已保存。' : '实时通话偏好已保存；连接、模型和音色由 Provider 与模型统一管理。';
     if (openTest) {
-      if (settings.value.voiceMode === 'realtime' && props.ensureVoiceConversation) {
-        const id = await props.ensureVoiceConversation();
-        if (!id) throw new Error('无法关联当前对话，请创建对话后重试。');
-        voiceConversationId.value = id;
-      }
-      testing.value = true;
+      if (settings.value.voiceMode === 'realtime') await openRealtimeTest(); else testing.value = true;
     }
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
   finally { saving.value = false; }
@@ -51,11 +55,12 @@ async function trainClone() { if (!cloneFile.value) { error.value = '请先选�
 async function queryClone(id = cloneVoiceId.value.trim()) { cloneBusy.value = true; error.value = ''; try { const voice = await queryRealtimeVoiceClone(id); mergeClone(voice); cloneVoiceId.value = id; message.value = `${id}：${voice.statusName}`; } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); } finally { cloneBusy.value = false; } }
 function importClone() { const id = cloneVoiceId.value.trim(); if (!id || /\s/.test(id)) { error.value = '请填写有效的音色槽位 ID。'; return; } mergeClone({ id, status: null, statusName: '已保存', updatedAt: Date.now() }, true); message.value = `已添加已有音色 ${id}，保存配置后生效。`; }
 onMounted(load);
+watch(() => props.testRequest, (next, previous) => { if (next > previous && !loading.value) void openRealtimeTest().catch((cause) => { error.value = cause instanceof Error ? cause.message : String(cause); }); });
 </script>
 
 <template>
   <section class="overflow-hidden rounded-3xl border border-[var(--border)] bg-[var(--surface)]">
-    <header class="bg-[radial-gradient(circle_at_top_right,var(--accent-soft),transparent_55%)] p-6 sm:p-8"><div class="flex flex-wrap items-start justify-between gap-4"><div><p class="text-[11px] font-extrabold tracking-[.14em] text-[var(--accent)]">WORKMATE · VOICE SERVICES</p><h2 class="mt-2 text-2xl font-bold">语音服务配置</h2><p class="mt-2 max-w-2xl text-sm leading-6 text-[var(--muted)]">实时对话与 ASR 语音输入均由 Workmate 服务端直连火山；密钥不会下发浏览器。</p></div><span :class="['rounded-full px-3 py-1.5 text-xs font-bold', modeKeyConfigured ? 'bg-emerald-500/12 text-emerald-700' : 'bg-amber-500/12 text-amber-700']">{{ modeKeyConfigured ? '密钥已配置 · 请测试权限' : '等待配置' }}</span></div></header>
+    <header class="bg-[radial-gradient(circle_at_top_right,var(--accent-soft),transparent_55%)] p-6 sm:p-8"><div class="flex flex-wrap items-start justify-between gap-4"><div><p class="text-[11px] font-extrabold tracking-[.14em] text-[var(--accent)]">WORKMATE · VOICE SERVICES</p><h2 class="mt-2 text-2xl font-bold">语音体验</h2><p class="mt-2 max-w-2xl text-sm leading-6 text-[var(--muted)]">连接密钥、实时模型和音色已统一归入「Provider 与模型」；这里只设置通话行为并进行体验测试。</p></div><span :class="['rounded-full px-3 py-1.5 text-xs font-bold', modeKeyConfigured ? 'bg-emerald-500/12 text-emerald-700' : 'bg-amber-500/12 text-amber-700']">{{ modeKeyConfigured ? '模型已就绪 · 请测试权限' : '请先配置实时语音模型' }}</span></div></header>
     <div v-if="loading" class="p-8 text-sm text-[var(--muted)]">正在读取语音配置…</div>
     <div v-else class="space-y-6 p-5 sm:p-8">
       <section class="box">
@@ -81,8 +86,8 @@ onMounted(load);
         <label class="flex items-center justify-between gap-4"><span><strong>关联 Workmate 工作能力</strong><small class="hint">语音启动、查询和取消员工任务；员工使用已授权的 Skill 和 MCP。</small></span><input v-model="settings.workLinkEnabled" type="checkbox" :disabled="!isAdmin" class="h-5 w-5 accent-[var(--accent)]" /></label>
         <p class="hint mt-3">语音工作默认进入当前对话，消息、成果和审批直接显示在该对话中；配置测试也关联当前对话，通过卡片进入查看。关闭后为纯语音对话，已启动任务继续运行。保存后新通话生效。</p>
       </section>
-      <section class="box"><div class="mb-5 flex items-center justify-between"><div><h3 class="font-bold">连接与会话</h3><p class="hint">火山鉴权和上下文延续</p></div><input v-model="settings.enabled" type="checkbox" class="h-5 w-5 accent-[var(--accent)]" :disabled="!isAdmin" /></div><div class="grid gap-4 sm:grid-cols-2"><label class="sm:col-span-2"><span class="label">API Key</span><div class="flex gap-2"><input v-model="apiKey" :type="showKey ? 'text' : 'password'" autocomplete="new-password" class="field flex-1" :placeholder="settings.configured ? `${settings.apiKeyMasked}（留空保持不变）` : 'X-Api-Key'" :disabled="!isAdmin" /><button class="secondary" type="button" @click="showKey = !showKey">{{ showKey ? '隐藏' : '显示' }}</button></div><small class="hint">仅保存于本机服务端，读取接口只返回掩码。</small></label><label><span class="label">模型版本</span><input v-model="settings.model" class="field w-full" :disabled="!isAdmin" /></label><label><span class="mb-2 flex items-center justify-between text-sm font-semibold">Dialog ID <button class="text-xs text-[var(--accent)]" type="button" @click="settings.dialogId = crypto.randomUUID()">生成 UUID</button></span><input v-model="settings.dialogId" class="field w-full" placeholder="留空创建新上下文" :disabled="!isAdmin" /></label><p class="hint sm:col-span-2">实时音频采用稳定低延迟传输：持续按协议节奏发送，由火山服务端统一判停，避免断句、重复提交和回复延迟。</p></div></section>
-      <section class="box"><div class="mb-5"><h3 class="font-bold">声音与表现</h3><p class="hint">当前音色：{{ selectedVoiceName }}</p></div><label><span class="label">音色</span><select v-model="settings.voice" class="field w-full" :disabled="!isAdmin"><optgroup label="系统音色"><option v-for="voice in builtInVoices" :key="voice.id" :value="voice.id">{{ voice.name }} · {{ voice.detail }}</option></optgroup><optgroup v-if="settings.clonedVoices.length" label="我的复刻音色"><option v-for="voice in settings.clonedVoices" :key="voice.id" :value="voice.id">{{ voice.id }} · {{ voice.statusName }}</option></optgroup></select></label><div class="mt-5 grid gap-5 sm:grid-cols-2"><label><span class="range-label">语速 speed <button type="button" @click="settings.speed = 0">归零</button></span><div class="flex items-center gap-3"><input v-model.number="settings.speed" type="range" min="-50" max="100" class="w-full accent-[var(--accent)]" /><output class="range-value">{{ settings.speed }}</output></div></label><label><span class="range-label">音量 loudness <button type="button" @click="settings.loudness = 0">归零</button></span><div class="flex items-center gap-3"><input v-model.number="settings.loudness" type="range" min="-50" max="100" class="w-full accent-[var(--accent)]" /><output class="range-value">{{ settings.loudness }}</output></div></label></div></section>
+      <section class="box"><div class="mb-5 flex flex-wrap items-center justify-between gap-3"><div><h3 class="font-bold">实时语音模型</h3><p class="hint">连接、凭证、模型与音色统一由 Provider 与模型管理</p></div><div class="flex items-center gap-3"><button class="secondary text-[var(--accent)]" type="button" @click="emit('configure-model')">配置实时语音模型</button><input v-model="settings.enabled" type="checkbox" class="h-5 w-5 accent-[var(--accent)]" :disabled="!isAdmin" /></div></div><div class="grid gap-3 rounded-xl bg-[var(--surface-muted)] p-4 text-sm sm:grid-cols-3"><div><span class="hint">Provider</span><strong>{{ settings.providerName || '尚未绑定' }}</strong></div><div><span class="hint">实时模型</span><strong>{{ settings.model || '—' }}</strong></div><div><span class="hint">音色</span><strong>{{ selectedVoiceName }}</strong></div></div><p class="hint mt-3">点击“配置实时语音模型”可直接选择常用音色或填写克隆音色 ID。旧版独立语音配置仅在尚未绑定实时模型时兼容回退。</p><label class="mt-4 block"><span class="mb-2 flex items-center justify-between text-sm font-semibold">Dialog ID <button class="text-xs text-[var(--accent)]" type="button" @click="settings.dialogId = crypto.randomUUID()">生成 UUID</button></span><input v-model="settings.dialogId" class="field w-full" placeholder="留空创建新上下文" :disabled="!isAdmin" /></label><p class="hint mt-3">实时音频采用稳定低延迟传输，由服务端统一判停，避免断句、重复提交和回复延迟。</p></section>
+      <section class="box"><div class="mb-5"><h3 class="font-bold">声音表现</h3><p class="hint">音色跟随当前实时语音模型；这里只调整播放表现</p></div><div class="mt-5 grid gap-5 sm:grid-cols-2"><label><span class="range-label">语速 speed <button type="button" @click="settings.speed = 0">归零</button></span><div class="flex items-center gap-3"><input v-model.number="settings.speed" type="range" min="-50" max="100" class="w-full accent-[var(--accent)]" /><output class="range-value">{{ settings.speed }}</output></div></label><label><span class="range-label">音量 loudness <button type="button" @click="settings.loudness = 0">归零</button></span><div class="flex items-center gap-3"><input v-model.number="settings.loudness" type="range" min="-50" max="100" class="w-full accent-[var(--accent)]" /><output class="range-value">{{ settings.loudness }}</output></div></label></div></section>
       <details class="rounded-2xl border border-[var(--border)]" open><summary class="cursor-pointer list-none p-5"><div class="flex justify-between"><span><strong class="block">声音复刻</strong><small class="hint">训练新音色或接入已有预付费音色槽位</small></span><span class="text-xs text-[var(--muted)]">{{ settings.clonedVoices.length }} 个音色</span></div></summary><div class="space-y-4 border-t border-[var(--border)] p-5"><div class="grid gap-4 sm:grid-cols-2"><label><span class="label">预付费音色槽位 ID</span><input v-model="cloneVoiceId" class="field w-full" placeholder="例如 S_..." /></label><label><span class="label">训练音频</span><input type="file" accept=".wav,.mp3,.ogg,.m4a,.aac,.pcm,audio/*" class="field w-full" @change="chooseFile" /></label><label class="sm:col-span-2"><span class="label">朗读文本</span><textarea v-model="cloneText" rows="2" class="field w-full" placeholder="可选：训练音频对应文本" /></label><label class="sm:col-span-2"><span class="label">试听文本</span><input v-model="cloneDemoText" maxlength="300" class="field w-full" placeholder="可选，4 到 300 字" /></label></div><div class="flex flex-wrap items-center gap-4"><button class="primary" type="button" :disabled="cloneBusy || !isAdmin" @click="trainClone">{{ cloneBusy ? '处理中…' : '开始训练' }}</button><button class="secondary" type="button" :disabled="cloneBusy || !isAdmin" @click="importClone">保存已有音色</button><button class="secondary" type="button" :disabled="cloneBusy || !isAdmin" @click="queryClone()">查询状态</button><label class="check"><input v-model="cloneDenoise" type="checkbox" />音频降噪</label><label class="check"><input v-model="cloneKeepVolume" type="checkbox" />保留原始音量</label></div><button v-for="voice in settings.clonedVoices" :key="voice.id" type="button" class="flex w-full justify-between rounded-xl bg-[var(--surface-muted)] px-4 py-3 text-left text-sm" @click="settings.voice = voice.id"><span><strong>{{ voice.id }}</strong><small class="ml-2 text-[var(--muted)]">{{ voice.statusName }}</small></span><span class="text-xs text-[var(--accent)]" @click.stop="queryClone(voice.id)">刷新状态</span></button></div></details>
       <section class="box"><h3 class="font-bold">对话策略</h3><p class="hint">System Prompt 与模型行为开关</p><textarea v-model="settings.instructions" rows="10" class="field mt-4 w-full font-mono text-xs leading-5" :disabled="!isAdmin" /><div class="mt-4 flex flex-wrap gap-5"><label class="check"><input v-model="settings.enableProactiveSpeak" type="checkbox" />主动回复</label><label class="check"><input v-model="settings.enableMusic" type="checkbox" />允许唱歌</label><span class="rounded-full bg-[var(--surface-muted)] px-3 py-1 text-xs text-[var(--muted)]">Function Calling 由 Workmate Skill / MCP 权限中心统一管理</span></div></section>
       </div>

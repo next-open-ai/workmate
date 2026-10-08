@@ -602,6 +602,10 @@ function writeModelConfig(value) {
             type: String(provider.type || ''),
             name: String(provider.name || ''),
             baseUrl: String(provider.baseUrl || ''),
+            service: String(provider.service || ''),
+            endpoints: provider.endpoints && typeof provider.endpoints === 'object'
+              ? Object.fromEntries(Object.entries(provider.endpoints).map(([key, endpoint]) => [String(key), String(endpoint || '')]))
+              : {},
             workspaceId: String(provider.workspaceId || ''),
             appId: String(provider.appId || ''),
             apiKey: String(provider.apiKey || ''),

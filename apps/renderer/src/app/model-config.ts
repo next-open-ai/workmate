@@ -1,7 +1,8 @@
 import { computed, ref } from 'vue';
-import { DEFAULT_EMBEDDING_META, resolveProviderBaseUrl, suggestedSpeechVoices } from '@workmate/contracts';
-import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, DecisionGuardPolicy, DecisionProtocol, DecisionRuntimeConfig, ImageGenerationProtocol, ModelCapability } from '@workmate/contracts';
+import { DEFAULT_EMBEDDING_META, resolveProviderServiceEndpoint, suggestedSpeechVoices } from '@workmate/contracts';
+import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, DecisionGuardPolicy, DecisionProtocol, DecisionRuntimeConfig, ImageGenerationProtocol, ModelCapability, ProviderEndpointKind, ProviderEndpointOverrides, ProviderService } from '@workmate/contracts';
 import { getServerModelConfig, saveServerModelConfig, setCapabilityHealthObserver, type CapabilityHealthObservation } from '../services/api.js';
+import { getLegacyRealtimeMigrationSource } from '../services/realtime-voice.js';
 
 export const providerIds = ['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'volcengine', 'iflytek', 'ollama', 'openai-compatible'] as const;
 export type ProviderId = (typeof providerIds)[number];
@@ -9,7 +10,7 @@ export type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding,
 
 export const imageGenerationProtocols: ImageGenerationProtocol[] = ['openai-images', 'dashscope-multimodal', 'dashscope-image-async'];
 
-export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision', 'ontology'];
+export const modelCapabilities: ModelCapability[] = ['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'realtime', 'decision', 'ontology'];
 
 /** Connection instance — same provider type can appear multiple times. */
 export interface ProviderInstance {
@@ -17,6 +18,10 @@ export interface ProviderInstance {
   type: ProviderId;
   name: string;
   baseUrl: string;
+  /** Product line sharing this connection's credential set. Missing means legacy single-endpoint behavior. */
+  service?: ProviderService;
+  /** Expert overrides. Official endpoints are derived from vendor + service + region/workspace. */
+  endpoints?: ProviderEndpointOverrides;
   /** Optional Bailian workspace. Region is inferred from the API host. */
   workspaceId?: string;
   /** Vendor application identifier used by Volcengine and iFlytek speech APIs. */
@@ -125,6 +130,7 @@ export const providerSuggestedChatModels: Partial<Record<ProviderId, string[]>> 
   deepseek: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash'],
   glm: ['glm-4.5-flash', 'glm-4.5', 'glm-4-plus', 'glm-4-air'],
   qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max', 'qwen3.5:4b'],
+  volcengine: ['doubao-seed-2-1-pro-260628'],
   ollama: ['llama3.2', 'qwen2.5', 'deepseek-r1', 'mistral'],
   'openai-compatible': [],
 };
@@ -144,7 +150,7 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
     embedding: ['text-embedding-004'],
   },
   deepseek: { chat: providerSuggestedChatModels.deepseek },
-  glm: { chat: providerSuggestedChatModels.glm, vision: ['glm-4.5v', 'glm-4v-plus'], image: ['glm-image', 'cogview-4-250304'] },
+  glm: { chat: providerSuggestedChatModels.glm, vision: ['glm-4.5v', 'glm-4v-plus'], image: ['glm-image', 'cogview-4-250304'], embedding: ['embedding-3'] },
   qwen: {
     chat: providerSuggestedChatModels.qwen,
     vision: ['qwen3-vl-flash', 'qwen-vl-max', 'qwen-vl-plus'],
@@ -152,13 +158,14 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
     embedding: ['text-embedding-v4', 'text-embedding-v3'],
     asr: ['paraformer-v2', 'paraformer-8k-v2'],
     tts: ['qwen-audio-3.1-tts-flash', 'qwen-audio-3.0-tts-flash', 'cosyvoice-v3-flash', 'cosyvoice-v2'],
+    realtime: ['qwen-audio-3.1-realtime-plus', 'qwen3.8-omni-flash-realtime'],
   },
-  volcengine: { asr: ['bigmodel'], tts: ['volc-tts'] },
+  volcengine: { chat: providerSuggestedChatModels.volcengine, asr: ['bigmodel'], tts: ['volc-tts'], realtime: ['1.2.6.1'] },
   iflytek: { asr: ['ifasr'], tts: ['online-tts'] },
   ollama: { chat: providerSuggestedChatModels.ollama },
   // Compatible services are intentionally vendor-neutral. eSight is entered
   // as a model ID under `quantum-code`, never as a provider protocol/type.
-  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [], decision: [], ontology: [] },
+  'openai-compatible': { chat: [], 'quantum-code': [], image: [], vision: [], embedding: [], asr: [], tts: [], realtime: [], decision: [], ontology: [] },
 };
 
 const providerAutoProfiles: Partial<Record<ProviderId, Partial<Record<ModelCapability, string>>>> = {
@@ -166,9 +173,9 @@ const providerAutoProfiles: Partial<Record<ProviderId, Partial<Record<ModelCapab
   anthropic: { chat: 'claude-sonnet-4-5', vision: 'claude-sonnet-4-5' },
   google: { chat: 'gemini-2.5-flash', vision: 'gemini-2.5-flash', image: 'gemini-2.5-flash-image', embedding: 'text-embedding-004' },
   deepseek: { chat: 'deepseek-chat' },
-  glm: { chat: 'glm-4.5-flash', vision: 'glm-4.5v', image: 'glm-image' },
-  qwen: { chat: 'qwen-plus', vision: 'qwen3-vl-flash', image: 'wan2.2-t2i-flash', embedding: 'text-embedding-v4', asr: 'paraformer-v2', tts: 'qwen-audio-3.1-tts-flash' },
-  volcengine: { asr: 'bigmodel', tts: 'volc-tts' },
+  glm: { chat: 'glm-4.5-flash', vision: 'glm-4.5v', image: 'glm-image', embedding: 'embedding-3' },
+  qwen: { chat: 'qwen-plus', vision: 'qwen3-vl-flash', image: 'wan2.2-t2i-flash', embedding: 'text-embedding-v4', asr: 'paraformer-v2', tts: 'qwen-audio-3.1-tts-flash', realtime: 'qwen-audio-3.1-realtime-plus' },
+  volcengine: { chat: 'doubao-seed-2-1-pro-260628', asr: 'bigmodel', tts: 'volc-tts', realtime: '1.2.6.1' },
   iflytek: { asr: 'ifasr', tts: 'online-tts' },
   ollama: { chat: 'llama3.2' },
 };
@@ -179,6 +186,17 @@ export interface ProviderAutoConfigurationResult {
   addedModels: number;
   preserved: ModelCapability[];
   manualRequired: boolean;
+}
+
+export function migrateLegacyRealtimeProvider(current: ModelSettings, legacy: { apiKey?: string; model?: string; voice?: string }) {
+  if (!legacy.apiKey?.trim() || current.models.some((item) => item.capability === 'realtime')) return current;
+  const provider = createProviderInstance('volcengine', current.providerInstances);
+  provider.service = 'realtime'; provider.name = suggestedProviderConnectionName('volcengine', 'realtime', current.providerInstances);
+  provider.baseUrl = defaultProviderBaseUrlForService('volcengine', 'realtime'); provider.apiKey = legacy.apiKey.trim();
+  const next = applyRecommendedProviderSetup(current, provider).settings;
+  const realtime = next.models.find((item) => item.providerInstanceId === provider.id && item.capability === 'realtime');
+  if (realtime) { realtime.modelId = legacy.model?.trim() || realtime.modelId; realtime.voice = legacy.voice?.trim() || realtime.voice; }
+  return sanitizeModelSettings(next);
 }
 
 export const MODEL_HEALTH_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
@@ -209,6 +227,15 @@ export function applyRecommendedProviderSetup(
   const settingsValue: ModelSettings = JSON.parse(JSON.stringify(current));
   if (!settingsValue.providerInstances.some((item) => item.id === instance.id)) settingsValue.providerInstances.push(JSON.parse(JSON.stringify(instance)));
   const profile = { ...(providerAutoProfiles[instance.type] ?? {}) };
+  if (instance.service === 'language') {
+    delete profile.asr;
+    delete profile.tts;
+    delete profile.realtime;
+  } else if (instance.service === 'speech' || instance.service === 'realtime') {
+    for (const capability of ['chat', 'vision', 'image', 'embedding', 'decision', 'ontology', 'quantum-code'] as ModelCapability[]) delete profile[capability];
+    if (instance.service === 'speech') delete profile.realtime;
+    if (instance.service === 'realtime') { delete profile.asr; delete profile.tts; }
+  }
   if (instance.type === 'qwen' && instance.workspaceId?.trim()) profile.image = 'qwen-image-3.0';
   const configured: ModelCapability[] = [];
   const preserved: ModelCapability[] = [];
@@ -224,6 +251,7 @@ export function applyRecommendedProviderSetup(
         ...(capability === 'chat' && instance.type === 'qwen' ? { supportsBuiltinWebSearch: true } : {}),
         ...(capability === 'image' ? { imageProtocol: inferImageGenerationProtocol(instance.type, modelId) } : {}),
         ...(capability === 'tts' ? { voice: suggestedSpeechVoices(instance.type, modelId)[0] } : {}),
+        ...(capability === 'realtime' ? { voice: suggestedSpeechVoices(instance.type, modelId)[0] } : {}),
       };
       settingsValue.models.push(model);
       addedModels += 1;
@@ -260,6 +288,7 @@ export function modelLikelySupportsCapability(modelId: string, capability: Model
     embedding: /(embed|embedding|vector)/,
     asr: /(asr|speech.?to.?text|transcri|whisper|paraformer|recogn)/,
     tts: /(tts|text.?to.?speech|speech.?synth|cosyvoice)/,
+    realtime: /(realtime|duplex|omni|speech.?to.?speech|1\.2\.6\.1)/,
     'quantum-code': /(quantum|esight)/,
     vision: /(vision|(?:^|[-_])vl(?:[-_]|$)|gemini|claude|gpt-4o|gpt-4\.1)/,
   };
@@ -276,7 +305,7 @@ export const defaultBaseUrl: Record<ProviderId, string> = {
   deepseek: 'https://api.deepseek.com/v1',
   glm: 'https://open.bigmodel.cn/api/paas/v4',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  volcengine: 'https://openspeech.bytedance.com',
+  volcengine: 'https://ark.cn-beijing.volces.com/api/v3',
   iflytek: 'https://raasr.xfyun.cn',
   ollama: 'http://127.0.0.1:11434/v1',
   'openai-compatible': '',
@@ -377,7 +406,7 @@ export function providerNeedsApiKey(provider: ProviderId) {
 }
 
 export function providerSupportsOpenAiModelList(provider: ProviderId) {
-  return provider === 'openai' || provider === 'deepseek' || provider === 'glm' || provider === 'qwen' || provider === 'openai-compatible' || provider === 'ollama';
+  return provider === 'openai' || provider === 'deepseek' || provider === 'glm' || provider === 'qwen' || provider === 'volcengine' || provider === 'openai-compatible' || provider === 'ollama';
 }
 
 export function uniqueModels(values: string[]) {
@@ -412,12 +441,26 @@ export function defaultProviderName(type: ProviderId, existing: ProviderInstance
   return count <= 1 ? labels[type] : `${labels[type]} #${count}`;
 }
 
+export function suggestedProviderConnectionName(type: ProviderId, service: ProviderService, existing: ProviderInstance[]) {
+  const base = defaultProviderName(type, existing);
+  if (providerServiceOptions(type).length <= 1 || service === 'unified') return base;
+  const suffix: Record<ProviderService, string> = { language: '大模型', speech: '语音', realtime: '实时语音', unified: '' };
+  return `${base} · ${suffix[service]}`;
+}
+
+export function providerSupportsRecommendedSetup(instance: Pick<ProviderInstance, 'type' | 'service'>) {
+  return Boolean(providerAutoProfiles[instance.type] && Object.keys(providerAutoProfiles[instance.type] ?? {}).length);
+}
+
 export function createProviderInstance(type: ProviderId, existing: ProviderInstance[] = []): ProviderInstance {
+  const service = defaultProviderService(type);
   return {
     id: newId(),
     type,
-    name: defaultProviderName(type, existing),
-    baseUrl: defaultBaseUrl[type],
+    name: suggestedProviderConnectionName(type, service, existing),
+    baseUrl: defaultProviderBaseUrlForService(type, service),
+    service,
+    endpoints: {},
     workspaceId: '',
     appId: '',
     apiSecret: '',
@@ -429,7 +472,7 @@ export function createProviderInstance(type: ProviderId, existing: ProviderInsta
 export function providerInstanceReady(instance: ProviderInstance) {
   if (instance.type === 'openai-compatible' && !instance.baseUrl.trim()) return false;
   if (providerNeedsApiKey(instance.type) && !instance.apiKey.trim()) return false;
-  if ((instance.type === 'volcengine' || instance.type === 'iflytek') && !instance.appId?.trim()) return false;
+  if (((instance.type === 'volcengine' && instance.service === 'speech') || instance.type === 'iflytek') && !instance.appId?.trim()) return false;
   if (instance.type === 'iflytek' && !instance.apiSecret?.trim()) return false;
   if (instance.type === 'ollama' && !instance.baseUrl.trim()) return false;
   if (instance.baseUrl.trim()) {
@@ -438,8 +481,72 @@ export function providerInstanceReady(instance: ProviderInstance) {
   return true;
 }
 
-export function effectiveProviderBaseUrl(instance: ProviderInstance) {
-  return resolveProviderBaseUrl({ provider: instance.type, baseUrl: instance.baseUrl, workspaceId: instance.workspaceId });
+function inferLegacyProviderService(instance: Pick<ProviderInstance, 'type' | 'baseUrl' | 'appId'>): ProviderService {
+  if (instance.type === 'volcengine' && (/openspeech|speech/i.test(instance.baseUrl) || Boolean(instance.appId))) return 'speech';
+  return defaultProviderService(instance.type);
+}
+
+export function providerServiceOptions(provider: ProviderId): ProviderService[] {
+  if (provider === 'volcengine') return ['language', 'speech', 'realtime'];
+  if (provider === 'qwen' || provider === 'openai') return ['unified', 'language', 'speech'];
+  if (provider === 'iflytek') return ['speech'];
+  return ['language'];
+}
+
+/**
+ * Only expose product-line selection when one credential cannot reliably cover
+ * every adapted service. Unified providers keep their internal legacy options
+ * for backwards compatibility, but new and edited connections stay simple.
+ */
+export function providerRequiresServiceSelection(provider: ProviderId) {
+  return provider === 'volcengine';
+}
+
+export function defaultProviderService(provider: ProviderId): ProviderService {
+  if (provider === 'qwen' || provider === 'openai') return 'unified';
+  if (provider === 'iflytek') return 'speech';
+  return 'language';
+}
+
+export function defaultProviderBaseUrlForService(provider: ProviderId, service: ProviderService) {
+  if (provider === 'volcengine' && service !== 'language') return 'https://openspeech.bytedance.com';
+  return defaultBaseUrl[provider];
+}
+
+export function providerDerivedEndpoints(instance: ProviderInstance) {
+  const capabilities: ModelCapability[] = instance.service === 'speech' || instance.service === 'realtime'
+    ? ['asr', 'tts']
+    : instance.service === 'language'
+      ? ['chat', 'image', 'embedding']
+      : ['chat', 'image', 'embedding', 'asr', 'tts'];
+  const rows = capabilities.map((capability) => ({ capability, url: effectiveProviderBaseUrl(instance, capability) }));
+  if (instance.service === 'realtime' || instance.service === 'unified') {
+    rows.push({ capability: 'realtime' as ModelCapability, url: resolveProviderServiceEndpoint({
+      provider: instance.type, baseUrl: instance.baseUrl, workspaceId: instance.workspaceId,
+      service: instance.service, endpoint: 'realtime', endpoints: instance.endpoints,
+    }) });
+  }
+  return rows.filter((row, index) => row.url && rows.findIndex((candidate) => candidate.url === row.url) === index);
+}
+
+export function endpointKindForCapability(capability: ModelCapability): ProviderEndpointKind {
+  if (capability === 'image') return 'image';
+  if (capability === 'embedding') return 'embedding';
+  if (capability === 'asr') return 'asr';
+  if (capability === 'tts') return 'tts';
+  if (capability === 'realtime') return 'realtime';
+  return 'chat';
+}
+
+export function effectiveProviderBaseUrl(instance: ProviderInstance, capability: ModelCapability = 'chat') {
+  return resolveProviderServiceEndpoint({
+    provider: instance.type,
+    baseUrl: instance.baseUrl,
+    workspaceId: instance.workspaceId,
+    service: instance.service,
+    endpoint: endpointKindForCapability(capability),
+    endpoints: instance.endpoints,
+  });
 }
 
 /** Drop models whose provider connection is incomplete (no valid key/URL). */
@@ -543,7 +650,7 @@ export function resolveConfiguredModel(model: ConfiguredModel, instances = setti
     providerInstanceId: instance.id,
     providerLabel: instance.name,
     provider: instance.type,
-    baseUrl: effectiveProviderBaseUrl(instance),
+    baseUrl: effectiveProviderBaseUrl(instance, model.capability),
     chatModel: model.capability === 'chat' ? model.modelId : '',
     chatModels: model.capability === 'chat' ? [model.modelId] : [],
     disableThinking: instance.disableThinking,
@@ -644,6 +751,18 @@ function normalize(value: unknown): ModelSettings {
         type: providerIds.includes(item.type) ? item.type : ('openai-compatible' as ProviderId),
         name: String(item.name || '').trim() || defaultProviderName(item.type, []),
         baseUrl: String(item.baseUrl || ''),
+        service: (() => {
+          const type = providerIds.includes(item.type) ? item.type : 'openai-compatible';
+          const requested = String(item.service || '') as ProviderService;
+          return providerServiceOptions(type).includes(requested)
+            ? requested
+            : inferLegacyProviderService({ type, baseUrl: String(item.baseUrl || ''), appId: String(item.appId || '') });
+        })(),
+        endpoints: item.endpoints && typeof item.endpoints === 'object'
+          ? Object.fromEntries(Object.entries(item.endpoints).filter(([, endpoint]) => {
+              try { return Boolean(endpoint) && Boolean(new URL(String(endpoint))); } catch { return false; }
+            })) as ProviderEndpointOverrides
+          : {},
         workspaceId: String(item.workspaceId || '').trim() || undefined,
         appId: String(item.appId || '').trim() || undefined,
         apiSecret: String(item.apiSecret || ''),
@@ -663,7 +782,7 @@ function normalize(value: unknown): ModelSettings {
           providerInstanceId: String(item.providerInstanceId || ''),
           capability: (modelCapabilities.includes(item.capability) ? item.capability : 'chat') as ModelCapability,
           modelId: String(item.modelId || '').trim(),
-          voice: item.capability === 'tts' && item.voice ? String(item.voice).trim() || undefined : undefined,
+          voice: (item.capability === 'tts' || item.capability === 'realtime') && item.voice ? String(item.voice).trim() || undefined : undefined,
           label: item.label ? String(item.label) : undefined,
           imageProtocol: item.capability === 'image' && imageGenerationProtocols.includes(imageProtocol)
             ? imageProtocol
@@ -719,7 +838,11 @@ async function load() {
   if (loaded.value) return;
   const stored = window.workmateDesktop ? await window.workmateDesktop.getModelConfig() : await getServerModelConfig();
   const before = JSON.stringify(stored ?? {});
-  const next = normalize(stored);
+  let next = normalize(stored);
+  if (!next.models.some((item) => item.capability === 'realtime')) {
+    const legacy = await getLegacyRealtimeMigrationSource().catch(() => null);
+    if (legacy?.available) next = migrateLegacyRealtimeProvider(next, legacy);
+  }
   settings.value = next;
   loaded.value = true;
   const after = JSON.stringify(next);
@@ -1020,12 +1143,12 @@ export function useModelConfig() {
         capability: binding.capability,
         provider: provider.type,
         providerLabel: provider.name,
-        baseUrl: resolveProviderBaseUrl({ provider: provider.type, baseUrl: provider.baseUrl, workspaceId: provider.workspaceId }),
+        baseUrl: effectiveProviderBaseUrl(provider, model.capability),
         apiKey: apiKeyForRequest(resolveConfiguredModel(model, settings.value.providerInstances)!),
         ...(provider.appId ? { appId: provider.appId } : {}),
         ...(provider.apiSecret ? { apiSecret: provider.apiSecret } : {}),
         modelId: model.modelId,
-        ...(model.capability === 'tts' && model.voice?.trim() ? { voice: model.voice.trim() } : {}),
+        ...((model.capability === 'tts' || model.capability === 'realtime') && model.voice?.trim() ? { voice: model.voice.trim() } : {}),
         imageProtocol: model.capability === 'image'
           ? (model.imageProtocol ?? inferImageGenerationProtocol(provider.type, model.modelId))
           : undefined,

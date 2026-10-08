@@ -16,6 +16,7 @@ function providerInput(body: unknown) {
     type: String(value.type || '').trim(),
     baseUrl: String(value.baseUrl || '').trim(),
     workspaceId: String(value.workspaceId || '').trim(),
+    service: String(value.service || '').trim(),
     apiKey: String(value.apiKey || '').trim(),
     model: String(value.model || '').trim(),
   };
@@ -46,10 +47,10 @@ function extractModelsCount(payload: Record<string, unknown> | null) {
   return rows.length;
 }
 
-async function testProviderConnection(value: { type: string; baseUrl: string; workspaceId?: string; apiKey: string }) {
+async function testProviderConnection(value: { type: string; baseUrl: string; workspaceId?: string; service?: string; apiKey: string }) {
   const { type, apiKey } = value;
   const baseUrl = resolveProviderBaseUrl({ provider: type, baseUrl: value.baseUrl, workspaceId: value.workspaceId });
-  if (type === 'volcengine' || type === 'iflytek') {
+  if ((type === 'volcengine' && value.service !== 'language') || type === 'iflytek') {
     return { ok: true as const, message: '语音凭据已完整配置；该厂商没有通用模型列表接口，请通过 ASR/TTS 能力执行真实连通性验证。' };
   }
   if (type === 'ollama') {

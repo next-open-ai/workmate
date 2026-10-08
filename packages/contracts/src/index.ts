@@ -55,7 +55,7 @@ export const AgentSkillRuntimeSchema = z.object({
 });
 export type AgentSkillRuntime = z.infer<typeof AgentSkillRuntimeSchema>;
 
-export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'decision', 'ontology']);
+export const ModelCapabilitySchema = z.enum(['chat', 'quantum-code', 'image', 'vision', 'embedding', 'asr', 'tts', 'realtime', 'decision', 'ontology']);
 export type ModelCapability = z.infer<typeof ModelCapabilitySchema>;
 export const ImageGenerationProtocolSchema = z.enum([
   'openai-images',
@@ -154,7 +154,37 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
 
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
+/** Provider-confirmed counters plus local audio timing for one realtime voice session. */
+export const RealtimeVoiceUsageSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  source: z.enum(['upstream', 'local']),
+  elapsedMs: z.number().int().nonnegative(),
+  inputAudioMs: z.number().int().nonnegative(),
+  outputAudioMs: z.number().int().nonnegative(),
+  turns: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  totalTokens: z.number().int().nonnegative().optional(),
+  characters: z.number().int().nonnegative().optional(),
+});
+export type RealtimeVoiceUsage = z.infer<typeof RealtimeVoiceUsageSchema>;
+
 export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'deepseek', 'glm', 'qwen', 'volcengine', 'iflytek', 'ollama', 'openai-compatible']);
+export const ProviderServiceSchema = z.enum(['language', 'speech', 'realtime', 'unified']);
+export type ProviderService = z.infer<typeof ProviderServiceSchema>;
+export const ProviderEndpointKindSchema = z.enum(['chat', 'image', 'embedding', 'asr', 'tts', 'realtime', 'native']);
+export type ProviderEndpointKind = z.infer<typeof ProviderEndpointKindSchema>;
+export const ProviderEndpointOverridesSchema = z.object({
+  chat: z.string().url().optional(),
+  image: z.string().url().optional(),
+  embedding: z.string().url().optional(),
+  asr: z.string().url().optional(),
+  tts: z.string().url().optional(),
+  realtime: z.string().url().optional(),
+  native: z.string().url().optional(),
+}).partial();
+export type ProviderEndpointOverrides = z.infer<typeof ProviderEndpointOverridesSchema>;
 export const AUDIO_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 export const AUDIO_UPLOAD_EXTENSIONS = ['aac', 'flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'ogg', 'opus', 'wav', 'webm'] as const;
 export const AudioUploadSchema = z.object({
@@ -231,6 +261,19 @@ export type DecisionRuntimeConfig = z.infer<typeof DecisionRuntimeConfigSchema>;
 
 /** Curated suggestions, not an exhaustive allowlist. Keep custom/clone voices valid. */
 export function suggestedSpeechVoices(provider: string, modelId: string): string[] {
+  if (provider === 'volcengine' && /^(?:1\.2\.6\.1|seedduplex|realtime)/i.test(modelId.trim())) {
+    return [
+      'zh_female_vv_jupiter_bigtts',
+      'zh_female_xiaohe_jupiter_bigtts',
+      'zh_male_yunzhou_jupiter_bigtts',
+      'zh_male_xiaotian_jupiter_bigtts',
+      'saturn_zh_female_aojiaonvyou_tob',
+    ];
+  }
+  if (provider === 'qwen' && /realtime/i.test(modelId.trim())) {
+    if (/omni/i.test(modelId)) return ['Tina'];
+    return ['longanqian_v3.1', 'longanhuan_v3.1', 'longanlingxin_v3.1', 'longanfengyue_v3.1', 'xunanchuan_v3.1'];
+  }
   if (provider !== 'qwen') return provider === 'iflytek' ? ['xiaoyan'] : [];
   const model = modelId.trim().toLowerCase();
   if (model === 'qwen-audio-3.1-tts-flash') return ['longanhuan_v3.1', 'longanlingxin_v3.1', 'xunanchuan_v3.1'];
@@ -261,6 +304,48 @@ export function resolveProviderBaseUrl(input: { provider: string; baseUrl: strin
   if (!region) return baseUrl;
   url.hostname = `${workspaceId}.${region}.maas.aliyuncs.com`;
   return url.toString().replace(/\/$/, '');
+}
+
+function replaceProviderPath(value: string, path: string, protocol?: 'http' | 'ws') {
+  try {
+    const url = new URL(value);
+    if (protocol === 'ws') url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+    if (protocol === 'http') url.protocol = url.protocol === 'ws:' ? 'http:' : 'https:';
+    url.pathname = path;
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return value;
+  }
+}
+
+/** Resolve one capability endpoint while preserving legacy single-URL connections. */
+export function resolveProviderServiceEndpoint(input: {
+  provider: string;
+  baseUrl: string;
+  workspaceId?: string;
+  service?: ProviderService;
+  endpoint: ProviderEndpointKind;
+  endpoints?: ProviderEndpointOverrides;
+}): string {
+  const overridden = input.endpoints?.[input.endpoint]?.trim();
+  if (overridden) return overridden;
+  const base = resolveProviderBaseUrl(input);
+  if (!base) return base;
+  if (input.provider === 'qwen') {
+    if (input.endpoint === 'native') return replaceProviderPath(base, '/api/v1', 'http');
+    if (input.endpoint === 'realtime') return replaceProviderPath(base, '/api-ws/v1/realtime', 'ws');
+    if (input.endpoint === 'asr' || input.endpoint === 'tts') return replaceProviderPath(base, '/api/v1', 'http');
+    return replaceProviderPath(base, '/compatible-mode/v1', 'http');
+  }
+  if (input.provider === 'volcengine' && input.service === 'language') {
+    return replaceProviderPath(base, '/api/v3', 'http');
+  }
+  if (input.provider === 'volcengine' && input.endpoint === 'realtime') {
+    return replaceProviderPath(base, '/api/v3/duplex/realtime/dialogue', 'ws');
+  }
+  return base;
 }
 export const DEFAULT_EMBEDDING_META = Object.freeze({
   dimension: 1024,
