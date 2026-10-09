@@ -5,8 +5,10 @@ const root = process.cwd();
 const assetsDir = path.join(root, 'apps/renderer/dist/assets');
 const generatedPath = path.join(root, 'apps/renderer/src/generated/user-manual.json');
 const adapterPath = path.join(root, 'apps/renderer/src/app/user-manual.ts');
+const docsPagePath = path.join(root, 'apps/renderer/src/features/docs/DocsPage.vue');
 const generated = JSON.parse(await readFile(generatedPath, 'utf8'));
 const adapter = await readFile(adapterPath, 'utf8');
+const docsPageSource = await readFile(docsPagePath, 'utf8');
 if (generated.source !== 'docs/guides/user-manual.md' || generated.sections.length < 2 || generated.headings.length < 2) {
   throw new Error('MANUAL-PERF-TEST-01: invalid generated manual payload');
 }
@@ -42,6 +44,7 @@ const assertions = [
   ['lazy image loading', generatedHtml.includes('loading="lazy"')],
   ['asynchronous image decoding', generatedHtml.includes('decoding="async"')],
   ['stable image dimensions', generatedHtml.includes('width="1600"') && generatedHtml.includes('height="1000"')],
+  ['external manual links use a separate window', docsPageSource.includes("openExternalBestEffort(href)") && docsPageSource.includes("/^https?:\\/\\//i")],
 ];
 
 for (const [label, passed] of assertions) {

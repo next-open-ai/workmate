@@ -312,19 +312,19 @@ async function testInstance(instance: ProviderInstance) {
             </select>
             <span class="text-[11px] font-normal">{{ t('settings.providerServiceHelp') }}</span>
           </label>
-          <label v-if="instance.type === 'qwen'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
-            <span>{{ t('settings.workspaceId') }}</span>
-            <input
-              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
-              type="text"
-              :value="instance.workspaceId || ''"
-              :placeholder="t('settings.workspaceIdHint')"
-              @input="patch(instance.id, { workspaceId: eventValue($event).trim() })"
-            />
-            <span class="text-[11px] font-normal leading-relaxed text-[var(--muted)]">{{ t('settings.workspaceIdHelp') }}</span>
-          </label>
           <details class="rounded-xl border border-[var(--border)] px-3 py-2.5 text-xs text-[var(--muted)]">
             <summary class="cursor-pointer select-none font-semibold text-[var(--text)]">{{ t('settings.advancedConnection') }}</summary>
+            <label v-if="instance.type === 'qwen'" class="mt-2 grid gap-1.5 font-semibold">
+              <span>{{ t('settings.workspaceId') }}</span>
+              <input
+                class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
+                type="text"
+                :value="instance.workspaceId || ''"
+                :placeholder="t('settings.workspaceIdHint')"
+                @input="patch(instance.id, { workspaceId: eventValue($event).trim() })"
+              />
+              <span class="text-[11px] font-normal leading-relaxed text-[var(--muted)]">{{ t('settings.workspaceIdHelp') }}</span>
+            </label>
             <label class="mt-2 grid gap-1.5 font-semibold">
             <span>{{ t('settings.customBaseUrl') }}</span>
             <input

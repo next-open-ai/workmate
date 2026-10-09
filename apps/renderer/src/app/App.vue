@@ -9,6 +9,7 @@ import CapabilitiesPage from '../features/capabilities/CapabilitiesPage.vue';
 import KnowledgePage from '../features/knowledge/KnowledgePage.vue';
 import AssetsPage from '../features/assets/AssetsPage.vue';
 import DataWorkbenchPage from '../features/data/DataWorkbenchPage.vue';
+import { useWorkbenchNavigation } from '../features/data/workbench-navigation';
 import AutomationsPage from '../features/automations/AutomationsPage.vue';
 import ProjectsPage from '../features/projects/ProjectsPage.vue';
 import RemoteOfficePage from '../features/remote/RemoteOfficePage.vue';
@@ -77,6 +78,8 @@ const {
 } = useAuth();
 const { employees, view, currentEmployeeId, currentEmployee, conversations, activeConversation, permissionTier, load: loadWorkspace, setView, startChat, startChatWithPrompt, selectConversation, selectEmployee, setDefaultEmployee, setPermissionTier, clearConversation, deleteConversation, addMessage, abortActiveRun, runAutomation, runProjectTask, generateProjectDraft, approveAndRetry, createEmployee, updateEmployee, removeEmployee, resetEmployee, hasEmployeeOverride, ensureActiveServerSession, pullActiveConversationFromServer, followMobileChatSession } = useWorkspace();
 const serviceReady = ref(false);
+const dataNavigationScope = computed(() => user.value ? `${user.value.orgId}:${user.value.id}` : '');
+const { navigation: dataNavigation, remember: rememberDataNavigation } = useWorkbenchNavigation(dataNavigationScope);
 // Navigation hides the existing chat instead of destroying active audio sessions.
 const chatMounted = ref(false);
 const voiceActive = ref(false);
@@ -389,6 +392,10 @@ async function handleLogout() {
       <AssetsPage v-else-if="view === 'assets'" :conversations="conversations" @open-conversation="(id) => { selectConversation(id); setView('chat'); }" @open-project="openProjectFromAssets" @open-data="setView('data')" />
       <DataWorkbenchPage
         v-else-if="view === 'data'"
+        :key="dataNavigationScope"
+        :navigation="dataNavigation"
+        :navigation-scope="dataNavigationScope"
+        @remember-navigation="rememberDataNavigation"
         @start-chat="startChat"
         @start-customize="(prompt) => { void startChatWithPrompt(prompt, modelConfig); }"
       />

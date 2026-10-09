@@ -61,6 +61,10 @@ try {
   assert.match(providerEditorSource, /providerRequiresServiceSelection\(addDraft\.type\)/);
   assert.match(providerEditorSource, /providerRequiresServiceSelection\(instance\.type\)/);
   assert.doesNotMatch(providerEditorSource, /providerServiceAdvanced/);
+  assert.match(providerEditorSource, /<details[^>]*>[\s\S]*instance\.type === 'qwen'[\s\S]*settings\.workspaceIdHelp/);
+  const i18nSource = fs.readFileSync('apps/renderer/src/app/i18n.ts', 'utf8');
+  assert.match(i18nSource, /settings\.workspaceIdHint': '默认留空，无需配置'/);
+  assert.match(i18nSource, /标准模型默认使用 API Key 所属的默认业务空间，留空即可/);
   const settingsPageSource = fs.readFileSync('apps/renderer/src/features/settings/SettingsPage.vue', 'utf8');
   assert.doesNotMatch(settingsPageSource, /\{ id: 'voice', labelKey: 'settings\.tabVoice' \}/);
   assert.match(settingsPageSource, /tab === 'models'.*RealtimeVoiceSettingsCard/s);

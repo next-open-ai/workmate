@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { manualHeadings, manualSections, type ManualSection } from '../../app/user-manual';
+import { openExternalBestEffort } from '../../app/platform-actions';
 
 /**
  * 「用户手册」页面：把 docs/guides/user-manual.md 渲染为带目录的阅读视图。
@@ -41,14 +42,25 @@ function openSection(section: ManualSection) {
   void nextTick(() => contentRef.value?.closest('.overflow-auto')?.scrollTo({ top: 0, behavior: 'smooth' }));
 }
 
-/** 手册内 `[文字](#锚点)` 跳转拦截：平滑滚动到对应章节而非修改页面 hash。 */
+/**
+ * 手册链接统一接管：页内锚点留在手册中跳转；供应商控制台等
+ * HTTP(S) 外链使用独立系统浏览器窗口，避免覆盖当前配置现场。
+ */
 function onArticleClick(event: MouseEvent) {
-  const link = (event.target as HTMLElement).closest?.('a[href^="#"]');
+  const link = (event.target as HTMLElement).closest?.('a[href]') as HTMLAnchorElement | null;
   if (!link) return;
-  const id = decodeURIComponent((link.getAttribute('href') || '').slice(1));
-  if (!id) return;
-  event.preventDefault();
-  jumpTo(id);
+  const href = (link.getAttribute('href') || '').trim();
+  if (href.startsWith('#')) {
+    const id = decodeURIComponent(href.slice(1));
+    if (!id) return;
+    event.preventDefault();
+    jumpTo(id);
+    return;
+  }
+  if (/^https?:\/\//i.test(href)) {
+    event.preventDefault();
+    void openExternalBestEffort(href);
+  }
 }
 
 onMounted(() => {

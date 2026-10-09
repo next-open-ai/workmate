@@ -6,7 +6,10 @@ import path from 'node:path';
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appsRoot = path.resolve(desktopRoot, '..');
 const projectRoot = path.resolve(appsRoot, '..');
-const stageRoot = path.join(desktopRoot, 'stage');
+// Acceptance may stage into a fresh private directory without replacing the
+// developer's current release resources. Never erase an overridden target.
+const customStageRoot = process.env.WORKMATE_STAGE_DIR?.trim();
+const stageRoot = customStageRoot ? path.resolve(customStageRoot) : path.join(desktopRoot, 'stage');
 const runtimeRoot = path.join(projectRoot, 'runtimes', 'agentscope-runtime');
 const sqlJsDist = path.dirname(createRequire(path.join(desktopRoot, 'package.json')).resolve('sql.js/dist/sql-wasm.js'));
 const sources = [
@@ -14,7 +17,11 @@ const sources = [
   { from: path.join(appsRoot, 'api', 'dist'), to: path.join(stageRoot, 'api') },
 ];
 
-rmSync(stageRoot, { recursive: true, force: true });
+if (customStageRoot) {
+  if (existsSync(stageRoot)) throw new Error('WORKMATE_STAGE_DIR must be a new directory; refusing to overwrite it.');
+} else {
+  rmSync(stageRoot, { recursive: true, force: true });
+}
 for (const source of sources) {
   if (!existsSync(source.from)) throw new Error(`Missing build output: ${source.from}`);
   cpSync(source.from, source.to, { recursive: true, dereference: true });

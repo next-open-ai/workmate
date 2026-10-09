@@ -1,5 +1,8 @@
-import { dataColumnSchema, type DataColumn } from '@workmate/contracts';
+import { dataColumnSchema, dataObjectAnnotationsSchema, remoteDatabaseConnectionSchema, remoteDatabaseImportSchema, type RemoteDatabasePublicConnection, type DataColumn, type DataObjectModelSchema } from '@workmate/contracts';
+import { inspectRemoteDatabase, importRemoteDatabase, remoteError, RemoteBusyError, type RemoteFactory } from './remote-database.js';
+import { readAnnotations, modelReadableSchema, jsonDataRows } from './data-object.js';
 import fs from 'node:fs';
+import type { DataAppDelivery } from '@workmate/contracts';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -23,7 +26,7 @@ type SqlDatabase = {
 };
 
 type SqlJs = { Database: new (data?: Uint8Array | Buffer) => SqlDatabase };
-type DiscoveredTable = { name: string; sheetName: string; rows: unknown[][]; columns: DatasetColumn[] };
+type DiscoveredTable = { name: string; sheetName: string; description?: string; rows: unknown[][]; columns: DatasetColumn[] };
 
 type DatasetColumn = DataColumn;
 type DatasetTable = { id: string; name: string; sheetName: string; rowCount: number; columns: DatasetColumn[] };
@@ -58,7 +61,18 @@ async function database() {
       const db = new SQL.Database(fs.existsSync(databaseFile()) ? fs.readFileSync(databaseFile()) : undefined) as SqlDatabase;
       db.run('CREATE TABLE IF NOT EXISTS data_sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, asset_id TEXT NOT NULL, file_type TEXT NOT NULL, table_count INTEGER NOT NULL, row_count INTEGER NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL, org_id TEXT NOT NULL, owner_user_id TEXT NOT NULL)');
       db.run('CREATE TABLE IF NOT EXISTS data_tables (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, name TEXT NOT NULL, sheet_name TEXT NOT NULL, physical_name TEXT NOT NULL, row_count INTEGER NOT NULL, columns_json TEXT NOT NULL)');
+      for (const [table, column, definition] of [
+        ['data_sources', 'annotations_json', "TEXT NOT NULL DEFAULT '{}'"],
+        ['data_tables', 'description', "TEXT NOT NULL DEFAULT ''"],
+      ]) {
+        const columns = db.exec(`PRAGMA table_info(${table})`)[0]?.values || [];
+        if (!columns.some(row => row[1] === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
       db.run('CREATE TABLE IF NOT EXISTS data_apps (id TEXT PRIMARY KEY, name TEXT NOT NULL, app_type TEXT NOT NULL, source_id TEXT NOT NULL, table_id TEXT NOT NULL, created_at INTEGER NOT NULL, org_id TEXT NOT NULL, owner_user_id TEXT NOT NULL)');
+      if (!(db.exec('PRAGMA table_info(data_apps)')[0]?.values || []).some(row => row[1] === 'creation_mode')) {
+        db.run("ALTER TABLE data_apps ADD COLUMN creation_mode TEXT NOT NULL DEFAULT 'template'");
+      }
+      db.run('CREATE TABLE IF NOT EXISTS data_database_connections (source_id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL)');
       db.run('CREATE TABLE IF NOT EXISTS data_app_publishes (app_id TEXT PRIMARY KEY, token TEXT NOT NULL, created_at INTEGER NOT NULL, last_accessed_at INTEGER)');
       db.run('CREATE TABLE IF NOT EXISTS data_app_custom_sites (app_id TEXT PRIMARY KEY, html TEXT NOT NULL, updated_at INTEGER NOT NULL, note TEXT)');
       db.run('CREATE TABLE IF NOT EXISTS data_app_site_revisions (id TEXT PRIMARY KEY, app_id TEXT NOT NULL, html TEXT NOT NULL, created_at INTEGER NOT NULL, note TEXT NOT NULL)');
@@ -105,6 +119,7 @@ function text(value: unknown) {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 function isBlank(value: unknown) { return value == null || String(value).trim() === ''; }
@@ -191,7 +206,7 @@ async function sqliteRows(content: Buffer): Promise<DiscoveredTable[]> {
   }
 }
 
-function persistSource(db: SqlDatabase, input: { name: string; fileType: string; assetId: string; discovered: DiscoveredTable[]; auth: { userId: string; orgId: string } }) {
+function persistSource(db: SqlDatabase, input: { name: string; fileType: string; assetId: string; discovered: DiscoveredTable[]; databaseConnection?: RemoteDatabasePublicConnection; auth: { userId: string; orgId: string } }) {
   const sourceId = randomUUID();
   const totalRows = input.discovered.reduce((sum, table) => sum + table.rows.length, 0);
   db.run('BEGIN');
@@ -204,9 +219,13 @@ function persistSource(db: SqlDatabase, input: { name: string; fileType: string;
         const insert = `INSERT INTO ${quote(physicalName)} VALUES (${table.columns.map(() => '?').join(', ')})`;
         for (const row of table.rows) db.run(insert, table.columns.map((_, index) => text(row[index])));
       }
-      db.run('INSERT INTO data_tables (id, source_id, name, sheet_name, physical_name, row_count, columns_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [id, sourceId, table.name, table.sheetName, physicalName, table.rows.length, JSON.stringify(table.columns)]);
+      db.run('INSERT INTO data_tables (id, source_id, name, sheet_name, physical_name, row_count, columns_json, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, sourceId, table.name, table.sheetName, physicalName, table.rows.length, JSON.stringify(table.columns), table.description || '']);
     });
     db.run('INSERT INTO data_sources (id, name, asset_id, file_type, table_count, row_count, summary, created_at, org_id, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [sourceId, input.name, input.assetId, input.fileType, input.discovered.length, totalRows, `发现 ${input.discovered.length} 张数据表，已安全复制到本机数据工作台。`, Date.now(), input.auth.orgId, input.auth.userId]);
+    if (input.databaseConnection) {
+      db.run('INSERT INTO data_database_connections (source_id, metadata_json) VALUES (?, ?)', [sourceId, JSON.stringify(input.databaseConnection)]);
+      db.run('UPDATE data_sources SET summary = ? WHERE id = ?', [databaseSnapshotSummary(input.databaseConnection), sourceId]);
+    }
     db.run('COMMIT');
     flushDatabase(db);
     return sourceId;
@@ -238,7 +257,7 @@ async function importSpreadsheetContent(name: string, content: Buffer, auth: { u
 
 function sourceList(db: SqlDatabase, auth: { userId: string; orgId: string }) {
   const defaultId = defaultSqliteSourceIdOf(db, auth);
-  return (db.exec('SELECT id, name, asset_id, file_type, table_count, row_count, summary, created_at FROM data_sources WHERE owner_user_id = ? AND org_id = ? ORDER BY created_at DESC', [auth.userId, auth.orgId])[0]?.values || [])
+  return (db.exec('SELECT id, name, asset_id, file_type, table_count, row_count, summary, created_at, annotations_json FROM data_sources WHERE owner_user_id = ? AND org_id = ? ORDER BY created_at DESC', [auth.userId, auth.orgId])[0]?.values || [])
     .map((row) => ({
       id: String(row[0]),
       name: String(row[1]),
@@ -248,16 +267,24 @@ function sourceList(db: SqlDatabase, auth: { userId: string; orgId: string }) {
       rowCount: Number(row[5]),
       summary: String(row[6]),
       createdAt: Number(row[7]),
+      annotations: readAnnotations(row[8]),
       isDefault: Boolean(defaultId && String(row[0]) === defaultId),
     }))
     .sort((left, right) => Number(right.isDefault) - Number(left.isDefault) || right.createdAt - left.createdAt);
 }
 
+function databaseSnapshotSummary(connection: RemoteDatabasePublicConnection) {
+  return `只读数据库快照，${connection.tables.length} 张表。${connection.truncatedTables.length ? `${connection.truncatedTables.length} 张表仅导入前 20,000 行。` : ''}应用读写本地副本，不回写原库。`;
+}
+function readDatabaseConnection(db: SqlDatabase, id: string): RemoteDatabasePublicConnection | undefined {
+  const row = db.exec('SELECT metadata_json FROM data_database_connections WHERE source_id = ?', [id])[0]?.values?.[0];
+  return row ? JSON.parse(String(row[0])) as RemoteDatabasePublicConnection : undefined;
+}
 function getSource(db: SqlDatabase, id: string, auth: { userId: string; orgId: string }) {
-  const row = db.exec('SELECT id, name, asset_id, file_type, table_count, row_count, summary, created_at FROM data_sources WHERE id = ? AND owner_user_id = ? AND org_id = ?', [id, auth.userId, auth.orgId])[0]?.values?.[0];
+  const row = db.exec('SELECT id, name, asset_id, file_type, table_count, row_count, summary, created_at, annotations_json FROM data_sources WHERE id = ? AND owner_user_id = ? AND org_id = ?', [id, auth.userId, auth.orgId])[0]?.values?.[0];
   if (!row) return null;
-  const tables = (db.exec('SELECT id, name, sheet_name, row_count, columns_json FROM data_tables WHERE source_id = ? ORDER BY rowid', [id])[0]?.values || []).map((item) => ({
-    id: String(item[0]), name: String(item[1]), sheetName: String(item[2]), rowCount: Number(item[3]), columns: JSON.parse(String(item[4])) as DatasetColumn[],
+  const tables = (db.exec('SELECT id, name, sheet_name, row_count, columns_json, description FROM data_tables WHERE source_id = ? ORDER BY rowid', [id])[0]?.values || []).map((item) => ({
+    id: String(item[0]), name: String(item[1]), sheetName: String(item[2]), rowCount: Number(item[3]), columns: JSON.parse(String(item[4])) as DatasetColumn[], description: String(item[5] || ''),
   }));
   const defaultId = defaultSqliteSourceIdOf(db, auth);
   const fileType = String(row[3]);
@@ -270,9 +297,11 @@ function getSource(db: SqlDatabase, id: string, auth: { userId: string; orgId: s
     rowCount: Number(row[5]),
     summary: String(row[6]),
     createdAt: Number(row[7]),
+    annotations: readAnnotations(row[8]),
     isDefault: Boolean(defaultId && String(row[0]) === defaultId),
     tables,
     api: fileType === 'API' ? publicApiConnection(db, String(row[0])) : undefined,
+    databaseConnection: readDatabaseConnection(db, id),
   };
 }
 
@@ -480,6 +509,7 @@ function discoverApiTable(items: Record<string, unknown>[]): DiscoveredTable {
     return {
       id: `c_${index + 1}`,
       name,
+      sourceName: name,
       type: inferType(values),
       nullable: values.some(isBlank),
       sample: text(values.find((value) => !isBlank(value))) || '—',
@@ -532,6 +562,7 @@ async function fetchApiPayload(conn: ApiConnectionRecord) {
 }
 
 function replaceSourceTables(db: SqlDatabase, sourceId: string, discovered: DiscoveredTable[], summary: string) {
+  const previous = (db.exec('SELECT id, name, sheet_name, columns_json, description FROM data_tables WHERE source_id = ?', [sourceId])[0]?.values || []);
   const oldPhysical = (db.exec('SELECT physical_name FROM data_tables WHERE source_id = ?', [sourceId])[0]?.values || [])
     .map((row) => String(row[0] || '').trim())
     .filter(Boolean);
@@ -541,7 +572,19 @@ function replaceSourceTables(db: SqlDatabase, sourceId: string, discovered: Disc
   db.run('DELETE FROM data_tables WHERE source_id = ?', [sourceId]);
   const totalRows = discovered.reduce((sum, table) => sum + table.rows.length, 0);
   discovered.forEach((table, tableIndex) => {
-    const id = randomUUID();
+    const existing = previous.find(row => String(row[2]) === table.sheetName);
+    const id = existing ? String(existing[0]) : randomUUID();
+    const oldColumns = existing ? JSON.parse(String(existing[3])) as DatasetColumn[] : [];
+    const usedIds = new Set(oldColumns.map(column => column.id));
+    let nextId = Math.max(0, ...oldColumns.map(column => Number(column.id.replace('c_', '')) || 0)) + 1;
+    table.columns = table.columns.map(column => {
+      const matched = oldColumns.find(old => (old.sourceName || old.name) === (column.sourceName || column.name));
+      if (matched) return { ...column, ...matched, sample: column.sample, sourceName: column.sourceName || column.name };
+      while (usedIds.has(`c_${nextId}`)) nextId++;
+      const columnId = `c_${nextId++}`;
+      usedIds.add(columnId);
+      return { ...column, id: columnId };
+    });
     const physicalName = `data_${sourceId.replace(/-/g, '')}_${tableIndex + 1}`;
     db.run(`CREATE TABLE ${quote(physicalName)} (${table.columns.map((column) => quote(column.id)).join(', ')})`);
     if (table.rows.length) {
@@ -549,8 +592,8 @@ function replaceSourceTables(db: SqlDatabase, sourceId: string, discovered: Disc
       for (const row of table.rows) db.run(insert, table.columns.map((_, index) => text(row[index])));
     }
     db.run(
-      'INSERT INTO data_tables (id, source_id, name, sheet_name, physical_name, row_count, columns_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, sourceId, table.name, table.sheetName, physicalName, table.rows.length, JSON.stringify(table.columns)],
+      'INSERT INTO data_tables (id, source_id, name, sheet_name, physical_name, row_count, columns_json, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, sourceId, existing ? String(existing[1]) : table.name, table.sheetName, physicalName, table.rows.length, JSON.stringify(table.columns), String(existing?.[4] ?? table.description ?? '')],
     );
   });
   db.run(
@@ -734,9 +777,9 @@ async function ensureDefaultSqliteSource(db: SqlDatabase, auth: { userId: string
 
 function getOwnedTable(db: SqlDatabase, sourceId: string, tableId: string, auth: { userId: string; orgId: string }) {
   if (!getSource(db, sourceId, auth)) return null;
-  const row = db.exec('SELECT id, name, physical_name, row_count, columns_json FROM data_tables WHERE id = ? AND source_id = ?', [tableId, sourceId])[0]?.values?.[0];
+  const row = db.exec('SELECT id, name, physical_name, row_count, columns_json, description FROM data_tables WHERE id = ? AND source_id = ?', [tableId, sourceId])[0]?.values?.[0];
   if (!row) return null;
-  return { id: String(row[0]), name: String(row[1]), physicalName: String(row[2]), rowCount: Number(row[3]), columns: JSON.parse(String(row[4])) as DatasetColumn[] };
+  return { id: String(row[0]), name: String(row[1]), physicalName: String(row[2]), rowCount: Number(row[3]), columns: JSON.parse(String(row[4])) as DatasetColumn[], description: String(row[5] || '') };
 }
 
 function getApp(db: SqlDatabase, appId: string, auth: { userId: string; orgId: string }) {
@@ -771,6 +814,7 @@ function appPayload(db: SqlDatabase, appId: string, auth: { userId: string; orgI
     sourceId: app.sourceId,
     tableId: app.tableId,
     createdAt: app.createdAt,
+    delivery: appDelivery(db, appId),
     table: { id: app.table.id, name: app.table.name, rowCount: app.table.rowCount, columns: app.table.columns },
     records: recordsForTable(db, app.table, search),
   };
@@ -869,6 +913,14 @@ function getCustomSiteHtml(db: SqlDatabase, appId: string) {
   return { html: String(row[0] || ''), updatedAt: Number(row[1] || 0), note: String(row[2] || '') };
 }
 
+function appDelivery(db: SqlDatabase, appId: string): DataAppDelivery {
+  if (getCustomSiteHtml(db, appId)) return { mode: 'custom', status: 'custom-ready' };
+  const mode = db.exec('SELECT creation_mode FROM data_apps WHERE id = ?', [appId])[0]?.values?.[0]?.[0];
+  return mode === 'custom'
+    ? { mode: 'custom', status: 'awaiting-binding' }
+    : { mode: 'template', status: 'template-ready' };
+}
+
 function saveCustomSiteHtml(db: SqlDatabase, appId: string, html: string, note = '') {
   const cleaned = String(html || '').trim();
   if (!cleaned || cleaned.length < 32) throw new Error('自定义站点 HTML 过短，请提交完整单页应用。');
@@ -903,12 +955,14 @@ function buildDataAppCustomizePrompt(input: {
   table: { name: string; rowCount: number; columns: DatasetColumn[] };
   samples: Array<Record<string, string>>;
   optimize?: boolean;
+  objectSchema?: DataObjectModelSchema;
 }) {
   const apiOrigin = new URL(input.publishUrl).origin;
   const schemaLines = input.table.columns.map((column) => (
-    `- ${column.id} | ${column.name} | ${column.type}${column.nullable ? ' | 可空' : ''} | 业务说明: ${column.description || '未标注'} | 示例: ${column.sample}`
+    `- ${column.id} | ${column.name} | ${column.type}${column.nullable ? ' | 可空' : ''} | 业务说明: ${column.description || '未标注'} | 示例: ${column.sensitive ? '[敏感字段已隐藏]' : column.sample}`
   )).join('\n');
-  const sampleJson = JSON.stringify(input.samples.slice(0, 5), null, 2);
+  const sensitiveFields = new Set(input.table.columns.filter(column => column.sensitive).map(column => column.id));
+  const sampleJson = JSON.stringify(input.samples.slice(0, 5).map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, sensitiveFields.has(key) ? '[敏感字段已隐藏]' : value]))), null, 2);
   return [
     input.optimize ? '【数据工作台 · 持续优化】在现有数据应用上继续修改，不得创建新的 appId。' : '【数据工作台 · 即时编程】根据 schema 与用户想法，编写一个自包含交互站（output/index.html）。',
     '',
@@ -930,6 +984,10 @@ function buildDataAppCustomizePrompt(input: {
     `- 发布 token：${input.token}`,
     `- 本机发布页：${input.publishUrl}`,
     '',
+    '## 当前数据对象说明（已保存的最新 Schema，无版本绑定）',
+    JSON.stringify(input.objectSchema || {}, null, 2),
+    '',
+    '仅使用下方所选数据表创建应用；其他资源只是背景信息，不得假设应用 token 可访问它们。API 对象通过显式同步快照取数，不要从前端直连远端 API。',
     '## Schema（API fields 键名必须用 column.id）',
     schemaLines,
     '',
@@ -1329,7 +1387,52 @@ function mobileUploadHtml(token: string) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>上传到 Workmate</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;background:linear-gradient(145deg,#eef2ff,#f8fafc 45%,#ecfeff);color:#172033;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:20px}.card{width:min(100%,480px);background:#fff;border:1px solid #dfe5f2;border-radius:28px;padding:28px;box-shadow:0 24px 70px #3153a31c}.mark{width:52px;height:52px;border-radius:17px;display:grid;place-items:center;background:#4f6bed;color:#fff;font-weight:900;font-size:20px}h1{font-size:26px;margin:20px 0 8px}p{color:#687086;line-height:1.7;margin:0}.drop{display:block;margin-top:24px;border:1.5px dashed #aab8e8;border-radius:20px;padding:28px 18px;text-align:center;background:#f7f9ff}.drop b{display:block;color:#304fc4}.drop span{display:block;margin-top:8px;font-size:12px;color:#7c8498}input{position:absolute;opacity:0;pointer-events:none}button{width:100%;border:0;border-radius:14px;padding:13px;margin-top:16px;background:#4f6bed;color:#fff;font-weight:700;font-size:15px}.file{margin-top:15px;padding:12px;border-radius:12px;background:#f3f5fa;font-size:13px;word-break:break-all}.bar{height:8px;margin-top:16px;background:#edf0f6;border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#4f6bed,#16b8ad);transition:width .3s}.status{margin-top:12px;font-size:13px;color:#526079}.ok{color:#087f5b}.err{color:#c92a2a}</style></head><body><main class="card"><div class="mark">W</div><h1>上传数据到 Workmate</h1><p>选择手机中的 Excel 或 CSV。文件将安全传入当前电脑的数据工作台，原文件同时归档到资产库。</p><label class="drop" for="file"><b>选择 Excel / CSV 文件</b><span>支持 .xlsx、.csv，最大 8 MB</span></label><input id="file" type="file" accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><div id="fileName" class="file" hidden></div><button id="send" disabled>上传到数据工作台</button><div class="bar"><i id="progress"></i></div><div id="status" class="status">等待选择文件</div></main><script>const token=${safeToken},file=document.getElementById('file'),send=document.getElementById('send'),status=document.getElementById('status'),progress=document.getElementById('progress'),fileName=document.getElementById('fileName');let selected=null;file.onchange=()=>{selected=file.files[0]||null;send.disabled=!selected;fileName.hidden=!selected;fileName.textContent=selected?selected.name+' · '+Math.ceil(selected.size/1024)+' KB':'';status.textContent=selected?'文件已就绪':'等待选择文件'};send.onclick=()=>{if(!selected)return;if(selected.size>8388608){status.className='status err';status.textContent='文件超过 8 MB';return}send.disabled=true;status.className='status';status.textContent='正在读取文件…';progress.style.width='20%';const reader=new FileReader();reader.onerror=()=>fail('读取文件失败');reader.onprogress=e=>{if(e.lengthComputable)progress.style.width=(20+e.loaded/e.total*30)+'%'};reader.onload=async()=>{progress.style.width='55%';status.textContent='正在上传并识别数据…';try{const contentBase64=String(reader.result).split(',')[1]||'';const response=await fetch('/api/data-mobile-upload/'+encodeURIComponent(token)+'/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:selected.name,contentBase64})});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.message||'上传失败');progress.style.width='100%';status.className='status ok';status.textContent='上传成功：发现 '+body.tableCount+' 张表、'+body.rowCount+' 条数据。可以回到电脑继续操作。'}catch(e){fail(e.message||'上传失败')}};reader.readAsDataURL(selected)};function fail(message){send.disabled=false;progress.style.width='0';status.className='status err';status.textContent=message}</script></body></html>`;
 }
 
-export const dataRoutes: FastifyPluginAsync = async (app) => {
+export const dataRoutes: FastifyPluginAsync<{ remoteFactory?: RemoteFactory }> = async (app, options) => {
+  app.post('/data/databases/inspect', async (request, reply) => {
+    const auth = requireAuth(request);
+    if (auth.role !== 'admin') return reply.code(403).send({ message: '请由管理员连接远端数据库。' });
+    const parsed = remoteDatabaseConnectionSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: parsed.error.issues[0]?.message || '连接信息无效。' });
+    try { return await inspectRemoteDatabase(parsed.data, options.remoteFactory); }
+    catch (error) { return reply.code(error instanceof RemoteBusyError ? 429 : 502).send({ message: error instanceof RemoteBusyError ? error.message : remoteError(error) }); }
+  });
+  app.post('/data/sources/database', async (request, reply) => {
+    const auth = requireAuth(request);
+    if (auth.role !== 'admin') return reply.code(403).send({ message: '请由管理员连接远端数据库。' });
+    const parsed = remoteDatabaseImportSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: parsed.error.issues[0]?.message || '请选择数据库与数据表。' });
+    try {
+      const imported = await importRemoteDatabase(parsed.data, options.remoteFactory);
+      const { password: _password, ...connection } = parsed.data.connection;
+      const db = await database();
+      const id = persistSource(db, { name: parsed.data.name, fileType: connection.engine === 'mysql' ? 'MySQL' : 'PostgreSQL', assetId: '', auth,
+        discovered: imported.discovered, databaseConnection: { ...connection, tables: parsed.data.tables, lastSyncedAt: Date.now(), truncatedTables: imported.truncatedTables } });
+      return reply.code(201).send(getSource(db, id, auth));
+    } catch (error) { return reply.code(error instanceof RemoteBusyError ? 429 : 502).send({ message: error instanceof RemoteBusyError ? error.message : remoteError(error) }); }
+  });
+  app.post('/data/sources/:sourceId/database-refresh', async (request, reply) => {
+    const auth = requireAuth(request), { sourceId } = request.params as { sourceId: string };
+    const db = await database(), source = getSource(db, sourceId, auth);
+    if (!source) return reply.code(404).send({ message: '数据对象不存在或无权访问。' });
+    const stored = source.databaseConnection;
+    if (!stored) return reply.code(400).send({ message: '此数据对象不是远端数据库快照。' });
+    const body = request.body as { password?: unknown } | null;
+    if (typeof body?.password !== 'string' || body.password.length > 4096) return reply.code(400).send({ message: '请填写本次连接密码。' });
+    try {
+      return await withKeyLock(`database-refresh:${sourceId}`, async () => {
+        const imported = await importRemoteDatabase({ name: source.name, tables: stored.tables, connection: { ...stored, password: body.password as string } }, options.remoteFactory);
+        if (!getSource(db, sourceId, auth)) return reply.code(404).send({ message: '数据对象已删除，本次刷新未保存。' });
+        const metadata = { ...stored, lastSyncedAt: Date.now(), truncatedTables: imported.truncatedTables };
+        db.run('BEGIN');
+        try {
+          replaceSourceTables(db, sourceId, imported.discovered, databaseSnapshotSummary(metadata));
+          db.run('UPDATE data_database_connections SET metadata_json = ? WHERE source_id = ?', [JSON.stringify(metadata), sourceId]);
+          db.run('COMMIT'); flushDatabase(db);
+        } catch (error) { db.run('ROLLBACK'); throw error; }
+        return getSource(db, sourceId, auth);
+      });
+    } catch (error) { return reply.code(error instanceof RemoteBusyError ? 429 : 502).send({ message: error instanceof RemoteBusyError ? error.message : remoteError(error) }); }
+  });
   app.get('/data/sources', async (request) => {
     const auth = requireAuth(request);
     const db = await database();
@@ -1515,7 +1618,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const db = await database();
     const source = getSource(db, sourceId, auth);
     if (!source) return reply.code(404).send({ message: '数据不存在或无权访问。' });
-    if (source.fileType !== 'Excel' && source.fileType !== 'CSV' && source.fileType !== 'SQLite' && source.fileType !== 'API') {
+    if (!['Excel', 'CSV', 'SQLite', 'API', 'JSON', 'MySQL', 'PostgreSQL'].includes(source.fileType)) {
       return reply.code(400).send({ message: '当前仅支持删除 Excel / CSV / SQLite / API 数据源。' });
     }
     if (source.isDefault) return reply.code(400).send({ message: '默认数据源不可删除。' });
@@ -1537,10 +1640,34 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     }
     db.run('DELETE FROM data_tables WHERE source_id = ?', [sourceId]);
     db.run('DELETE FROM data_api_connections WHERE source_id = ?', [sourceId]);
+    db.run('DELETE FROM data_database_connections WHERE source_id = ?', [sourceId]);
     db.run('DELETE FROM data_sources WHERE id = ? AND owner_user_id = ? AND org_id = ?', [sourceId, auth.userId, auth.orgId]);
     db.run('DELETE FROM data_user_defaults WHERE default_sqlite_source_id = ? AND org_id = ? AND owner_user_id = ?', [sourceId, auth.orgId, auth.userId]);
     flushDatabase(db);
     return { ok: true, sourceId };
+  });
+
+  app.patch('/data/sources/:sourceId/annotations', async (request, reply) => {
+    const auth = requireAuth(request), db = await database();
+    const { sourceId } = request.params as { sourceId: string };
+    const source = getSource(db, sourceId, auth);
+    if (!source) return reply.code(404).send({ message: '数据对象不存在或无权访问。' });
+    const parsed = dataObjectAnnotationsSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: '说明格式无效：' + parsed.error.issues[0]?.message });
+    if (source.fileType !== 'API' && (parsed.data.apiFields.length || parsed.data.apiUrlDescription)) {
+      return reply.code(400).send({ message: '只有 API 对象支持接口参数标注。' });
+    }
+    db.run('UPDATE data_sources SET annotations_json = ? WHERE id = ? AND owner_user_id = ? AND org_id = ?', [JSON.stringify(parsed.data), sourceId, auth.userId, auth.orgId]);
+    flushDatabase(db);
+    return getSource(db, sourceId, auth);
+  });
+
+  app.get('/data/gateway/schema', async (request, reply) => {
+    const auth = requireAuth(request), db = await database();
+    const { sourceId } = request.query as { sourceId?: string };
+    const source = getSource(db, String(sourceId || ''), auth);
+    if (!source) return reply.code(404).send({ message: '数据对象不存在或无权访问。' });
+    return modelReadableSchema(source);
   });
 
   app.patch('/data/sources/:sourceId/tables/:tableId/schema', async (request, reply) => {
@@ -1560,12 +1687,14 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
         const name = String(value.name || '').trim().slice(0, 100);
         const type = String(value.type || '') as DatasetColumn['type'];
         if (!name || !allowedTypes.has(type)) throw new Error(`字段 ${column.id} 的定义无效。`);
-        return dataColumnSchema.parse({ ...column, name, type, nullable: Boolean(value.nullable), description: String(value.description ?? column.description ?? '').trim() });
+        return dataColumnSchema.parse({ ...column, sourceName: column.sourceName || column.name, name, type, nullable: Boolean(value.nullable), description: String(value.description ?? column.description ?? '').trim(), unit: value.unit ?? column.unit, enumDescription: value.enumDescription ?? column.enumDescription, sensitive: value.sensitive ?? column.sensitive });
       });
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : 'Schema 定义无效。' });
     }
-    db.run('UPDATE data_tables SET name = ?, columns_json = ? WHERE id = ? AND source_id = ?', [tableName, JSON.stringify(columns), tableId, sourceId]);
+    const description = String(body.description ?? current.description ?? '').trim();
+    if (description.length > 4000) return reply.code(400).send({ message: '表说明最多 4000 字。' });
+    db.run('UPDATE data_tables SET name = ?, columns_json = ?, description = ? WHERE id = ? AND source_id = ?', [tableName, JSON.stringify(columns), description, tableId, sourceId]);
     flushDatabase(db);
     return getSource(db, sourceId, auth);
   });
@@ -1642,7 +1771,8 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
       const full = getSource(db, source.id, auth);
       return (full?.tables || []).map((table) => ({
         id: `workbench:${source.id}:${table.id}`, name: table.name, sourceId: source.id, tableId: table.id,
-        schemaVersion: '1.0.0', operations: ['options', 'query', 'aggregate'], fields: table.columns, access: { mode: 'owner-scoped', userContext: true },
+        description: table.description, objectDescription: full?.annotations.description,
+        operations: ['options', 'query'], fields: table.columns, access: { mode: 'owner-scoped', userContext: true },
       }));
     }) };
   });
@@ -1664,13 +1794,17 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const table = getOwnedTable(await database(), String(query.sourceId || ''), String(query.tableId || ''), auth);
     if (!table) return reply.code(404).send({ message: '数据单元不存在或无权访问。' });
     const requested = String(query.fields || '').split(',').map((item) => item.trim()).filter(Boolean);
+    if (requested.some(id => !table.columns.some(column => column.id === id))) return reply.code(400).send({ message: '包含未登记的查询字段。' });
     const fields = requested.length ? table.columns.filter((item) => requested.includes(item.id)) : table.columns;
     if (!fields.length) return reply.code(400).send({ message: '没有可查询的字段。' });
-    const search = String(query.search || '').trim().slice(0, 120); const pageSize = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const search = String(query.search || '').trim().slice(0, 120);
+    const limit = Number(query.limit || 50);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) return reply.code(400).send({ message: '查询条数需为 1 至 200 的整数。' });
+    const pageSize = limit;
     const db = await database(); const where = search ? ` WHERE ${fields.map((field) => `CAST(${quote(field.id)} AS TEXT) LIKE ?`).join(' OR ')}` : '';
     const params = search ? fields.map(() => `%${search}%`) : [];
     const values = db.exec(`SELECT ${fields.map((field) => quote(field.id)).join(', ')} FROM ${quote(table.physicalName)}${where} LIMIT ${pageSize}`, params)[0]?.values || [];
-    return { unit: { id: `workbench:${query.sourceId}:${query.tableId}`, schemaVersion: '1.0.0' }, fields, rows: values.map((row) => Object.fromEntries(fields.map((field, index) => [field.id, row[index] ?? null]))), nextCursor: null };
+    return { unit: { id: `workbench:${query.sourceId}:${query.tableId}` }, fields, rows: values.map((row) => Object.fromEntries(fields.map((field, index) => [field.id, row[index] ?? null]))), nextCursor: null };
   });
 
   app.get('/data/apps', async (request) => {
@@ -1694,6 +1828,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
         lanUrl: urls?.lanUrls[0] || null,
         lanUrls: urls?.lanUrls || [],
         customSite: { bound: Boolean(custom), updatedAt: custom?.updatedAt ?? null, bytes: custom ? Buffer.byteLength(custom.html, 'utf8') : 0 },
+        delivery: appDelivery(db, id),
       };
     });
   });
@@ -1730,6 +1865,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const id = randomUUID();
     const createdAt = Date.now();
     db.run('INSERT INTO data_apps (id, name, app_type, source_id, table_id, created_at, org_id, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, name, appType, sourceId, tableId, createdAt, auth.orgId, auth.userId]);
+    db.run("UPDATE data_apps SET creation_mode = 'custom' WHERE id = ?", [id]);
     const token = ensurePublishToken(db, id);
     flushDatabase(db);
     const host = String(request.headers.host || '127.0.0.1:47832');
@@ -1744,6 +1880,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
       token,
       table: { name: table.name, rowCount: table.rowCount, columns: table.columns },
       samples,
+      objectSchema: modelReadableSchema(getSource(db, sourceId, auth)!),
     });
     const detail = appPayload(db, id, auth);
     return {
@@ -1770,10 +1907,12 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const urls = publishUrlBundle(appId, token, host);
     const samples = recordsForTable(db, appValue.table).slice(0, 5).map((record) => record.values);
     const prompt = buildDataAppCustomizePrompt({
-      idea, appName: appValue.name, appType: appValue.appType, appId, token, optimize: true,
+      idea, appName: appValue.name, appType: appValue.appType, appId, token,
+      optimize: appDelivery(db, appId).status !== 'awaiting-binding',
       publishUrl: urls.localUrl,
       table: { name: appValue.table.name, rowCount: appValue.table.rowCount, columns: appValue.table.columns },
       samples,
+      objectSchema: modelReadableSchema(getSource(db, appValue.sourceId, auth)!),
     });
     return { appId, prompt, publishUrl: urls.localUrl };
   });
@@ -1920,7 +2059,7 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
     const base64 = String(body.contentBase64 || '');
     const extension = path.extname(name).toLowerCase();
     const sqliteExtensions = new Set(['.sqlite', '.sqlite3', '.db']);
-    if (!name || !['.xlsx', '.csv'].includes(extension) && !sqliteExtensions.has(extension)) return reply.code(400).send({ message: '请选择 Excel、CSV 或 SQLite 数据库文件。' });
+    if (!name || !['.xlsx', '.csv', '.json'].includes(extension) && !sqliteExtensions.has(extension)) return reply.code(400).send({ message: '请选择 Excel、CSV、JSON 或 SQLite 数据库文件。' });
     let content: Buffer;
     try { content = Buffer.from(base64, 'base64'); } catch { return reply.code(400).send({ message: '文件内容无法读取。' }); }
     if (!content.length || content.length > 8 * 1024 * 1024) return reply.code(400).send({ message: '首期仅支持 8 MB 以内的数据文件。' });
@@ -1928,13 +2067,15 @@ export const dataRoutes: FastifyPluginAsync = async (app) => {
       const isSqlite = sqliteExtensions.has(extension);
       // Uploaded databases are inspected in memory and copied into Workmate's
       // isolated data store. They are never attached as the framework database.
-      const discovered = isSqlite ? await sqliteRows(content) : sourceRows(XLSX.read(content, { type: 'buffer', cellDates: true, codepage: 65001 }));
+      const discovered = isSqlite ? await sqliteRows(content) : extension === '.json'
+        ? [discoverApiTable(jsonDataRows(JSON.parse(content.toString('utf8'))))]
+        : sourceRows(XLSX.read(content, { type: 'buffer', cellDates: true, codepage: 65001 }));
       if (!discovered.length) return reply.code(400).send({ message: '未发现可导入的数据表。请检查文件内容。' });
       const totalRows = discovered.reduce((sum, table) => sum + table.rows.length, 0);
       if (totalRows > 20_000) return reply.code(400).send({ message: '首期每次导入最多 20,000 行数据，请先拆分文件。' });
       const asset = await storeUploadedDataAsset({ name, content, auth });
       const db = await database();
-      const sourceId = persistSource(db, { name, assetId: asset.id, fileType: isSqlite ? 'SQLite' : extension === '.csv' ? 'CSV' : 'Excel', discovered, auth });
+      const sourceId = persistSource(db, { name, assetId: asset.id, fileType: isSqlite ? 'SQLite' : extension === '.json' ? 'JSON' : extension === '.csv' ? 'CSV' : 'Excel', discovered, auth });
       return getSource(db, sourceId, auth);
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? `导入失败：${error.message}` : '导入失败。' });
@@ -2026,6 +2167,9 @@ export const publicDataAppRoutes: FastifyPluginAsync = async (app) => {
     if (custom?.html) {
       return reply.type('text/html; charset=utf-8').send(adaptCustomSiteOrigin(custom.html, request.headers.host));
     }
+    if (appDelivery(db, appId).status === 'awaiting-binding') {
+      return reply.type('text/html; charset=utf-8').send('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>定制应用待完成 · Workmate</title><body style="margin:0;background:#f5f7fb;color:#202536;font-family:system-ui"><main style="max-width:520px;margin:15vh auto;padding:32px;background:white;border-radius:20px"><h1 style="font-size:24px">定制应用尚未交付</h1><p style="line-height:1.8">应用已准备好，但定制页面尚未绑定。请返回 Workmate 对话查看执行结果，或在数据工作台继续创建。</p><p style="color:#697386">如果模型执行失败，修正问题后可继续同一应用；这里不会以模板页冒充定制成果。</p><button onclick="location.reload()" style="padding:12px 20px;border:0;border-radius:10px;background:#4965e8;color:white">刷新状态</button></main></body></html>');
+    }
     return reply.type('text/html; charset=utf-8').send(publishedSiteHtml(appId, token));
   });
   app.get('/data-apps/:appId/data', async (request, reply) => {
@@ -2091,7 +2235,7 @@ export const publicDataAppRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ message: error instanceof Error ? error.message : '保存失败。' });
     }
     const host = String(request.headers.host || '127.0.0.1:47832');
-    return { ok: true, appId, url: localPublishUrl(host, appId, token) };
+    return { ok: true, appId, url: localPublishUrl(host, appId, token), delivery: appDelivery(db, appId) };
   });
   app.get('/data-apps/:appId/custom-site', async (request, reply) => {
     const { appId } = request.params as { appId: string };

@@ -1,4 +1,5 @@
 import { getStoredSessionToken } from './auth';
+import type { DataAppDelivery } from '@workmate/contracts';
 import { DSH_ENV_FIX_ACTION_ID } from '../features/dsh/environment-ui';
 
 export interface HealthStatus { status: 'ok'; service: 'workmate-api'; version: string; }
@@ -1650,7 +1651,7 @@ export async function loadArchivedAssetContentUrl(assetId: string, signal?: Abor
 
 export type { DataColumn } from '@workmate/contracts';
 import type { DataColumn } from '@workmate/contracts';
-export type DataTable = { id: string; name: string; sheetName: string; rowCount: number; columns: DataColumn[] };
+export type DataTable = import('@workmate/contracts').DataResource;
 export type DataApiConnection = {
   baseUrl: string;
   path: string;
@@ -1676,9 +1677,11 @@ export type DataSource = {
   rowCount: number;
   summary: string;
   createdAt: number;
+  annotations: import('@workmate/contracts').DataObjectAnnotations;
   isDefault?: boolean;
   tables?: DataTable[];
   api?: DataApiConnection | null;
+  databaseConnection?: import('@workmate/contracts').RemoteDatabasePublicConnection;
   syncError?: string;
 };
 export type DataApiSourceInput = {
@@ -1701,10 +1704,34 @@ export type DataApp = {
   id: string; name: string; appType: '管理后台' | '数据看板' | '查询网站'; sourceId: string; tableId: string; createdAt: number;
   published?: boolean; publishUrl?: string | null; lanUrl?: string | null; lanUrls?: string[];
   customSite?: { bound: boolean; updatedAt: number | null; bytes: number };
+  delivery?: DataAppDelivery;
 };
 export type DataAppDetail = DataApp & { table: { id: string; name: string; rowCount: number; columns: DataColumn[] }; records: DataRecord[] };
 
 function dataApiBase() { return window.location.protocol === 'file:' ? 'http://127.0.0.1:47832' : ''; }
+
+async function databaseRequest<T>(url: string, input: unknown): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 100_000);
+  try {
+    const response = await fetch(`${dataApiBase()}/api${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input), signal: controller.signal });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || '数据库请求失败。');
+    return body as T;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw new Error('连接请求超时，请检查数据库网络后重试。');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+export function inspectDatabaseConnection(connection: import('@workmate/contracts').RemoteDatabaseConnection) {
+  return databaseRequest<{ databases: string[]; tables: Array<{ schema: string; name: string; description: string }> }>('/data/databases/inspect', connection);
+}
+export function importDatabaseObject(input: import('@workmate/contracts').RemoteDatabaseImport) {
+  return databaseRequest<DataSource>('/data/sources/database', input);
+}
+export function refreshDatabaseObject(sourceId: string, password: string) {
+  return databaseRequest<DataSource>(`/data/sources/${encodeURIComponent(sourceId)}/database-refresh`, { password });
+}
 
 export async function listDataSources() {
   const response = await fetch(`${dataApiBase()}/api/data/sources`);
@@ -1725,6 +1752,22 @@ export async function getDataSource(sourceId: string) {
   const response = await fetch(`${dataApiBase()}/api/data/sources/${encodeURIComponent(sourceId)}`);
   const body = await response.json().catch(() => ({})) as DataSource & { message?: string };
   if (!response.ok) throw new Error(body.message || `Data source failed: ${response.status}`);
+  return body;
+}
+
+export async function updateDataObjectAnnotations(sourceId: string, annotations: import('@workmate/contracts').DataObjectAnnotations) {
+  const response = await fetch(`${dataApiBase()}/api/data/sources/${encodeURIComponent(sourceId)}/annotations`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(annotations),
+  });
+  const body = await response.json() as DataSource & { message?: string };
+  if (!response.ok) throw new Error(body.message || '数据对象说明保存失败。');
+  return body;
+}
+
+export async function getDataObjectSchema(sourceId: string) {
+  const response = await fetch(`${dataApiBase()}/api/data/gateway/schema?sourceId=${encodeURIComponent(sourceId)}`);
+  const body = await response.json() as import('@workmate/contracts').DataObjectModelSchema & { message?: string };
+  if (!response.ok) throw new Error(body.message || '读取数据对象 Schema 失败。');
   return body;
 }
 
@@ -1858,7 +1901,7 @@ export async function syncDataSource(sourceId: string) {
   return body;
 }
 
-export async function updateDataTableSchema(sourceId: string, table: Pick<DataTable, 'id' | 'name' | 'columns'>) {
+export async function updateDataTableSchema(sourceId: string, table: Pick<DataTable, 'id' | 'name' | 'columns' | 'description'>) {
   const response = await fetch(`${dataApiBase()}/api/data/sources/${encodeURIComponent(sourceId)}/tables/${encodeURIComponent(table.id)}/schema`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: table.name, columns: table.columns }),
   });

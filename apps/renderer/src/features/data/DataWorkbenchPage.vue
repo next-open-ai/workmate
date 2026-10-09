@@ -1,7 +1,21 @@
 <script setup lang="ts">
 import DataTaskDemo from './DataTaskDemo.vue';
+import DataObjectAnnotationsEditor from './DataObjectAnnotationsEditor.vue';
+import DatabaseConnectionDialog from './DatabaseConnectionDialog.vue';
+import DataAppCreateDialog, { type DataAppCreateDraft } from './DataAppCreateDialog.vue';
+import { dataObjectAnnotationsSchema, type DataObjectAnnotations } from '@workmate/contracts';
 const demoOpen = ref(false);
-import { computed, onMounted, ref, watch } from 'vue';
+const databaseDialogOpen = ref(false);
+const databaseRefreshSource = ref<DataSource | null>(null);
+function openDatabase(source: DataSource | null = null) { databaseRefreshSource.value = source; databaseDialogOpen.value = true; }
+async function databaseSaved(source: DataSource) {
+  databaseDialogOpen.value = false; databaseRefreshSource.value = null;
+  sources.value = await listDataSources();
+  await chooseSource(source.id);
+  modelSchema.value = '';
+  notice.value = source.databaseConnection?.truncatedTables.length ? '已接入数据库快照；部分表仅导入前 20,000 行，请查看对象说明。' : '数据库快照已保存，可以完善标注并创建应用。';
+}
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
   archivedAssetContentUrl,
   createSqliteDataSource,
@@ -22,6 +36,8 @@ import {
   syncDataSource,
   updateApiDataSource,
   updateDataTableSchema,
+  updateDataObjectAnnotations,
+  getDataObjectSchema,
   type DataApp,
   type DataAppDetail,
   type DataSource,
@@ -30,15 +46,24 @@ import {
 import { qrDataUrl } from '../../app/qr-data-url.js';
 import { openExternalBestEffort } from '../../app/platform-actions';
 import DataAppOperator from './DataAppOperator.vue';
+import { appPresentation, matchesSource, sourceNextStep } from './workbench-presentation';
+import type { WorkbenchNavigation } from './workbench-navigation';
 
-type AppType = '管理后台' | '数据看板' | '查询网站';
-type CreateMode = 'template' | 'idea';
 type SourceCategory = 'all' | 'files' | 'sqlite' | 'mysql' | 'other';
 
-const emit = defineEmits<{ startChat: []; startCustomize: [prompt: string] }>();
+const props = defineProps<{ navigation?: WorkbenchNavigation; navigationScope?: string }>();
+const emit = defineEmits<{ startChat: []; startCustomize: [prompt: string]; rememberNavigation: [navigation: WorkbenchNavigation, scope: string] }>();
+let pendingNavigation = props.navigation;
 const sources = ref<DataSource[]>([]);
 const selected = ref<DataSource | null>(null);
 const selectedTable = ref<DataTable | null>(null);
+const objectTab = ref<WorkbenchNavigation['tab']>(props.navigation?.tab || 'overview');
+const annotationsOpen = ref(false);
+const annotationsSaving = ref(false);
+const modelSchema = ref('');
+const schemaReading = ref(false);
+let selectionRequest = 0;
+let disposed = false;
 const preview = ref<{ columns: string[]; rows: string[][] }>({ columns: [], rows: [] });
 const loading = ref(false);
 const importing = ref(false);
@@ -58,8 +83,9 @@ const renameTarget = ref<DataSource | null>(null);
 const optimizeApp = ref<DataApp | null>(null);
 const optimizeIdea = ref('');
 const optimizeBusy = ref(false);
-const activeCategory = ref<SourceCategory>('all');
-const importKind = ref<'files' | 'sqlite'>('files');
+const activeCategory = ref<SourceCategory>(props.navigation?.category || 'all');
+const sourceQuery = ref(props.navigation?.query || '');
+const importKind = ref<'files' | 'sqlite' | 'json'>('files');
 const createSqliteOpen = ref(false);
 const sqliteName = ref('业务数据库');
 const apiEditorOpen = ref(false);
@@ -90,11 +116,8 @@ const mobileUploadQr = ref('');
 const mobileUploadExpiresAt = ref(0);
 
 const createOpen = ref(false);
-const createMode = ref<CreateMode>('template');
-const appType = ref<AppType>('管理后台');
-const appName = ref('');
-const customizeIdea = ref('');
 const createBusy = ref(false);
+const createError = ref('');
 
 const qrByApp = ref<Record<string, string>>({});
 const navigator = window.navigator;
@@ -104,8 +127,8 @@ const summary = computed(() => selected.value ? `${selected.value.tableCount} �
 function categoryOf(source: DataSource): Exclude<SourceCategory, 'all'> {
   if (source.fileType === 'Excel' || source.fileType === 'CSV') return 'files';
   if (source.fileType === 'SQLite') return 'sqlite';
-  if (source.fileType === 'MySQL') return 'mysql';
-  if (source.fileType === 'API') return 'other';
+  if (source.fileType === 'MySQL' || source.fileType === 'PostgreSQL') return 'mysql';
+  if (source.fileType === 'API' || source.fileType === 'JSON') return 'other';
   return 'other';
 }
 function isSpreadsheetSource(source: DataSource | null | undefined) {
@@ -116,14 +139,27 @@ function isApiSource(source: DataSource | null | undefined) {
 }
 function canDeleteSource(source: DataSource | null | undefined) {
   if (!source || source.isDefault) return false;
-  return source.fileType === 'Excel' || source.fileType === 'CSV' || source.fileType === 'SQLite' || source.fileType === 'API';
+  return ['Excel', 'CSV', 'SQLite', 'API', 'JSON', 'MySQL', 'PostgreSQL'].includes(source.fileType);
 }
 function canEditSource(source: DataSource | null | undefined) {
   return isSpreadsheetSource(source) || isApiSource(source);
 }
-const filteredSources = computed(() => activeCategory.value === 'all' ? sources.value : sources.value.filter((source) => categoryOf(source) === activeCategory.value));
+const filteredSources = computed(() => sources.value.filter(source => (activeCategory.value === 'all' || categoryOf(source) === activeCategory.value) && matchesSource(source, sourceQuery.value)));
 const categoryCount = (category: SourceCategory) => category === 'all' ? sources.value.length : sources.value.filter((source) => categoryOf(source) === category).length;
-const acceptedFiles = computed(() => importKind.value === 'sqlite' ? '.sqlite,.sqlite3,.db' : '.xlsx,.csv');
+const acceptedFiles = computed(() => importKind.value === 'sqlite' ? '.sqlite,.sqlite3,.db' : importKind.value === 'json' ? '.json' : '.xlsx,.csv');
+const currentAnnotations = computed(() => selected.value?.annotations || dataObjectAnnotationsSchema.parse({}));
+const annotationCount = computed(() => selected.value?.tables?.reduce((sum, table) => sum + table.columns.filter(column => column.description?.trim()).length, 0) || 0);
+const fieldCount = computed(() => selected.value?.tables?.reduce((sum, table) => sum + table.columns.length, 0) || 0);
+const nextStep = computed(() => sourceNextStep(Boolean(currentAnnotations.value.description.trim()), annotationCount.value, fieldCount.value));
+function followNextStep() {
+  if (nextStep.value.action === 'description') annotationsOpen.value = true;
+  else if (nextStep.value.action === 'fields') objectTab.value = 'schema';
+  else openCreateWebsite();
+}
+function openAppIteration(app: DataApp) {
+  optimizeApp.value = app;
+  optimizeIdea.value = appPresentation(app).pending ? '继续完成尚未交付的部分，检查已有页面，并将最终页面绑定到这个应用。' : '';
+}
 
 function friendlyError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : '数据加载失败。';
@@ -145,29 +181,46 @@ async function refreshQrMap(apps: DataApp[]) {
   const next: Record<string, string> = {};
   await Promise.all(apps.map(async (app) => {
     const target = app.lanUrl || app.lanUrls?.[0] || app.publishUrl;
-    if (!target) return;
+    if (!target || !appPresentation(app).canShare) return;
     try { next[app.id] = await qrDataUrl(target, 112); } catch { /* ignore */ }
   }));
-  qrByApp.value = next;
+  if (!disposed) qrByApp.value = next;
 }
 
 async function load() {
+  if (loading.value) return;
   loading.value = true; error.value = '';
   try {
-    sources.value = await listDataSources();
-    if (selected.value) await chooseSource(selected.value.id);
-  } catch (cause) { error.value = friendlyError(cause); }
-  finally { loading.value = false; }
+    const latestSources = await listDataSources();
+    if (disposed) return;
+    sources.value = latestSources;
+    const sourceId = selected.value?.id || pendingNavigation?.sourceId;
+    if (sourceId) {
+      if (sources.value.some(source => source.id === sourceId)) {
+        await chooseSource(sourceId, pendingNavigation);
+      } else {
+        showCatalog(activeCategory.value);
+        notice.value = '原数据对象已不存在，已返回数据目录。';
+      }
+    }
+  } catch (cause) { if (!disposed) error.value = friendlyError(cause); }
+  finally { if (!disposed) loading.value = false; }
 }
-async function chooseSource(id: string) {
+async function chooseSource(id: string, restore?: WorkbenchNavigation) {
+  const requestId = ++selectionRequest;
+  const tableId = restore?.tableId || (selected.value?.id === id ? selectedTable.value?.id : null);
+  const tab = restore?.tab || (selected.value?.id === id ? objectTab.value : 'overview');
   error.value = ''; preview.value = { columns: [], rows: [] };
   try {
-    selected.value = await getDataSource(id);
-    sourceApps.value = await listDataApps(id);
-    selectedTable.value = selected.value.tables?.[0] || null;
+    const [source, apps] = await Promise.all([getDataSource(id), listDataApps(id)]);
+    if (requestId !== selectionRequest) return;
+    selected.value = source; sourceApps.value = apps; modelSchema.value = '';
+    pendingNavigation = undefined;
+    objectTab.value = tab;
+    selectedTable.value = source.tables?.find(table => table.id === tableId) || source.tables?.[0] || null;
     if (selectedTable.value) await chooseTable(selectedTable.value);
     await refreshQrMap(sourceApps.value);
-  } catch (cause) { error.value = friendlyError(cause); }
+  } catch (cause) { if (requestId === selectionRequest) error.value = friendlyError(cause); }
 }
 async function openExistingApp(app: DataApp) {
   error.value = '';
@@ -182,8 +235,12 @@ async function openPublishedApp(app: DataApp) {
 async function chooseTable(table: DataTable) {
   if (!selected.value) return;
   selectedTable.value = table;
-  try { preview.value = await getDataTableRows(selected.value.id, table.id); }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '无法读取样例数据。'; }
+  const sourceId = selected.value.id;
+  try {
+    const rows = await getDataTableRows(sourceId, table.id);
+    if (!disposed && selected.value?.id === sourceId && selectedTable.value?.id === table.id) preview.value = rows;
+  }
+  catch (cause) { if (!disposed && selected.value?.id === sourceId && selectedTable.value?.id === table.id) error.value = cause instanceof Error ? cause.message : '无法读取样例数据。'; }
 }
 function editSchema() {
   if (!selectedTable.value) return;
@@ -197,9 +254,31 @@ async function saveSchema() {
     selected.value = await updateDataTableSchema(selected.value.id, schemaDraft.value);
     selectedTable.value = selected.value.tables?.find((table) => table.id === schemaDraft.value?.id) || null;
     if (selectedTable.value) await chooseTable(selectedTable.value);
+    modelSchema.value = '';
     schemaEditing.value = false; notice.value = 'Schema 已更新，字段标识和底层数据保持不变。';
   } catch (cause) { error.value = friendlyError(cause); }
   finally { schemaSaving.value = false; }
+}
+async function saveAnnotations(value: DataObjectAnnotations) {
+  if (!selected.value) return;
+  annotationsSaving.value = true; error.value = '';
+  try {
+    selected.value = await updateDataObjectAnnotations(selected.value.id, value);
+    sources.value = sources.value.map(source => source.id === selected.value?.id ? { ...source, annotations: value } : source);
+    modelSchema.value = ''; annotationsOpen.value = false;
+    notice.value = '数据对象说明已保存，AI 将读取最新内容。';
+  } catch (cause) { error.value = friendlyError(cause); }
+  finally { annotationsSaving.value = false; }
+}
+async function showModelSchema() {
+  if (!selected.value) return;
+  schemaReading.value = true; error.value = '';
+  const id = selected.value.id;
+  try {
+    const schema = await getDataObjectSchema(id);
+    if (selected.value?.id === id) modelSchema.value = JSON.stringify(schema, null, 2);
+  } catch (cause) { error.value = friendlyError(cause); }
+  finally { schemaReading.value = false; }
 }
 async function createSqlite() {
   if (!sqliteName.value.trim()) return;
@@ -222,7 +301,7 @@ async function openMobileUpload() {
   } catch (cause) { error.value = friendlyError(cause); }
   finally { mobileUploadBusy.value = false; }
 }
-function openPicker(kind: 'files' | 'sqlite' = 'files') {
+function openPicker(kind: 'files' | 'sqlite' | 'json' = 'files') {
   importKind.value = kind;
   uploadStage.value = 'selecting'; uploadProgress.value = 4;
   fileInput.value?.click();
@@ -242,8 +321,8 @@ async function upload(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
   error.value = ''; notice.value = '';
-  const valid = importKind.value === 'sqlite' ? /\.(sqlite|sqlite3|db)$/i.test(file.name) : /\.(xlsx|csv)$/i.test(file.name);
-  if (!valid) { error.value = importKind.value === 'sqlite' ? '请选择 SQLite (.sqlite/.sqlite3/.db) 数据库。' : '请选择 Excel (.xlsx) 或 CSV 文件。'; uploadStage.value = 'idle'; return; }
+  const valid = importKind.value === 'sqlite' ? /\.(sqlite|sqlite3|db)$/i.test(file.name) : importKind.value === 'json' ? /\.json$/i.test(file.name) : /\.(xlsx|csv)$/i.test(file.name);
+  if (!valid) { error.value = importKind.value === 'sqlite' ? '请选择 SQLite (.sqlite/.sqlite3/.db) 数据库。' : importKind.value === 'json' ? '请选择 JSON 文件。' : '请选择 Excel (.xlsx) 或 CSV 文件。'; uploadStage.value = 'idle'; return; }
   if (file.size > 8 * 1024 * 1024) { error.value = '首期仅支持 8 MB 以内的数据文件。'; uploadStage.value = 'idle'; return; }
   importing.value = true;
   try {
@@ -335,6 +414,7 @@ async function syncSelectedApi() {
   apiSyncBusy.value = true; error.value = '';
   try {
     selected.value = await syncDataSource(selected.value.id);
+    modelSchema.value = '';
     sources.value = sources.value.map((item) => item.id === selected.value?.id ? { ...item, ...selected.value, tables: undefined } : item);
     selectedTable.value = selected.value.tables?.[0] || null;
     if (selectedTable.value) await chooseTable(selectedTable.value);
@@ -346,58 +426,53 @@ function openEditSource(source: DataSource, event?: Event) {
   if (isApiSource(source)) openEditApi(source, event);
   else openRenameSource(source, event);
 }
-function showCatalog(category: SourceCategory = 'all') { activeCategory.value = category; selected.value = null; selectedTable.value = null; sourceApps.value = []; }
+function showCatalog(category: SourceCategory = 'all') { selectionRequest++; pendingNavigation = undefined; activeCategory.value = category; selected.value = null; selectedTable.value = null; sourceApps.value = []; modelSchema.value = ''; }
 
 function openCreateWebsite() {
   if (!selectedTable.value) return;
-  createMode.value = 'idea';
-  appType.value = '管理后台';
-  appName.value = `${selectedTable.value.name}网站`;
-  customizeIdea.value = '';
+  createError.value = '';
   createOpen.value = true;
 }
 
-watch(createMode, (mode) => {
-  if (!selectedTable.value) return;
-  if (mode === 'template' && !appName.value) appName.value = `${selectedTable.value.name}网站`;
-  if (mode === 'idea' && !appName.value) appName.value = `${selectedTable.value.name}定制站`;
-});
-
-async function submitCreate() {
-  if (!selected.value || !selectedTable.value) return;
-  createBusy.value = true; error.value = '';
+async function submitCreate(draft: DataAppCreateDraft) {
+  if (!selected.value || createBusy.value || !selected.value.tables?.some(table => table.id === draft.tableId)) return;
+  const sourceId = selected.value.id;
+  createBusy.value = true; createError.value = ''; error.value = '';
   try {
-    if (createMode.value === 'template') {
+    if (draft.mode === 'template') {
       activeApp.value = await createDataApp({
-        sourceId: selected.value.id,
-        tableId: selectedTable.value.id,
-        appType: appType.value,
-        name: appName.value,
+        sourceId,
+        tableId: draft.tableId,
+        appType: draft.appType,
+        name: draft.name,
       });
-      // Creation already provisions an idempotent publish token. Refresh the
-      // source list to obtain local/LAN URLs without rotating that token.
-      sourceApps.value = await listDataApps(selected.value.id);
-      await refreshQrMap(sourceApps.value);
       createOpen.value = false;
       notice.value = `已创建「${activeApp.value.name}」，本机站点已就绪。`;
     } else {
-      const idea = customizeIdea.value.trim();
-      if (!idea) { error.value = '请先描述你想要的网站想法。'; return; }
+      const idea = draft.idea.trim();
+      if (!idea) { createError.value = '请先描述你希望应用做什么。'; return; }
       const result = await customizeDataApp({
-        sourceId: selected.value.id,
-        tableId: selectedTable.value.id,
+        sourceId,
+        tableId: draft.tableId,
         idea,
-        name: appName.value || undefined,
-        appType: appType.value,
+        name: draft.name,
+        appType: draft.appType,
       });
-      activeApp.value = result.app;
-      sourceApps.value = await listDataApps(selected.value.id);
-      await refreshQrMap(sourceApps.value);
+      sourceApps.value = [...sourceApps.value.filter(app => app.id !== result.app.id), result.app];
+      objectTab.value = 'apps';
       createOpen.value = false;
-      notice.value = `已创建「${result.app.name}」。正在打开对话，让 Agent 按想法编程…`;
+      notice.value = `已准备「${result.app.name}」。正在打开对话；定制页面绑定后才算交付。`;
       emit('startCustomize', result.prompt);
     }
-  } catch (cause) { error.value = friendlyError(cause); }
+    // A refresh failure must not turn a successful creation into a retryable
+    // creation error. Keep the result and do not issue a second create request.
+    try {
+      sourceApps.value = await listDataApps(sourceId);
+      await refreshQrMap(sourceApps.value);
+    } catch (cause) {
+      error.value = `应用已创建，但列表刷新失败。请点击刷新，不要重复创建。${friendlyError(cause)}`;
+    }
+  } catch (cause) { createError.value = friendlyError(cause); }
   finally { createBusy.value = false; }
 }
 
@@ -461,12 +536,22 @@ async function submitOptimize() {
   try {
     const result = await optimizeDataApp(optimizeApp.value.id, optimizeIdea.value.trim());
     optimizeApp.value = null; optimizeIdea.value = '';
+    objectTab.value = 'apps';
     emit('startCustomize', result.prompt);
   } catch (cause) { error.value = friendlyError(cause); }
   finally { optimizeBusy.value = false; }
 }
 
 onMounted(load);
+onUnmounted(() => {
+  disposed = true;
+  emit('rememberNavigation', {
+    sourceId: selected.value?.id || pendingNavigation?.sourceId || null,
+    tableId: selectedTable.value?.id || pendingNavigation?.tableId || null,
+    tab: objectTab.value, category: activeCategory.value, query: sourceQuery.value,
+  }, props.navigationScope || '');
+  selectionRequest++;
+});
 </script>
 
 <template>
@@ -475,19 +560,20 @@ onMounted(load);
       <div>
         <p class="text-xs font-bold tracking-[.14em] text-[var(--accent)]">WORKMATE / DATA</p>
         <h1 class="mt-2 text-3xl font-bold tracking-[-.045em]">数据工作台</h1>
-        <p class="mt-2 text-sm text-[var(--muted)]">统一管理文件与本地数据库，再用真实数据创建网站和工作台。</p>
+        <p class="mt-2 text-sm text-[var(--muted)]">接入数据，补充结构说明，让 AI 基于真实数据创建应用。</p>
       </div>
-      <div class="flex items-center gap-2">
-        <button class="rounded-xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-800" type="button" :disabled="!selectedTable" @click="openCreateWebsite">AI 对话创建数据应用</button>
-        <button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="demoOpen = true">数据任务闭环体验</button>
+      <div class="flex max-w-full flex-wrap items-center gap-2">
+        <details class="relative"><summary class="cursor-pointer rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white">接入数据</summary><div class="absolute right-0 z-20 mt-2 w-56 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-lg"><button type="button" class="block w-full rounded-lg p-2 text-left text-sm hover:bg-[var(--surface-muted)]" @click="openPicker('files')">导入 Excel / CSV</button><button type="button" class="block w-full rounded-lg p-2 text-left text-sm hover:bg-[var(--surface-muted)]" @click="openPicker('sqlite')">导入 SQLite 数据库</button><button type="button" class="block w-full rounded-lg p-2 text-left text-sm hover:bg-[var(--surface-muted)]" @click="openDatabase()">连接 MySQL / PostgreSQL</button><button type="button" class="block w-full rounded-lg p-2 text-left text-sm hover:bg-[var(--surface-muted)]" @click="openPicker('json')">导入 JSON</button><button type="button" class="block w-full rounded-lg p-2 text-left text-sm hover:bg-[var(--surface-muted)]" @click="openCreateApi">连接 API</button></div></details>
+        <button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="demoOpen = true">体验示例</button>
         <button class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm font-semibold hover:bg-[var(--surface-muted)]" type="button" :disabled="loading" @click="load">{{ loading ? '刷新中…' : '刷新' }}</button>
         <input ref="fileInput" class="hidden" type="file" :accept="acceptedFiles" @change="upload" />
       </div>
     </header>
     <div v-if="demoOpen" class="absolute inset-0 z-40 overflow-y-auto bg-[var(--background)] p-8"><button class="mb-4 rounded-lg border px-4 py-2" @click="demoOpen = false; load()">← 返回数据工作台</button><DataTaskDemo @changed="load" /></div>
 
-    <div v-if="error || notice" class="mx-8 mt-4 rounded-xl border px-4 py-3 text-sm" :class="error ? 'border-rose-300 bg-rose-50 text-rose-700' : 'border-emerald-300 bg-emerald-50 text-emerald-700'">
-      {{ error || notice }}
+    <div v-if="error || notice" :role="error ? 'alert' : 'status'" class="mx-8 mt-4 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm" :class="error ? 'border-rose-300 bg-rose-50 text-rose-700' : 'border-emerald-300 bg-emerald-50 text-emerald-700'">
+      <span class="min-w-0 break-words">{{ error || notice }}</span>
+      <button type="button" aria-label="关闭提示" class="shrink-0 rounded px-1 font-semibold focus-visible:outline-2" @click="error = ''; notice = ''">×</button>
     </div>
 
     <div v-if="uploadStage !== 'idle'" class="mx-8 mt-4 rounded-2xl border border-[var(--accent)]/25 bg-[var(--surface)] p-4 shadow-sm" aria-live="polite">
@@ -502,8 +588,8 @@ onMounted(load);
 
     <div v-if="!activeApp && !selected" class="px-8 pt-5">
       <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <button v-for="item in [{ id: 'all', icon: '◫', title: '全部数据', note: '统一数据目录' }, { id: 'files', icon: 'X', title: 'Excel / CSV', note: '表格与清单' }, { id: 'sqlite', icon: '▤', title: '本地 SQLite', note: '数据库文件' }, { id: 'mysql', icon: '◎', title: 'MySQL', note: '连接器规划中' }, { id: 'other', icon: '⌁', title: 'API 数据源', note: 'REST JSON 连接器' }]" :key="item.id" class="rounded-2xl border bg-[var(--surface)] p-4 text-left transition hover:-translate-y-0.5 hover:shadow-md" :class="activeCategory === item.id ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/10' : 'border-[var(--border)]'" type="button" @click="activeCategory = item.id as SourceCategory">
-          <div class="flex items-start justify-between gap-3"><span class="grid h-9 w-9 place-items-center rounded-xl bg-[var(--accent-soft)] text-sm font-black text-[var(--accent)]">{{ item.icon }}</span><span v-if="item.id === 'mysql'" class="rounded-full bg-[var(--surface-muted)] px-2 py-1 text-[9px] font-bold text-[var(--muted)]">即将支持</span><b v-else class="text-xl">{{ categoryCount(item.id as SourceCategory) }}</b></div>
+        <button v-for="item in [{ id: 'all', icon: '◫', title: '全部数据对象', note: '统一数据目录' }, { id: 'files', icon: 'X', title: 'Excel / CSV', note: '工作簿与列标注' }, { id: 'sqlite', icon: '▤', title: '本地 SQLite', note: '数据库与表标注' }, { id: 'mysql', icon: '◎', title: '在线数据库', note: 'MySQL / PostgreSQL' }, { id: 'other', icon: '⌁', title: 'API / JSON', note: '接口与结构说明' }]" :key="item.id" class="rounded-2xl border bg-[var(--surface)] p-4 text-left transition hover:border-[var(--accent)]" :class="activeCategory === item.id ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/10' : 'border-[var(--border)]'" type="button" @click="activeCategory = item.id as SourceCategory">
+          <div class="flex items-start justify-between gap-3"><span class="grid h-9 w-9 place-items-center rounded-xl bg-[var(--accent-soft)] text-sm font-black text-[var(--accent)]">{{ item.icon }}</span><b class="text-xl">{{ categoryCount(item.id as SourceCategory) }}</b></div>
           <p class="mt-3 text-sm font-bold">{{ item.title }}</p><p class="mt-1 text-xs text-[var(--muted)]">{{ item.note }}</p>
         </button>
       </div>
@@ -525,11 +611,12 @@ onMounted(load);
       <div v-if="selected" class="h-full min-h-0 overflow-y-auto p-7">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <button class="mb-2 text-xs font-bold text-[var(--accent)]" type="button" @click="showCatalog(activeCategory)">← 返回数据源目录</button>
+            <button class="mb-2 text-xs font-bold text-[var(--accent)]" type="button" @click="showCatalog(activeCategory)">← 返回数据对象</button>
             <h2 class="text-2xl font-bold tracking-[-.035em]">{{ selected.name }}</h2>
             <p class="mt-1 text-sm text-[var(--muted)]"><span class="mr-2 rounded-md bg-[var(--surface-muted)] px-2 py-1 text-[10px] font-bold">{{ selected.fileType }}</span><span v-if="selected.isDefault" class="mr-2 rounded-md bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold text-[var(--accent)]">默认</span>{{ summary }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
+            <button v-if="selected.databaseConnection" type="button" class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm font-semibold" @click="openDatabase(selected)">刷新快照</button>
             <button
               v-if="selected.assetId"
               class="rounded-xl border border-[var(--border)] px-3 py-2 text-sm font-semibold hover:bg-[var(--surface-muted)]"
@@ -578,12 +665,33 @@ onMounted(load);
               :disabled="!selectedTable"
               @click="openCreateWebsite"
             >
-              AI 对话创建数据应用
+              创建应用
             </button>
           </div>
         </div>
 
-        <section v-if="isApiSource(selected) && selected.api" class="mt-6 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <nav class="mt-6 flex gap-1 overflow-x-auto border-b border-[var(--border)]" aria-label="数据对象详情"><button v-for="tab in [{ id: 'overview', name: '对象说明' }, { id: 'schema', name: '字段说明' }, { id: 'preview', name: '数据预览' }, { id: 'apps', name: '应用' }]" :key="tab.id" type="button" :aria-current="objectTab === tab.id ? 'page' : undefined" class="shrink-0 border-b-2 px-4 py-3 text-sm font-semibold" :class="objectTab === tab.id ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--muted)]'" @click="objectTab = tab.id as typeof objectTab">{{ tab.name }}<span v-if="tab.id === 'apps'" class="ml-1.5 text-xs opacity-70">{{ sourceApps.length }}</span></button></nav>
+
+        <div v-if="objectTab === 'overview'" class="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--accent-soft)] px-4 py-3">
+          <div class="min-w-0"><p class="text-sm font-semibold">建议下一步：{{ nextStep.label }}</p><p class="mt-1 text-xs leading-5 text-[var(--muted)]">{{ nextStep.note }}</p></div>
+          <button type="button" class="shrink-0 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold text-[var(--accent)]" :disabled="nextStep.action === 'create' && !selectedTable" @click="followNextStep">{{ nextStep.label }}</button>
+        </div>
+
+        <section v-if="objectTab === 'overview'" class="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+          <div v-if="selected.databaseConnection" class="mb-5 rounded-xl bg-[var(--surface-muted)] p-4 text-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2"><b>{{ selected.fileType }} 数据快照</b><span class="text-xs text-[var(--muted)]">最近刷新 {{ new Date(selected.databaseConnection.lastSyncedAt).toLocaleString() }}</span></div>
+            <p class="mt-2 break-all text-[var(--muted)]">{{ selected.databaseConnection.host }}:{{ selected.databaseConnection.port }} / {{ selected.databaseConnection.database }}</p>
+            <p class="mt-2 text-xs text-[var(--muted)]">应用使用本地副本，不回写原数据库。密码未保存，刷新时再次输入。</p>
+            <p v-if="selected.databaseConnection.truncatedTables.length" class="mt-2 break-words text-xs text-amber-700">以下表仅导入前 20,000 行：{{ selected.databaseConnection.truncatedTables.join('、') }}</p>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="font-bold">让 AI 理解这份数据</h3><button type="button" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" @click="annotationsOpen = true">编辑说明</button></div>
+          <dl class="mt-4 space-y-4 text-sm"><div><dt class="font-semibold">业务说明</dt><dd class="mt-1 whitespace-pre-wrap break-words text-[var(--muted)]">{{ currentAnnotations.description || '尚未填写。说明包含什么数据、业务范围和统计口径。' }}</dd></div><div><dt class="font-semibold">数据来源与连接说明</dt><dd class="mt-1 whitespace-pre-wrap break-words text-[var(--muted)]">{{ currentAnnotations.connectionDescription || '尚未填写。可补充来源、更新频率与使用限制。' }}</dd></div></dl>
+          <p class="mt-5 text-xs text-[var(--muted)]">已说明 {{ annotationCount }} / {{ fieldCount }} 个字段。保存后，AI 将使用最新说明；原始数据不会改变。</p>
+          <div class="mt-4 flex flex-wrap gap-3"><button type="button" class="text-xs font-semibold text-[var(--accent)]" @click="objectTab = 'schema'">继续标注结构</button><button type="button" :disabled="schemaReading" class="text-xs font-semibold text-[var(--accent)]" @click="modelSchema ? modelSchema = '' : showModelSchema()">{{ schemaReading ? '读取中…' : modelSchema ? '收起模型可读 Schema' : '查看模型可读 Schema' }}</button></div>
+          <pre v-if="modelSchema" class="mt-4 max-h-80 overflow-auto rounded-lg bg-[var(--surface-muted)] p-3 text-xs">{{ modelSchema }}</pre>
+        </section>
+
+        <section v-if="objectTab === 'overview' && isApiSource(selected) && selected.api" class="mt-6 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 class="font-bold">API 连接</h3>
@@ -612,17 +720,25 @@ onMounted(load);
           </div>
         </section>
 
-        <section class="mt-6">
+        <section v-if="objectTab === 'schema' && isApiSource(selected)" class="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <div class="flex items-center justify-between gap-3"><h3 class="font-bold">API 接口结构标注</h3><button type="button" class="text-xs font-semibold text-[var(--accent)]" @click="annotationsOpen = true">编辑接口标注</button></div>
+          <p class="mt-2 whitespace-pre-wrap break-words text-sm text-[var(--muted)]">{{ currentAnnotations.apiUrlDescription || '可补充 URL 用途与路径含义，并标注入参和返参。' }}</p>
+          <div v-for="field in currentAnnotations.apiFields" :key="`${field.location}:${field.path}`" class="mt-3 border-t border-[var(--border)] pt-3 text-xs"><p class="break-all font-semibold">{{ field.location }} / {{ field.path }} <span class="font-normal text-[var(--muted)]">{{ field.type }} {{ field.required ? '必填' : '可选' }}</span></p><p class="mt-1 whitespace-pre-wrap break-words text-[var(--muted)]">{{ field.description || '未填写说明' }}</p></div>
+        </section>
+
+        <section v-if="objectTab === 'apps'" class="mt-6">
           <div class="mb-3 flex items-end justify-between gap-3">
             <div>
-              <h3 class="text-lg font-bold">网站应用</h3>
+              <h3 class="text-lg font-bold">数据应用</h3>
               <p class="mt-1 text-xs text-[var(--muted)]">本机部署，局域网可扫码打开。</p>
             </div>
             <span class="text-xs text-[var(--muted)]">{{ sourceApps.length }} 个</span>
           </div>
 
           <div v-if="!sourceApps.length" class="rounded-2xl border border-dashed border-[var(--border)] px-5 py-10 text-center">
-            <p class="text-sm text-[var(--muted)]">还没有应用。点击「创建网站应用」，选择模板或按想法定制。</p>
+            <p class="font-semibold">基于这份数据创建第一个应用</p>
+            <p class="mt-2 text-sm text-[var(--muted)]">选择现成模板，或告诉 AI 你想解决什么问题。</p>
+            <button type="button" :disabled="!selectedTable" class="mt-4 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" @click="openCreateWebsite">创建应用</button>
           </div>
 
           <div v-else class="grid gap-4 lg:grid-cols-2">
@@ -634,40 +750,44 @@ onMounted(load);
                 </div>
                 <span
                   class="shrink-0 rounded-full px-2 py-1 text-[10px] font-bold"
-                  :class="app.customSite?.bound ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'"
+                  :class="appPresentation(app).pending ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-700'"
                 >
-                  {{ app.customSite?.bound ? '定制站' : '模板站' }}
+                  {{ appPresentation(app).label }}
                 </span>
               </div>
 
-              <div v-if="app.publishUrl || app.lanUrl" class="mt-4 flex items-start gap-3 rounded-xl bg-[var(--surface-muted)] p-3">
+              <p v-if="app.delivery?.status === 'awaiting-binding'" class="mt-3 text-xs leading-5 text-[var(--muted)]">定制页面尚未交付。请查看关联对话的执行结果，或继续创建；不会用模板页替代成果。</p>
+
+              <details v-if="appPresentation(app).canShare && (app.publishUrl || app.lanUrl)" class="mt-4 rounded-xl bg-[var(--surface-muted)] p-3"><summary class="cursor-pointer text-xs font-semibold text-[var(--muted)]">手机访问与分享</summary><div class="mt-3 flex items-start gap-3">
                 <img v-if="qrByApp[app.id]" :src="qrByApp[app.id]" alt="站点二维码" class="h-20 w-20 rounded-lg bg-white p-1" />
                 <div class="min-w-0 flex-1">
                   <p class="text-[10px] font-bold tracking-wide text-[var(--muted)]">局域网扫码</p>
                   <p class="mt-1 break-all text-[11px] leading-4 text-[var(--muted)]">{{ app.lanUrl || app.publishUrl }}</p>
                   <p v-if="!app.lanUrl" class="mt-1 text-[10px] text-amber-700">未检测到局域网 IP，可先用本机链接。</p>
                 </div>
-              </div>
+              </div></details>
 
               <div class="mt-4 flex flex-wrap gap-2">
-                <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white" type="button" @click="openPublishedApp(app)">打开站点</button>
-                <button class="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="openExistingApp(app)">测试验证 / 管理数据</button>
-                <button class="rounded-lg border border-teal-200 px-3 py-1.5 text-xs font-semibold text-teal-700 hover:bg-teal-50" type="button" @click="optimizeApp = app; optimizeIdea = ''">对话优化</button>
+                <button class="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white" type="button" @click="appPresentation(app).pending ? openAppIteration(app) : openPublishedApp(app)">{{ appPresentation(app).primary }}</button>
+                <button v-if="!appPresentation(app).pending" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="openAppIteration(app)">对话优化</button>
+                <details class="relative"><summary class="cursor-pointer rounded-lg px-3 py-2 text-xs font-semibold text-[var(--muted)]">更多</summary><div class="absolute right-0 z-10 mt-1 w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-lg">
+                <button v-if="appPresentation(app).pending" class="block w-full rounded px-3 py-2 text-left text-xs hover:bg-[var(--surface-muted)]" type="button" @click="openPublishedApp(app)">查看交付状态</button>
+                <button class="block w-full rounded px-3 py-2 text-left text-xs hover:bg-[var(--surface-muted)]" type="button" @click="openExistingApp(app)">查看与管理数据</button>
                 <button
-                  class="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  class="block w-full rounded px-3 py-2 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                   type="button"
                   :disabled="deletingId === app.id"
                   @click="removeApp(app)"
                 >
                   {{ deletingId === app.id ? '删除中…' : '删除' }}
-                </button>
+                </button></div></details>
               </div>
             </article>
           </div>
         </section>
 
-        <section v-if="selected.tables?.length" class="mt-8">
-          <div class="flex items-center justify-between gap-3"><div><h3 class="font-bold">Schema 与数据表</h3><p class="mt-1 text-xs text-[var(--muted)]">字段 ID 用于网站与 API，保持稳定；显示名称和类型可以编辑。</p></div><button v-if="selectedTable" class="rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="editSchema">编辑 Schema</button></div>
+        <section v-if="(objectTab === 'schema' || objectTab === 'preview') && selected.tables?.length" class="mt-5">
+          <div class="flex flex-wrap items-center justify-between gap-3"><div><h3 class="font-bold">{{ objectTab === 'preview' ? '数据预览' : '表与字段说明' }}</h3><p class="mt-1 text-xs text-[var(--muted)]">{{ objectTab === 'preview' ? '查看前 20 行，确认结构与数据内容。' : '补充字段含义、单位和统计口径，帮助 AI 正确使用数据。' }}</p></div><button v-if="selectedTable" class="rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-semibold hover:bg-[var(--surface-muted)]" type="button" @click="editSchema">编辑字段说明</button></div>
           <div class="mt-3 flex flex-wrap gap-2">
             <button
               v-for="table in selected.tables"
@@ -680,11 +800,12 @@ onMounted(load);
               {{ table.name }} <span class="ml-1 text-xs opacity-70">{{ table.rowCount }}</span>
             </button>
           </div>
-          <div v-if="selectedTable" class="mt-4 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <p v-if="selectedTable?.description" class="mt-3 whitespace-pre-wrap text-sm text-[var(--muted)]">{{ selectedTable.description }}</p>
+          <div v-if="selectedTable && objectTab === 'schema'" class="mt-4 overflow-auto rounded-xl border border-[var(--border)] bg-[var(--surface)]">
             <div class="grid grid-cols-[100px_minmax(160px,1fr)_120px_80px_minmax(120px,1fr)] gap-3 border-b border-[var(--border)] bg-[var(--surface-muted)] px-4 py-2 text-[10px] font-bold tracking-wide text-[var(--muted)]"><span>字段 ID</span><span>字段名称</span><span>类型</span><span>可空</span><span>样例</span></div>
-            <div v-for="column in selectedTable.columns" :key="column.id" class="grid grid-cols-[100px_minmax(160px,1fr)_120px_80px_minmax(120px,1fr)] gap-3 border-b border-[var(--border)] px-4 py-2.5 text-xs last:border-0"><code class="text-[var(--accent)]">{{ column.id }}</code><b>{{ column.name }}</b><span>{{ column.type }}</span><span>{{ column.nullable ? '是' : '否' }}</span><span class="truncate text-[var(--muted)]">{{ column.sample }}</span></div>
+            <div v-for="column in selectedTable.columns" :key="column.id" class="min-w-[600px] border-b border-[var(--border)] px-4 py-3 text-xs last:border-0"><div class="grid grid-cols-[100px_minmax(160px,1fr)_120px_80px_minmax(120px,1fr)] gap-3"><code class="text-[var(--accent)]">{{ column.id }}</code><b>{{ column.name }}</b><span>{{ column.type }}</span><span>{{ column.nullable ? '是' : '否' }}</span><span class="truncate text-[var(--muted)]">{{ column.sensitive ? '敏感字段，样例隐藏' : column.sample }}</span></div><p class="mt-2 whitespace-pre-wrap break-words text-[var(--muted)]">{{ column.description || '尚未填写字段说明' }}{{ column.unit ? `；单位：${column.unit}` : '' }}{{ column.enumDescription ? `；枚举：${column.enumDescription}` : '' }}</p></div>
           </div>
-          <div v-if="selectedTable && preview.columns.length" class="mt-4 overflow-hidden rounded-xl border border-[var(--border)]">
+          <div v-if="objectTab === 'preview' && selectedTable && preview.columns.length" class="mt-4 overflow-hidden rounded-xl border border-[var(--border)]">
             <div class="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--muted)]">{{ selectedTable.name }} · 前 20 行</div>
             <div class="overflow-auto">
               <table class="min-w-full text-left text-xs">
@@ -697,13 +818,27 @@ onMounted(load);
                   </tr>
                 </tbody>
               </table>
+              <p v-if="!preview.rows.length" class="p-4 text-sm text-[var(--muted)]">当前表尚无记录，可以先完善结构标注，再同步或录入数据。</p>
             </div>
           </div>
         </section>
       </div>
       <main v-else class="h-full min-h-0 overflow-y-auto px-8 py-7">
-        <div class="flex flex-wrap items-end justify-between gap-4"><div><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">DATA CATALOG</p><h2 class="mt-2 text-2xl font-bold">{{ activeCategory === 'all' ? '全部数据源' : activeCategory === 'files' ? 'Excel / CSV' : activeCategory === 'sqlite' ? '本地 SQLite' : activeCategory === 'mysql' ? 'MySQL' : 'API 数据源' }}</h2><p class="mt-2 text-sm text-[var(--muted)]">选择一份数据查看 Schema、预览记录并创建网站应用。</p></div><div class="flex gap-2"><template v-if="activeCategory === 'files'"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" :disabled="mobileUploadBusy" @click="openMobileUpload">{{ mobileUploadBusy ? '生成中…' : '手机上传' }}</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="openPicker('files')">上传 Excel / CSV</button></template><template v-else-if="activeCategory === 'sqlite'"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="openPicker('sqlite')">打开数据库</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="createSqliteOpen = true">新建数据库</button></template><template v-else-if="activeCategory === 'other'"><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="openCreateApi">新建 API</button></template><button v-else-if="activeCategory === 'mysql'" class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white opacity-60" type="button" @click="notice = 'MySQL 安全连接器正在建设中，暂不保存数据库凭据。'">导入数据</button></div></div>
-        <div v-if="filteredSources.length" class="mt-6 grid gap-3 xl:grid-cols-2">
+        <div class="flex flex-wrap items-end justify-between gap-4">
+          <div><h2 class="text-2xl font-bold">{{ activeCategory === 'all' ? '全部数据对象' : activeCategory === 'files' ? 'Excel / CSV' : activeCategory === 'sqlite' ? '本地 SQLite' : activeCategory === 'mysql' ? '在线数据库' : 'API / JSON' }}</h2><p class="mt-2 text-sm text-[var(--muted)]">选择数据对象，完善结构说明，再基于数据创建应用。</p></div>
+          <div class="flex flex-wrap gap-2">
+            <template v-if="activeCategory === 'files'"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" :disabled="mobileUploadBusy" @click="openMobileUpload">{{ mobileUploadBusy ? '生成中…' : '手机上传' }}</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="openPicker('files')">上传 Excel / CSV</button></template>
+            <template v-else-if="activeCategory === 'sqlite'"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="openPicker('sqlite')">打开数据库</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="createSqliteOpen = true">新建数据库</button></template>
+            <template v-else-if="activeCategory === 'other'"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="openPicker('json')">导入 JSON</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="openCreateApi">连接 API</button></template>
+            <button v-else-if="activeCategory === 'mysql'" type="button" class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" @click="openDatabase()">连接数据库</button>
+          </div>
+        </div>
+        <div class="mt-5 flex flex-wrap items-center gap-3">
+          <label class="min-w-0 flex-1"><span class="sr-only">搜索数据对象</span><input v-model="sourceQuery" type="search" placeholder="搜索名称、类型或业务说明" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm outline-none focus:border-[var(--accent)]" /></label>
+          <button v-if="sourceQuery" type="button" class="text-xs font-semibold text-[var(--accent)]" @click="sourceQuery = ''">清除搜索</button>
+          <span role="status" class="text-xs text-[var(--muted)]">{{ filteredSources.length }} 个对象</span>
+        </div>
+        <div v-if="filteredSources.length" class="mt-5 grid gap-3 xl:grid-cols-2">
           <article
             v-for="source in filteredSources"
             :key="source.id"
@@ -719,7 +854,7 @@ onMounted(load);
               </div>
               <b class="mt-4 block truncate">{{ source.name }}</b>
               <p class="mt-2 text-xs text-[var(--muted)]">{{ source.tableCount }} 张表 · {{ source.rowCount.toLocaleString() }} 条记录</p>
-              <p class="mt-3 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{{ source.summary }}</p>
+              <p class="mt-3 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{{ source.annotations?.description || source.summary }}</p>
             </button>
             <div v-if="canEditSource(source) || canDeleteSource(source)" class="mt-4 flex flex-wrap gap-2 border-t border-[var(--border)] pt-3">
               <button
@@ -742,13 +877,27 @@ onMounted(load);
             </div>
           </article>
         </div>
-        <div v-else class="mt-6 rounded-3xl border border-dashed border-[var(--border)] px-6 py-16 text-center"><p class="font-bold">此分类还没有数据源</p><p class="mt-2 text-sm text-[var(--muted)]">{{ activeCategory === 'mysql' ? '连接器正在规划中，当前可先使用 Excel / CSV、本地 SQLite 或 API。' : activeCategory === 'other' ? '点击右上方「新建 API」，接入返回 JSON 的 REST 接口。' : '点击右上方按钮添加第一份数据。' }}</p></div>
+        <div v-else class="mt-6 rounded-2xl border border-dashed border-[var(--border)] px-6 py-12 text-center"><p class="font-semibold">{{ sourceQuery.trim() ? '没有找到匹配的数据对象' : '此分类还没有数据对象' }}</p><p class="mt-2 text-sm text-[var(--muted)]">{{ sourceQuery.trim() ? '试试其他关键词，或清除搜索查看此分类的全部对象。' : activeCategory === 'mysql' ? '点击「连接数据库」，测试连接后选择要导入的库与表。' : activeCategory === 'other' ? '连接 API 或导入 JSON，补充接口与结构说明。' : '点击右上方按钮添加第一份数据。' }}</p><button v-if="sourceQuery.trim()" type="button" class="mt-4 text-sm font-semibold text-[var(--accent)]" @click="sourceQuery = ''">清除搜索</button></div>
       </main>
     </div>
 
+    <DatabaseConnectionDialog v-if="databaseDialogOpen" :source="databaseRefreshSource" @close="databaseDialogOpen = false; databaseRefreshSource = null" @saved="databaseSaved" />
+    <DataObjectAnnotationsEditor v-if="annotationsOpen && selected" :annotations="currentAnnotations" :api="isApiSource(selected)" :busy="annotationsSaving" :save-error="error" @close="annotationsOpen = false" @save="saveAnnotations" />
     <div v-if="mobileUploadOpen" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]"><section class="w-full max-w-lg rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 text-center shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="mobileUploadOpen = false">×</button><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">MOBILE UPLOAD</p><h2 class="mt-2 text-2xl font-bold">用手机上传 Excel / CSV</h2><p class="mt-2 text-sm leading-6 text-[var(--muted)]">手机和电脑连接同一局域网，扫码后选择文件。链接 30 分钟内有效。</p><img v-if="mobileUploadQr" :src="mobileUploadQr" alt="手机上传二维码" class="mx-auto mt-5 h-56 w-56 rounded-2xl border border-[var(--border)] bg-white p-3"><p class="mt-4 break-all rounded-xl bg-[var(--surface-muted)] p-3 text-left text-xs text-[var(--muted)]">{{ mobileUploadUrl }}</p><p class="mt-3 text-xs text-[var(--muted)]">有效期至 {{ new Date(mobileUploadExpiresAt).toLocaleTimeString() }}</p><div class="mt-5 flex justify-center gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="navigator.clipboard?.writeText(mobileUploadUrl)">复制链接</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white" type="button" @click="mobileUploadOpen = false; load()">完成并刷新</button></div></section></div>
 
-    <div v-if="optimizeApp" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]"><section class="w-full max-w-xl rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="optimizeApp = null">×</button><p class="text-xs font-bold tracking-[.12em] text-teal-700">CONVERSATIONAL ITERATION</p><h2 class="mt-2 text-2xl font-bold">继续优化「{{ optimizeApp.name }}」</h2><p class="mt-2 text-sm leading-6 text-[var(--muted)]">Agent 会读取当前页面，在原应用上修改并生成新版本，不会创建重复站点。</p><textarea v-model="optimizeIdea" rows="5" class="mt-5 w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-teal-600" placeholder="例如：增加按项目阶段筛选；金额用柱状图展示；移动端卡片更紧凑。" /><div class="mt-6 flex justify-end gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="optimizeApp = null">取消</button><button class="rounded-xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="optimizeBusy || !optimizeIdea.trim()" @click="submitOptimize">{{ optimizeBusy ? '准备中…' : '开始对话优化' }}</button></div></section></div>
+    <div v-if="optimizeApp" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]">
+      <section class="w-full max-w-xl rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl">
+        <button class="float-right text-lg text-[var(--muted)]" type="button" :disabled="optimizeBusy" @click="optimizeApp = null">×</button>
+        <p class="text-xs font-bold tracking-[.12em] text-teal-700">CONVERSATIONAL ITERATION</p>
+        <h2 class="mt-2 text-2xl font-bold">{{ optimizeApp.delivery?.status === 'awaiting-binding' ? '继续创建' : '继续优化' }}「{{ optimizeApp.name }}」</h2>
+        <p class="mt-2 text-sm leading-6 text-[var(--muted)]">{{ optimizeApp.delivery?.status === 'awaiting-binding' ? 'Agent 会使用最新数据说明完成页面并绑定到原应用，不会创建重复站点。' : 'Agent 会读取当前页面，在原应用上修改并生成新版本；绑定成功前保留已有页面。' }}</p>
+        <textarea v-model="optimizeIdea" rows="5" class="mt-5 w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-teal-600" placeholder="例如：增加按项目阶段筛选；金额用柱状图展示；移动端卡片更紧凑。" />
+        <div class="mt-6 flex justify-end gap-2">
+          <button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" :disabled="optimizeBusy" @click="optimizeApp = null">取消</button>
+          <button class="rounded-xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="optimizeBusy || !optimizeIdea.trim()" @click="submitOptimize">{{ optimizeBusy ? '准备中…' : '开始对话' }}</button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="createSqliteOpen" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]">
       <section class="w-full max-w-md rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="createSqliteOpen = false">×</button><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">NEW SQLITE</p><h2 class="mt-2 text-2xl font-bold">新建本地数据库</h2><p class="mt-2 text-sm leading-6 text-[var(--muted)]">创建独立数据库副本和默认 data 表，随后可以编辑 Schema 并通过网站应用录入数据。</p><label class="mt-5 block"><span class="mb-1.5 block text-xs font-semibold">数据库名称</span><input v-model="sqliteName" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]" @keyup.enter="createSqlite" /></label><div class="mt-6 flex justify-end gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="createSqliteOpen = false">取消</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="importing || !sqliteName.trim()" @click="createSqlite">{{ importing ? '创建中…' : '创建数据库' }}</button></div></section>
@@ -815,78 +964,21 @@ onMounted(load);
     </div>
 
     <div v-if="schemaEditing && schemaDraft" class="absolute inset-0 z-30 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[2px]">
-      <section class="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"><button class="float-right text-lg text-[var(--muted)]" type="button" @click="schemaEditing = false">×</button><p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">SCHEMA EDITOR</p><h2 class="mt-2 text-2xl font-bold">编辑数据结构</h2><p class="mt-2 text-sm text-[var(--muted)]">仅调整工作台元数据；字段 ID 与原始归档文件不会改变。</p><label class="mt-5 block"><span class="mb-1.5 block text-xs font-semibold">数据表名称</span><input v-model="schemaDraft.name" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" /></label><div class="mt-5 space-y-2"><div v-for="column in schemaDraft.columns" :key="column.id" class="grid grid-cols-[80px_minmax(150px,1fr)_130px_80px] items-center gap-2 rounded-xl border border-[var(--border)] p-3"><code class="text-xs text-[var(--accent)]">{{ column.id }}</code><input v-model="column.name" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm" /><select v-model="column.type" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm"><option v-for="type in ['文本', '整数', '小数', '日期', '布尔值']" :key="type">{{ type }}</option></select><label class="flex items-center gap-2 text-xs"><input v-model="column.nullable" type="checkbox" />可空</label><input v-model="column.description" :aria-label="`${column.name}业务说明`" placeholder="业务说明：含义、单位、枚举、关联关系" class="col-span-4 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-2 text-sm" /></div></div><div class="mt-6 flex justify-end gap-2"><button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="schemaEditing = false">取消</button><button class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="schemaSaving" @click="saveSchema">{{ schemaSaving ? '保存中…' : '保存 Schema' }}</button></div></section>
-    </div>
-
-    <div v-if="createOpen && selected && selectedTable" class="absolute inset-0 z-20 grid place-items-center bg-slate-950/35 p-5 backdrop-blur-[1px]">
-      <section class="w-full max-w-xl rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl">
-        <button class="float-right text-lg text-[var(--muted)]" type="button" @click="createOpen = false">×</button>
-        <p class="text-xs font-bold tracking-[.12em] text-[var(--accent)]">创建网站应用</p>
-        <h2 class="mt-2 text-2xl font-bold">基于「{{ selectedTable.name }}」</h2>
-        <p class="mt-2 text-sm text-[var(--muted)]">使用当前已保存的 Schema 与业务注释创建应用。提交后进入 AI 对话，可继续修改需求；完成后返回应用卡片进行测试验证。</p>
-
-        <details class="mt-4 rounded-xl border border-[var(--border)] p-3"><summary>确认数据来源与 Schema · {{ selected.name }} / {{ selectedTable.name }}</summary><p v-for="column in selectedTable.columns" :key="column.id" class="mt-2 text-xs">{{ column.id }} · {{ column.name }} · {{ column.type }} · {{ column.description || '尚未填写业务说明' }}</p></details>
-        <div class="mt-5 grid grid-cols-2 gap-2">
-          <button
-            class="rounded-xl border p-3 text-left"
-            :class="createMode === 'template' ? 'border-[var(--accent)] bg-[var(--accent-soft)]' : 'border-[var(--border)]'"
-            type="button"
-            @click="createMode = 'template'"
-          >
-            <b class="text-sm">快速模板</b>
-            <p class="mt-1 text-xs text-[var(--muted)]">管理后台 / 看板 / 查询站</p>
-          </button>
-          <button
-            class="rounded-xl border p-3 text-left"
-            :class="createMode === 'idea' ? 'border-teal-600 bg-teal-50 dark:bg-teal-950/40' : 'border-[var(--border)]'"
-            type="button"
-            @click="createMode = 'idea'"
-          >
-            <b class="text-sm">AI 对话创建</b>
-            <p class="mt-1 text-xs text-[var(--muted)]">Agent 即时编程单页站</p>
-          </button>
-        </div>
-
-        <div class="mt-4 grid gap-2 sm:grid-cols-3">
-          <button
-            v-for="type in ['管理后台', '数据看板', '查询网站'] as const"
-            :key="type"
-            class="rounded-xl border p-2.5 text-sm font-semibold"
-            :class="appType === type ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]' : 'border-[var(--border)]'"
-            type="button"
-            @click="appType = type"
-          >
-            {{ type }}
-          </button>
-        </div>
-
-        <label class="mt-4 block">
-          <span class="mb-1.5 block text-xs font-semibold">应用名称</span>
-          <input v-model="appName" class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]" />
-        </label>
-
-        <label v-if="createMode === 'idea'" class="mt-4 block">
-          <span class="mb-1.5 block text-xs font-semibold">你的想法</span>
-          <textarea
-            v-model="customizeIdea"
-            rows="4"
-            class="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm outline-none focus:border-teal-600"
-            placeholder="例如：报价里程碑看板，按阶段筛选，支持编辑删除，视觉干净专业。"
-          />
-        </label>
-
-        <div class="mt-6 flex justify-end gap-2">
-          <button class="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-semibold" type="button" @click="createOpen = false">取消</button>
-          <button
-            class="rounded-xl bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-            type="button"
-            :disabled="createBusy || (createMode === 'idea' && !customizeIdea.trim())"
-            @click="submitCreate"
-          >
-            {{ createBusy ? '处理中…' : createMode === 'idea' ? '开始 AI 对话' : '生成应用' }}
-          </button>
-        </div>
+      <section class="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="schema-editor-title">
+        <button class="float-right text-lg text-[var(--muted)]" type="button" :disabled="schemaSaving" aria-label="关闭结构编辑" @click="schemaEditing = false">×</button><h2 id="schema-editor-title" class="text-xl font-bold">编辑结构标注</h2>
+        <p class="mt-2 text-sm text-[var(--muted)]">保存最新 Schema；仅调整工作台元数据，不修改原文件和字段 ID。</p>
+        <label class="mt-5 block"><span class="mb-2 block text-xs font-semibold">数据表 / 工作表名称</span><input v-model="schemaDraft.name" maxlength="100" class="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-sm" /></label>
+        <label class="mt-4 block"><span class="mb-2 block text-xs font-semibold">表说明</span><textarea v-model="schemaDraft.description" rows="2" maxlength="4000" placeholder="这张表记录什么、统计范围与关联关系。" class="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-sm" /></label>
+        <div class="mt-5 space-y-3"><div v-for="column in schemaDraft.columns" :key="column.id" class="rounded-lg border border-[var(--border)] p-3">
+          <div class="grid items-center gap-2 sm:grid-cols-[65px_minmax(0,1fr)_100px_65px]"><code class="text-xs text-[var(--accent)]">{{ column.id }}</code><input v-model="column.name" :aria-label="`${column.id}显示名称`" maxlength="100" class="min-w-0 rounded border border-[var(--border)] bg-[var(--surface-muted)] p-2 text-sm" /><select v-model="column.type" :aria-label="`${column.name}类型`" class="rounded border border-[var(--border)] bg-[var(--surface-muted)] p-2 text-sm"><option v-for="type in ['文本', '整数', '小数', '日期', '布尔值']" :key="type">{{ type }}</option></select><label class="flex items-center gap-1 text-xs"><input v-model="column.nullable" type="checkbox" />可空</label></div>
+          <textarea v-model="column.description" :aria-label="`${column.name}业务说明`" rows="2" maxlength="1000" placeholder="业务说明：字段含义、统计口径或关联关系" class="mt-3 w-full rounded border border-[var(--border)] bg-[var(--surface-muted)] p-2 text-sm" />
+          <details class="mt-2 text-xs text-[var(--muted)]"><summary class="cursor-pointer">更多标注</summary><div class="mt-3 grid gap-3 sm:grid-cols-2"><label>单位<input v-model="column.unit" maxlength="100" placeholder="元、件、秒" class="mt-1 w-full rounded border border-[var(--border)] bg-[var(--surface-muted)] p-2" /></label><label>枚举说明<input v-model="column.enumDescription" maxlength="1000" placeholder="0=待支付，1=已支付" class="mt-1 w-full rounded border border-[var(--border)] bg-[var(--surface-muted)] p-2" /></label><label class="flex items-center gap-2"><input v-model="column.sensitive" type="checkbox" />敏感字段（AI 样例隐藏，不替代访问权限）</label></div></details>
+        </div></div>
+        <p v-if="error" role="alert" class="mt-4 text-sm text-rose-600">{{ error }}</p>
+        <div class="mt-6 flex justify-end gap-2"><button class="rounded-lg border border-[var(--border)] px-4 py-2 text-sm" type="button" :disabled="schemaSaving" @click="schemaEditing = false">取消</button><button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="button" :disabled="schemaSaving" @click="saveSchema">{{ schemaSaving ? '保存中…' : '保存 Schema' }}</button></div>
       </section>
     </div>
+
+    <DataAppCreateDialog v-if="createOpen && selected && selectedTable" :source="selected" :table-id="selectedTable.id" :busy="createBusy" :error="createError" @close="createOpen = false" @submit="submitCreate" />
   </section>
 </template>
