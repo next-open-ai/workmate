@@ -10,11 +10,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Enable Corepack (uses packageManager-pinned pnpm)
@@ -22,6 +22,8 @@ jobs:
       - name: Verify pnpm version
         run: pnpm --version
       - run: pnpm install --frozen-lockfile
+      - name: Release workflow configuration regression
+        run: node --test scripts/release-workflows.test.mjs
       - run: pnpm typecheck
       - run: pnpm build
       - name: AgentScope smoke
@@ -43,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             artifact: macos-arm64
             expected_extension: dmg
             max_package_mb: 220
@@ -53,11 +55,11 @@ jobs:
             max_package_mb: 220
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Enable Corepack (uses packageManager-pinned pnpm)

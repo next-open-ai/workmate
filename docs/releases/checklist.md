@@ -1,5 +1,17 @@
 # Workmate 发布前回归清单
 
+## REL-RUNNER-20261119 · 托管 runner 兼容性
+
+- R1 / T1：Release 与 PR 打包使用固定的 `macos-15` ARM64 runner；`macos-14` 已于 2026-11-02 退役。Windows x64、两个安装器、220 MB 上限及 tag 发布语义不变，不恢复暂停的平台。
+- R2 / T2：checkout v5、setup-node v5、setup-python v6 使用 Node.js 24 Action runtime；项目构建仍显式使用 Node.js 22、Python 3.11。并发回归工作流同步 Action 版本，但保留暂停状态。
+- AT1：`node --test scripts/release-workflows.test.mjs` 检查所有工作流无退役的有效 runner、基础 Action 版本及 CI/Release 的目标与预算一致，并检查发布门禁未移除。该检查进入 PR CI；不访问 GitHub、不触发发布。
+- 验收：新提交的 tag 在 GitHub 实际产出 ARM64 DMG 与 x64 EXE 后才算云端打包验证通过。旧运行的 Re-run 使用旧提交，不能验证本次修复；不移动已发布 tag，建议发新补丁 tag。无数据迁移，回滚仅还原工作流，但不得继续使用已退役 runner。
+- 范围：Workmate 发布基础设施，不是共用业务能力；本次不修改 EasyMate 发布策略或执行内核。
+
+依据：[GitHub macOS 14 退役公告](https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/)。
+
+2026-11-19 本地验证：新增回归在修复前 0/2、修复后 2/2 通过；Ruby YAML 解析三个工作流通过，`git diff --check` 通过。未执行完整应用构建、真实 GitHub runner 打包或发布；本次只修改发布/CI 基础设施，不变更应用代码与依赖。提交后需在包含修复的新 tag 上验收两个安装器与架构。
+
 ## PKG-BUDGET-20261014 · 安装包体积门槛
 
 CI 与 Release 的 macOS ARM64 安装包上限暂从200 MB调整为220 MB（十进制字节），Windows仍为220 MB；体积检查继续强制执行。暂停的Intel矩阵示例同步为220 MB，不启用该构建。验证两工作流配置一致且仍调用 `report-package-size.mjs`；实际安装包需由新提交的Actions构建验证。本次不修改压缩、运行依赖或发布逻辑；回滚仅恢复上限，无数据迁移。
