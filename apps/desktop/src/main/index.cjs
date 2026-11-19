@@ -709,8 +709,8 @@ function readSearchConfig() {
   } catch (_) { return {}; }
 }
 function writeSearchConfig(value) {
-  const allowed = new Set(['bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun']);
-  const config = { version: 1, defaultProvider: allowed.has(String(value?.defaultProvider)) ? String(value.defaultProvider) : 'auto', providers: Array.isArray(value?.providers) ? value.providers.filter((provider) => allowed.has(String(provider?.id))).map((provider) => ({ id: String(provider.id), label: String(provider.label || provider.id), apiKey: String(provider.apiKey || ''), baseUrl: String(provider.baseUrl || ''), enabled: Boolean(provider.enabled) })) : [] };
+  const allowed = new Set(['bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun', 'deepseek']);
+  const config = { version: 1, defaultProvider: allowed.has(String(value?.defaultProvider)) ? String(value.defaultProvider) : 'auto', providers: Array.isArray(value?.providers) ? value.providers.filter((provider) => allowed.has(String(provider?.id))).map((provider) => ({ id: String(provider.id), label: String(provider.label || provider.id), apiKey: provider.id === 'deepseek' && provider.providerInstanceId ? '' : String(provider.apiKey || ''), baseUrl: String(provider.baseUrl || ''), enabled: Boolean(provider.enabled), ...(provider.id === 'deepseek' && provider.providerInstanceId ? {providerInstanceId:String(provider.providerInstanceId)} : {}) })) : [] };
   const persisted = { ...config, providers: config.providers.map((provider) => ({ ...provider, apiKey: provider.apiKey && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(provider.apiKey).toString('base64') : provider.apiKey })) };
   setStoredValue('search-settings', JSON.stringify(persisted));
   pushSecretsToApi();

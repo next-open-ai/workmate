@@ -35,6 +35,7 @@ unmount();finishReport();await pendingReport;assert.equal(state.reportHtml.value
 assert.equal(lastSignal.aborted,true);const closed=reads;await state.refresh();assert.equal(reads,closed,'close stops observation');
 assert.doesNotMatch(source,/abortActiveRun|api.run\(|reasoning\}\}|v-html/);
 assert.match(source,/prefers-reduced-motion/);
+assert.doesNotMatch(source,/open-conversation|执行对话|处理审批/);
 console.log('TA-T9 PASS: exact-run observation, queue/approval/terminal truth, outage, serial polling, bounded logs and read-only close.');
 const historySource=readFileSync('apps/renderer/src/features/automations/TaskRunRecords.vue','utf8');
 const historyCode=ts.transpileModule(compileScript(parse(historySource).descriptor,{id:'history-test'}).content,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;

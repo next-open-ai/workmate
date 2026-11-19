@@ -3,6 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ModelCapabilityRuntime } from '@workmate/contracts';
+import { isQwenPromptAudioModel } from '@workmate/contracts';
 import { speechFetch as fetch, SpeechNetworkError } from './speech-http.js';
 
 type Report = (summary: string, progress?: number) => void;
@@ -78,12 +79,20 @@ export async function synthesizeDashScope(input: { config: ModelCapabilityRuntim
   const { config } = input;
   const nativeRoot = root(config.baseUrl);
   const url = `${nativeRoot}/api/v1/services/audio/tts/SpeechSynthesizer`;
-  input.report('正在调用百炼非实时语音合成…', 20);
+  const promptAudio = isQwenPromptAudioModel(config.provider, config.modelId);
+  if (promptAudio) {
+    if (!input.text.trim() || Array.from(input.text).length > 3000) throw new Error('音频生成提示词须为 1～3000 字符，请精简声音描述或歌词。');
+    if (input.voice) throw new Error('该音频生成模型不支持 voice 音色 ID，请在提示词中描述人声。');
+    if (!['mp3', 'wav', 'pcm'].includes(input.format)) throw new Error('该音频生成模型仅支持 mp3、wav、pcm 输出。');
+    if (input.speed !== undefined && (input.speed < 0.5 || input.speed > 2 || !Number.isFinite(input.speed))) throw new Error('该音频生成模型语速范围为 0.5～2。');
+    if (/^(?:dashscope(?:-intl|-us)?\.aliyuncs\.com|cn-hongkong\.dashscope\.aliyuncs\.com)$/.test(new URL(nativeRoot).hostname)) throw new Error('请在阿里模型服务连接中填写业务空间 Workspace ID；提示词音频生成需要业务空间端点。');
+  }
+  input.report(promptAudio ? '正在按提示词生成音频，可能需要数分钟…' : '正在调用百炼非实时语音合成…', 20);
   const response = await fetch(url, {
     method: 'POST', signal: input.signal,
     headers: { Authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: config.modelId, input: { text: input.text, voice: input.voice, format: input.format, sample_rate: 24_000, ...(input.speed ? { rate: input.speed } : {}) } }),
-  });
+    body: JSON.stringify({ model: config.modelId, input: { ...(promptAudio ? { text_prompt: input.text, sample_rate: 48_000, channels: 2 } : { text: input.text, voice: input.voice, sample_rate: 24_000 }), format: input.format, ...(input.speed !== undefined ? { rate: input.speed } : {}) } }),
+  }, promptAudio ? 300_000 : 120_000, promptAudio ? 'node' : 'fetch');
   const data = await checkedJson(response, 'DashScope TTS request failed');
   const audioUrl = String(data?.output?.audio?.url || data?.output?.url || data?.url || '');
   if (!audioUrl) throw new Error('DashScope TTS returned no audio URL.');

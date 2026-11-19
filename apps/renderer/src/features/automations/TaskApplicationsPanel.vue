@@ -82,7 +82,7 @@ onBeforeUnmount(()=>{clearConfirmation();generation++;if(timer)clearInterval(tim
 
 <template>
   <section class="task-apps">
-    <TaskRunMonitor v-if="monitorTarget" :key="monitorTarget.runId" v-bind="monitorTarget" @close="monitorTarget=null" @open-conversation="id=>emit('open-conversation',id)" />
+    <TaskRunMonitor v-if="monitorTarget" :key="monitorTarget.runId" v-bind="monitorTarget" @close="monitorTarget=null" />
     <header class="toolbar"><div><h2>任务应用</h2><p>把常用工作做成应用，填写参数即可执行，或安排稍后自动执行。</p></div><button class="primary" @click="creating=true">＋ 创建任务应用</button><button :disabled="busy" @click="action(refresh)">刷新</button></header>
     <p v-if="error" role="alert" class="error">{{error}}</p><p v-if="notice" role="status" class="notice">{{notice}}</p>
     <p v-if="loading" role="status">正在读取任务应用…</p><div v-else-if="!records.length" class="empty"><h3>将下一项常用工作变成应用</h3><p>说明任务目标和执行智能体，再到项目编辑器用AI设计参数界面。无需先配置五步模板。</p><button @click="creating=true">创建第一个任务应用</button></div>

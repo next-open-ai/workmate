@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {createKnowledgeRunner} from '../knowledge/runner.js';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { CreateConversationProjectSchema } from '@workmate/contracts';
@@ -98,7 +99,7 @@ export function getOrchestrator(): Orchestrator {
     };
     instance = new Orchestrator({
       store,
-      runner: runner ?? createWorkResultRunner(store,()=>getOrchestrator(),activeDataRunOwner,createExperienceRunner(store,activeDataRunOwner,createDataAgentRunner({ store, gateway: createStructuredDataGateway(), activeOwner: activeDataRunOwner, appQueries: createManagedAppQueries }))),
+      runner: runner ?? createKnowledgeRunner(store,createWorkResultRunner(store,()=>getOrchestrator(),activeDataRunOwner,createExperienceRunner(store,activeDataRunOwner,createDataAgentRunner({ store, gateway: createStructuredDataGateway(), activeOwner: activeDataRunOwner, appQueries: createManagedAppQueries })))),
       maxConcurrentRunsGlobal: positiveIntFromEnv('WORKMATE_MAX_CONCURRENT_RUNS_GLOBAL', 4),
       maxConcurrentRunsPerUser: positiveIntFromEnv('WORKMATE_MAX_CONCURRENT_RUNS_PER_USER', 2),
       maxQueueWaitMs: positiveIntFromEnv('WORKMATE_MAX_QUEUE_WAIT_MS', 120_000),

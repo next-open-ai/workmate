@@ -18,11 +18,13 @@ import {
   providerSupportsRecommendedSetup,
   suggestedProviderConnectionName,
   summarizeProviderModelHealth,
+  qwenNextNeedsWorkspace,
   type ConfiguredModel,
   type ProviderId,
   type ProviderInstance,
 } from '../../app/model-config';
 import type { ProviderService } from '@workmate/contracts';
+import {isOfficialDeepSeekConnection} from '@workmate/contracts';
 
 import { useNotify } from '../../app/notify';
 import { testProviderConnection } from '../../services/api.js';
@@ -57,6 +59,10 @@ const visibleInstances = computed(() => props.instances.filter((item) =>
 
 function providerHealth(instanceId: string) {
   return summarizeProviderModelHealth(props.models, instanceId);
+}
+
+function nextNeedsWorkspace(instance: ProviderInstance) {
+  return qwenNextNeedsWorkspace(instance, props.models);
 }
 
 watch(() => props.instances, (rows) => {
@@ -239,6 +245,7 @@ async function testInstance(instance: ProviderInstance) {
               </span>
             </div>
             <p class="mt-1 truncate font-mono text-[11px] text-[var(--muted)]">{{ effectiveProviderBaseUrl(instance) || defaultBaseUrl[instance.type] || '—' }}</p>
+            <p v-if="isOfficialDeepSeekConnection(instance) && instance.apiKey.trim()" class="mt-1 text-[11px] text-[var(--muted)]">在线搜索也可用 · 保存后同步复用此 API Key，无需重复配置（未联网验证）。</p>
             <button
               v-if="providerHealth(instance.id).total"
               class="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-semibold"
@@ -287,6 +294,10 @@ async function testInstance(instance: ProviderInstance) {
           {{ testMessage[instance.id].text }}
         </p>
 
+        <div v-if="nextNeedsWorkspace(instance)" class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs" role="status">
+          <span>{{ t('settings.nextWorkspaceRequired') }}</span>
+          <button type="button" class="font-semibold text-[var(--accent)] hover:underline" @click="editingId = instance.id">{{ t('settings.configureWorkspace') }}</button>
+        </div>
         <div v-if="editing?.id === instance.id" class="mt-4 grid gap-3 border-t border-[var(--border)] pt-4">
           <label class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
             <span>{{ t('settings.providerType') }}</span>
@@ -315,19 +326,19 @@ async function testInstance(instance: ProviderInstance) {
             </select>
             <span class="text-[11px] font-normal">{{ t('settings.providerServiceHelp') }}</span>
           </label>
+          <label v-if="instance.type === 'qwen'" class="mt-2 grid gap-1.5 font-semibold">
+            <span>{{ t('settings.workspaceId') }}</span>
+            <input
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
+              type="text"
+              :value="instance.workspaceId || ''"
+              :placeholder="t('settings.workspaceIdHint')"
+              @input="patch(instance.id, { workspaceId: eventValue($event).trim() })"
+            />
+            <span class="text-[11px] font-normal leading-relaxed text-[var(--muted)]">{{ t('settings.workspaceIdHelp') }}</span>
+          </label>
           <details class="rounded-xl border border-[var(--border)] px-3 py-2.5 text-xs text-[var(--muted)]">
             <summary class="cursor-pointer select-none font-semibold text-[var(--text)]">{{ t('settings.advancedConnection') }}</summary>
-            <label v-if="instance.type === 'qwen'" class="mt-2 grid gap-1.5 font-semibold">
-              <span>{{ t('settings.workspaceId') }}</span>
-              <input
-                class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-normal outline-none focus:border-[var(--accent)]"
-                type="text"
-                :value="instance.workspaceId || ''"
-                :placeholder="t('settings.workspaceIdHint')"
-                @input="patch(instance.id, { workspaceId: eventValue($event).trim() })"
-              />
-              <span class="text-[11px] font-normal leading-relaxed text-[var(--muted)]">{{ t('settings.workspaceIdHelp') }}</span>
-            </label>
             <label class="mt-2 grid gap-1.5 font-semibold">
             <span>{{ t('settings.customBaseUrl') }}</span>
             <input
@@ -414,6 +425,7 @@ async function testInstance(instance: ProviderInstance) {
             <label v-if="addDraft.type !== 'ollama'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
               <span>{{ t('settings.apiKey') }}<small v-if="!providerNeedsApiKey(addDraft.type)" class="ml-1 font-normal">({{ t('settings.optional') }})</small></span>
               <ProviderApiKeyInput :key="`${addDraft.id}:${addDraft.type}`" v-model="addDraft.apiKey" :context-id="`${addDraft.id}:${addDraft.type}`" :required="providerNeedsApiKey(addDraft.type)" />
+              <p v-if="addDraft.type === 'deepseek'" class="mt-1 text-[11px] font-normal text-[var(--muted)]">官方连接保存后，在线搜索也可用，复用同一个 API Key。</p>
               <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.apiKeyLocalHelp') }}</span>
             </label>
             <label v-if="(addDraft.type === 'volcengine' && addDraft.service === 'speech') || addDraft.type === 'iflytek'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
@@ -434,17 +446,17 @@ async function testInstance(instance: ProviderInstance) {
                 <span class="mt-1 block leading-relaxed text-[var(--muted)]">{{ t('settings.providerAutoSetupHelp') }}</span>
               </span>
             </div>
+            <label v-if="addDraft.type === 'qwen'" class="grid gap-1.5 text-xs font-semibold text-[var(--muted)]">
+              <span>{{ t('settings.workspaceId') }}</span>
+              <input v-model.trim="addDraft.workspaceId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('settings.workspaceIdHint')" />
+              <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.workspaceIdHelp') }}</span>
+            </label>
             <details class="rounded-xl border border-[var(--border)] px-3 py-2.5 text-xs text-[var(--muted)]">
               <summary class="cursor-pointer select-none font-semibold text-[var(--text)]">{{ t('settings.advancedConnection') }}</summary>
               <div class="mt-3 grid gap-3 border-t border-[var(--border)] pt-3">
                 <label v-if="addDraft.type !== 'openai-compatible'" class="grid gap-1.5 font-semibold">
                   <span>{{ t('settings.providerName') }}</span>
                   <input v-model="addDraft.name" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" required />
-                </label>
-                <label v-if="addDraft.type === 'qwen'" class="grid gap-1.5 font-semibold">
-                  <span>{{ t('settings.workspaceId') }}</span>
-                  <input v-model.trim="addDraft.workspaceId" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm font-normal" :placeholder="t('settings.workspaceIdHint')" />
-                  <span class="text-[11px] font-normal leading-relaxed">{{ t('settings.workspaceIdHelp') }}</span>
                 </label>
                 <label class="grid gap-1.5 font-semibold">
                   <span>{{ t('settings.customBaseUrl') }}</span>

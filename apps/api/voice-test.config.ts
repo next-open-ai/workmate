@@ -1,4 +1,7 @@
 import { defineConfig } from 'tsup';
+const deepseekEntry = {'deepseek-search.test':'src/modules/providers/deepseek-search.test.ts'};
+const wikiOptimizationEntry = { 'wiki-optimizations.test': 'src/modules/knowledge/wiki-optimizations.test.ts' };
+const knowledgeEntry = { ...deepseekEntry, ...wikiOptimizationEntry, 'knowledge-hybrid-api.test':'src/modules/knowledge/hybrid.test.ts'};
 const closureEntry = { 'parameter-project.test': 'src/modules/tasks/parameter-project.test.ts', 'project-application.test': 'src/modules/orchestration/project-application.test.ts', 'data-app-closure.test': 'src/modules/data/data-app-closure.test.ts', 'app-project.test': 'src/modules/data/app-project.test.ts', 'definition-routes.test': 'src/modules/orchestration/definition-routes.test.ts', 'workflow-runs.test': 'src/modules/orchestration/workflow-runs.test.ts' };
 Object.assign(closureEntry,{'creation-routes.test':'src/modules/tasks/creation-routes.test.ts'});
 Object.assign(closureEntry,{'task-applications.test':'src/modules/tasks/task-applications.test.ts'});
@@ -18,6 +21,6 @@ Object.assign(closureEntry, { 'project-draft-files.test': 'src/modules/orchestra
 export default defineConfig({
   // LDO isolation: dedicated process/data directory, no real business database.
   // Remote database tests use synthetic sessions; real-server acceptance is opt-in.
-  entry: { ...closureEntry, 'project-instructions.test': 'src/modules/orchestration/project-instructions.test.ts', 'data-object.test': 'src/modules/data/data-object.test.ts', 'work-bridge.test': 'src/modules/voice/work-bridge.test.ts', 'context-assembler.test': 'src/modules/orchestration/context-assembler.test.ts', 'asr.test': 'src/modules/voice/asr.test.ts', 'settings-modularization.test': 'src/modules/voice/settings-modularization.test.ts', 'realtime-provider-adapters.test': 'src/modules/voice/realtime-provider-adapters.test.ts', 'mobile-voice.test': 'src/modules/chat-mobile/voice.test.ts', 'mobile-https-proxy.test': 'src/modules/chat-mobile/https-proxy.test.ts' }, format: ['esm'], platform: 'node', target: 'node22',
+  entry: { ...knowledgeEntry, ...closureEntry, 'project-instructions.test': 'src/modules/orchestration/project-instructions.test.ts', 'data-object.test': 'src/modules/data/data-object.test.ts', 'work-bridge.test': 'src/modules/voice/work-bridge.test.ts', 'context-assembler.test': 'src/modules/orchestration/context-assembler.test.ts', 'asr.test': 'src/modules/voice/asr.test.ts', 'settings-modularization.test': 'src/modules/voice/settings-modularization.test.ts', 'realtime-provider-adapters.test': 'src/modules/voice/realtime-provider-adapters.test.ts', 'mobile-voice.test': 'src/modules/chat-mobile/voice.test.ts', 'mobile-https-proxy.test': 'src/modules/chat-mobile/https-proxy.test.ts' }, format: ['esm'], platform: 'node', target: 'node22',
   outDir: 'test-dist', clean: true, noExternal: ['@workmate/contracts'], removeNodeProtocol: false,
 });

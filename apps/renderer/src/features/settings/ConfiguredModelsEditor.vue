@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { DEFAULT_EMBEDDING_META, suggestedSpeechVoices } from '@workmate/contracts';
+import { DEFAULT_EMBEDDING_META, isQwenPromptAudioModel, suggestedSpeechVoices } from '@workmate/contracts';
 import { useI18n } from '../../app/i18n';
 import {
   imageGenerationProtocols,
+  bindSpecialistModel,
   classifyCapabilityFailure,
   effectiveProviderBaseUrl,
   inferImageGenerationProtocol,
@@ -40,6 +41,7 @@ const emit = defineEmits<{
   'update:capabilityBindings': [value: CapabilityBinding[]];
   'configure-provider': [providerId: string];
   'test-realtime': [];
+  'activate-audio': [modelId: string];
   dirty: [];
 }>();
 
@@ -220,6 +222,9 @@ function addModel(modelId: string, makeDefault = true) {
   if (draftCapability.value === 'chat' && (makeDefault || !props.activeChatModelId)) activeChatId = entry.id;
   if (draftCapability.value === 'embedding' && (makeDefault || !props.activeEmbeddingModelId)) activeEmbeddingId = entry.id;
   emitModels(next, activeChatId, activeEmbeddingId);
+  if (entry.capability !== 'embedding' || activeEmbeddingId === entry.id) {
+    emit('update:capabilityBindings', bindSpecialistModel(props.capabilityBindings, entry, makeDefault));
+  }
   draftModelId.value = '';
   pickerOpen.value = false;
 }
@@ -581,6 +586,11 @@ function recordModelTest(model: ConfiguredModel, result: { ok: boolean; summary:
         <div v-else-if="model.capability === 'realtime'" class="flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-2.5 text-[11px]">
           <span class="text-[var(--muted)]">当前音色 <strong class="ml-1 text-[var(--text)]">{{ realtimeVoiceName(model.voice) }}</strong></span>
           <button class="font-semibold text-[var(--accent)] hover:underline" type="button" @click="openRealtimeConfig(model)">更换音色与配置</button>
+        </div>
+        <div v-else-if="model.capability === 'tts' && isQwenPromptAudioModel(instanceById[model.providerInstanceId]?.type ?? '', model.modelId)" class="border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3 text-[11px] leading-relaxed text-[var(--muted)]">
+          <p v-if="boundModelId('tts') !== model.id" class="mb-2 font-semibold text-amber-700">未启用音频创作：模型已登记，但未选为默认音频模型，智能体不会收到此模型工具。<button class="ml-2 text-[var(--accent)] underline" type="button" @click="emit('activate-audio', model.id)">用于音频创作并保存</button></p>
+          <p v-else class="mb-2 font-semibold text-[var(--accent)]">已选为默认音频创作模型；保存配置后供开启“使用应用模型”的员工调用。此状态不代表服务已通过测试。</p>
+          提示词音频生成：无需音色 ID，在对话中描述声音风格、人声和歌词即可尝试创作，结果保存为音频文件。须在阿里连接中填写业务空间 Workspace ID 并开通模型。最多 3000 字符，非播客单次最长 120 秒；歌曲效果请先通过模型测试试听。
         </div>
         <div v-else-if="model.capability === 'tts'" class="border-t border-dashed border-[var(--border)] bg-[var(--surface)]/50 px-3 py-3">
           <label class="grid gap-1.5 text-[11px] font-semibold text-[var(--muted)] sm:grid-cols-[minmax(0,1fr)_2fr] sm:items-center">

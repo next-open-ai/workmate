@@ -9,7 +9,7 @@ try {
   const qwen = { id: 'qwen-1', type: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKey: 'test', workspaceId: '', disableThinking: false };
   const first = applyRecommendedProviderSetup(empty(), qwen, ['general']);
   assert.equal(first.manualRequired, false);
-  assert.equal(first.addedModels, 7);
+  assert.equal(first.addedModels, 8);
   assert.equal(first.settings.models.find((item) => item.capability === 'chat')?.modelId, 'qwen3.8-flash');
   assert.equal(first.settings.models.find((item) => item.capability === 'vision')?.modelId, 'qwen-vl-plus');
   assert.equal(first.settings.models.find((item) => item.capability === 'image')?.modelId, 'qwen-image-2.0');
@@ -150,7 +150,7 @@ try {
   withHealth.models[2].health = { status: 'available', checkedAt: '2026-07-01T00:00:00.000Z', summary: 'old ok' };
   assert.deepEqual(
     summarizeProviderModelHealth(withHealth.models, qwen.id, Date.parse('2026-09-25T12:00:00.000Z')),
-    { total: 7, available: 1, issues: 1, stale: 1, unverified: 4 },
+    { total: 8, available: 1, issues: 1, stale: 1, unverified: 5 },
   );
   console.log('AMC-AUTO-CONFIG-001 PASS: recommendation, workspace branch, preservation, idempotency and manual fallback.');
 } finally {

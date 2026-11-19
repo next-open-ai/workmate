@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ChatRequestSchema } from '@workmate/contracts';
+import {authorizeRunKnowledge} from '../knowledge/access.js';
 import { streamAgentReply,withExperienceContext } from '@workmate/agent-core';
 import {requireAuth,activeDataRunOwner} from '../auth/service.js';
 import {experienceContextForOwner} from '../experience/routes.js';
@@ -15,6 +16,8 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
     if (parsed.data.messages.some((message) => message.attachments?.length)) {
       return reply.code(400).send({ message: 'VISION_SESSION_REQUIRED：图片仅支持有权限校验的会话接口。' });
     }
+    try{parsed.data=authorizeRunKnowledge(parsed.data,owner);}
+    catch{return reply.code(403).send({message:'知识库配置不可用或无权访问。'});}
     reply.hijack();
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',

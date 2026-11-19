@@ -97,3 +97,7 @@ export {withWorkResultAccess,createWorkResultTools,type WorkResultExecutor} from
 export {createWorkResultRanker} from './work-results-ranking.js';
 export {openLocalPdf} from './pdf-document.js';
 export {readDocument,supportsDocumentReading,type DocumentReadInput} from './document-service.js';
+
+export * from './knowledge-evidence.js';
+export * from './wiki-generation.js';
+export * from './wiki-batching.js';

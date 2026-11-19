@@ -3,6 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import {registerSourceIngest} from './source-ingest.js';
+import {registerWikiRoutes} from './wiki-routes.js';
+import {registerWikiGenerationRoutes} from './wiki-generation-routes.js';
+import {registerKnowledgeAccessGuard} from './access.js';
+import {knowledgeDataRoot} from './catalog.js';
+import {getOrchestrator} from '../orchestration/routes.js';
+import {identifyKnowledgeVersion} from '@workmate/agent-core';
 import { requireAdmin } from '../auth/service.js';
 import {
   BailianCreateKnowledgeRequestSchema,
@@ -82,25 +89,10 @@ function persistOntologyJobs() {
 if (ontologyJobs.size) persistOntologyJobs();
 
 export const knowledgeRoutes: FastifyPluginAsync = async (app) => {
-  // The UI accepts source files up to 8 MB. Base64 expands those bytes by roughly
-  // one third, so this route needs a larger limit than Fastify's 1 MB default.
-  app.post('/knowledge/ingest', { bodyLimit: 16 * 1024 * 1024 }, async (request, reply) => {
-    const parsed = KnowledgeIngestRequestSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ message: 'Invalid ingest request.', issues: parsed.error.issues });
-    try {
-      return await ingestKnowledge({
-        kb: parsed.data.knowledgeBase,
-        title: parsed.data.title,
-        content: parsed.data.content,
-        fileBase64: parsed.data.fileBase64,
-        fileName: parsed.data.fileName,
-        source: parsed.data.source,
-        model: parsed.data.model,
-      });
-    } catch (error) {
-      return reply.code(400).send({ message: error instanceof Error ? error.message : 'Ingest failed.' });
-    }
-  });
+  registerKnowledgeAccessGuard(app);
+  registerSourceIngest(app,{dataRoot:knowledgeDataRoot,ingest:ingestKnowledge,identifyVersion:identifyKnowledgeVersion});
+  registerWikiRoutes(app,{dataRoot:knowledgeDataRoot});
+  registerWikiGenerationRoutes(app,{dataRoot:knowledgeDataRoot,dispatcher:()=>getOrchestrator().dispatcher});
 
   app.post('/knowledge/search', async (request, reply) => {
     const parsed = KnowledgeSearchRequestSchema.safeParse(request.body);

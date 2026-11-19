@@ -105,3 +105,5 @@ export * from './template-agent.js';
 export type { TaskOwner } from './template-tasks.js';
 export { parameterUiHtml } from './task-parameter-ui.js';
 export {reportUiHtml,validateReportUi,defaultReportSource,reportPreviewResult} from './task-report-ui.js';
+
+export * from './wiki-generation.js';

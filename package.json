@@ -50,6 +50,7 @@
     ]
   },
   "scripts": {
+    "knowledge:evaluation:regression": "pnpm --filter @workmate/contracts build && node --experimental-strip-types --test scripts/retrieval-evaluation-regression.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
@@ -62,6 +63,8 @@
     "build": "pnpm --filter @workmate/contracts build && pnpm --filter @workmate/tools build && pnpm --filter @workmate/storage build && pnpm --filter @workmate/channel build && pnpm --filter @workmate/gateway build && pnpm --filter @workmate/agent-core build && pnpm --filter @workmate/orchestrator build && pnpm --filter @workmate/api build && pnpm --filter @workmate/renderer build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
+    "deepseek-search:regression": "pnpm --filter @workmate/contracts build && pnpm --filter @workmate/agent-core test && pnpm --filter @workmate/api test && node scripts/deepseek-search-regression.mjs",
+    "knowledge:regression": "pnpm --filter @workmate/contracts build && pnpm --filter @workmate/storage test && pnpm --filter @workmate/agent-core test && pnpm --filter @workmate/orchestrator test && pnpm --filter @workmate/api test && node scripts/knowledge-hybrid-ui-regression.mjs",
     "tasks:smoke": "pnpm --filter @workmate/api test && pnpm task-applications:regression",
     "task-template:regression": "node scripts/task-management-regression.mjs && node scripts/workflow-chat-return-regression.mjs && node scripts/task-parameter-bridge.test.mjs",
     "task-applications:regression": "node scripts/task-monitor-regression.mjs && node scripts/task-applications-ui-regression.mjs && pnpm task-template:regression",

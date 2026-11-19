@@ -2,7 +2,13 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { completeSimple } from '@mariozechner/pi-ai';
 import { z } from 'zod';
-import type { KnowledgeBaseRuntime, ModelCapabilityRuntime, ModelConfig, OntologyNode } from '@workmate/contracts';
+import { KnowledgeSourceSnapshotSchema, type KnowledgeSourceSnapshot, type KnowledgeEvidence, type KnowledgeRetrieval, type KnowledgeBaseRuntime, type ModelCapabilityRuntime, type ModelConfig, type OntologyNode } from '@workmate/contracts';
+import { fuseKnowledgeRanks } from './knowledge-hybrid.js';
+import { recallWiki, currentWikiRevisions } from './wiki-retrieval.js';
+import { chunkStructuredKnowledge, STRUCTURED_CHUNKER } from './knowledge-chunker.js';
+import type { KnowledgeParentContext } from '@workmate/contracts';
+import { createVersionedKnowledgeEvidence, identifyKnowledgeProcessing, knowledgeContentHash } from './knowledge-evidence.js';
+import { openKnowledgeEvidence, readVisibility, visiblePredicate, visibilitySql, withCurrentEvidence } from './knowledge-visibility.js';
 import { Type } from '@sinclair/typebox';
 import { defineAgentTool, type AgentTool } from './pi-tools.js';
 import {
@@ -33,6 +39,10 @@ export type KnowledgeHit = {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
   provider: string;
+  evidence?: KnowledgeEvidence;
+  retrieval?: KnowledgeRetrieval;
+  context?: KnowledgeParentContext;
+  wiki?: import('@workmate/contracts').WikiRecall;
   retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'>;
 };
 
@@ -72,6 +82,7 @@ export type KnowledgeChunkSummary = {
   content: string;
   source?: string;
   createdAt: number;
+  evidence?: KnowledgeEvidence;
 };
 
 const timeout = <T>(promise: Promise<T>, ms = 20_000) =>
@@ -122,26 +133,6 @@ function cosine(a: number[], b: number[]) {
   }
   if (!na || !nb) return 0;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-function chunkText(content: string, title: string) {
-  const cleaned = content.replace(/\r\n/g, '\n').trim();
-  if (!cleaned) return [] as Array<{ title: string; content: string }>;
-  const max = 1200;
-  const parts: Array<{ title: string; content: string }> = [];
-  if (cleaned.length <= max) {
-    parts.push({ title, content: cleaned });
-    return parts;
-  }
-  let offset = 0;
-  let index = 1;
-  while (offset < cleaned.length) {
-    const slice = cleaned.slice(offset, offset + max);
-    parts.push({ title: `${title}#${index}`, content: slice });
-    offset += max - 120;
-    index += 1;
-  }
-  return parts;
 }
 
 function fileStorePath(dataDir: string) {
@@ -195,7 +186,7 @@ async function tryLanceListAll(dataDir: string): Promise<LocalChunk[] | null> {
     const names = await db.tableNames();
     if (!names.includes('chunks')) return [];
     const table = await db.openTable('chunks');
-    const result = await table.query().limit(20_000).toArray();
+    const result = await table.query().where(visibilitySql(readVisibility(dataDir))).limit(20_000).toArray();
     return result.map((row: any) => normalizeLocalChunk(row));
   } catch {
     return null;
@@ -221,8 +212,37 @@ async function tryLanceDeleteByIds(dataDir: string, ids: string[]) {
 
 async function loadAllLocalChunks(dataDir: string): Promise<{ rows: LocalChunk[]; backend: 'lancedb' | 'file-fallback' }> {
   const lanceRows = await tryLanceListAll(dataDir);
-  if (lanceRows?.length || (lanceRows && !existsSync(fileStorePath(dataDir)))) return { rows: lanceRows, backend: 'lancedb' };
-  return { rows: readFileStore(dataDir).map((row) => normalizeLocalChunk(row)), backend: 'file-fallback' };
+  const merged = new Map<string, LocalChunk>();
+  for (const row of readFileStore(dataDir).map((row) => normalizeLocalChunk(row))) merged.set(row.id, row);
+  for (const row of lanceRows || []) merged.set(row.id, row);
+  return { rows: [...merged.values()].filter(visiblePredicate(readVisibility(dataDir))), backend: lanceRows ? 'lancedb' : 'file-fallback' };
+}
+
+const legacyKeywordScans = new Map<string, Promise<void>>();
+async function ensureLegacyKeywords(dataDir: string): Promise<void> {
+  const existing = legacyKeywordScans.get(dataDir);
+  if (existing) return existing;
+  const scan = (async () => {
+    const index = (rows: LocalChunk[]) => {
+      const store = openKnowledgeEvidence(dataDir);
+      try { store.indexLegacyChunks(rows.map(({ id, documentId, title, content, source }) => ({ id, documentId, title, content, source }))); }
+      finally { store.close(); }
+    };
+    index(readFileStore(dataDir).map(normalizeLocalChunk));
+    const { connect } = await import('@lancedb/lancedb');
+    const db = await connect(dataDir);
+    if (!(await db.tableNames()).includes('chunks')) return;
+    const table = await db.openTable('chunks');
+    await table.checkout(await table.version());
+    // A fixed table snapshot plus paging avoids the old 20,000-row listing cap.
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await table.query().where("id NOT LIKE 'ch-%'").offset(offset).limit(1000).toArray();
+      index(rows.map(normalizeLocalChunk));
+      if (rows.length < 1000) break;
+    }
+  })();
+  legacyKeywordScans.set(dataDir, scan);
+  try { await scan; } catch (error) { legacyKeywordScans.delete(dataDir); throw error; }
 }
 
 async function persistLocalChunks(dataDir: string, rows: LocalChunk[], preferLance: boolean) {
@@ -292,7 +312,7 @@ function groupDocuments(rows: LocalChunk[]): KnowledgeDocumentSummary[] {
   return [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function tryLanceUpsert(dataDir: string, rows: LocalChunk[]) {
+async function tryLanceUpsert(dataDir: string, rows: LocalChunk[], managed = false) {
   try {
     const lancedb = await import('@lancedb/lancedb');
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -310,26 +330,49 @@ async function tryLanceUpsert(dataDir: string, rows: LocalChunk[]) {
     }));
     if (names.includes('chunks')) {
       const table = await db.openTable('chunks');
-      await table.add(payload);
+      if (managed) {
+        const vectorType = (await table.schema()).fields.find((field) => field.name === 'vector')?.type;
+        if (!vectorType || !('listSize' in vectorType) || rows.some((row) => row.vector.length !== vectorType.listSize)) {
+          throw Object.assign(new Error('当前向量模型的维度与知识库不一致，请选择原向量模型，或新建知识库后导入。'), { code: 'EMBEDDING_DIMENSION_MISMATCH' });
+        }
+        await table.mergeInsert('id').whenMatchedUpdateAll().whenNotMatchedInsertAll().execute(payload);
+      }
+      else await table.add(payload);
     } else {
       await db.createTable('chunks', payload);
     }
+    if (managed) {
+      const table = await db.openTable('chunks');
+      const ids = rows.map((row) => `'${escapeSqlLiteral(row.id)}'`).join(',');
+      const saved = await table.query().where(`id IN (${ids})`).limit(rows.length + 1).toArray();
+      const expected = new Map(rows.map((row) => [row.id, row]));
+      if (saved.length !== rows.length || new Set(saved.map((row) => String(row.id))).size !== rows.length
+        || saved.some((row) => row.content !== expected.get(String(row.id))?.content
+        || row.documentId !== expected.get(String(row.id))?.documentId
+        || row.vector?.length !== expected.get(String(row.id))?.vector.length
+        || Array.from(row.vector as Iterable<number>).some((value) => !Number.isFinite(value)))) throw new Error('Vector write verification failed.');
+    }
     return true;
-  } catch {
+  } catch (error) {
+    if (managed) {
+      if ((error as { code?: string }).code === 'EMBEDDING_DIMENSION_MISMATCH') throw error;
+      throw new Error('知识入库未完成：检索数据写入失败，原文已保留，请重试。', { cause: error });
+    }
     return false;
   }
 }
 
-async function tryLanceSearch(dataDir: string, vector: number[], topK: number) {
+async function tryLanceSearch(dataDir: string, vector: number[], topK: number, filter: string) {
   try {
     const lancedb = await import('@lancedb/lancedb');
     const db = await lancedb.connect(dataDir);
     const names = await db.tableNames();
     if (!names.includes('chunks')) return null;
     const table = await db.openTable('chunks');
-    const result = await table.vectorSearch(vector).limit(topK).toArray();
+    const result = await table.vectorSearch(vector).distanceType('cosine').where(filter).limit(topK).toArray();
     return result.map((row: any, index: number) => ({
       id: text(row.id) || `hit-${index}`,
+      documentId: normalizeLocalChunk(row).documentId,
       title: text(row.title) || 'Untitled',
       content: text(row.content),
       score: typeof row._distance === 'number' ? 1 / (1 + row._distance) : 0,
@@ -342,6 +385,11 @@ async function tryLanceSearch(dataDir: string, vector: number[], topK: number) {
 
 export async function ingestLocalKnowledge(input: {
   kb: KnowledgeBaseRuntime;
+  /** Assigned by the API when preserving an immutable source snapshot. */
+  documentId?: string;
+  sourceSnapshot?: KnowledgeSourceSnapshot;
+  parserId?: string;
+  expectedGeneration?: number;
   title: string;
   content: string;
   source?: string;
@@ -352,13 +400,48 @@ export async function ingestLocalKnowledge(input: {
   if (!embed) throw new Error('Configure an embedding model (Settings → Models) before indexing local knowledge.');
   const dataDir = resolveKnowledgeDataDir(input.kb);
   const documentTitle = (input.title || 'document').trim() || 'document';
-  const documentId = crypto.randomUUID();
-  const pieces = chunkText(input.content, documentTitle);
+  const documentId = input.documentId || crypto.randomUUID();
+  const structured = chunkStructuredKnowledge(input.content, documentTitle);
+  const pieces = structured.chunks;
   if (!pieces.length) throw new Error('Document content is empty.');
+  const snapshot = input.sourceSnapshot ? KnowledgeSourceSnapshotSchema.parse(input.sourceSnapshot) : undefined;
+  const scope = { provider: 'lancedb', knowledgeBaseId: input.kb.id, documentId };
+  let processingRevisionId: string | undefined;
+  let expectedGeneration: number | undefined;
+  let evidence: Array<ReturnType<typeof createVersionedKnowledgeEvidence>> | undefined;
+  if (snapshot) {
+    if (snapshot.provider !== scope.provider || snapshot.knowledgeBaseId !== scope.knowledgeBaseId || snapshot.documentId !== documentId) {
+      throw new Error('Source snapshot does not match the knowledge document.');
+    }
+    const recipe = {
+      parser: input.parserId || 'text-utf8-v1', chunker: STRUCTURED_CHUNKER.version,
+      config: { childMax: STRUCTURED_CHUNKER.childMax, parentMax: STRUCTURED_CHUNKER.parentMax,
+        normalization: 'crlf-cr-to-lf-trim-v1', parsedTextHash: knowledgeContentHash(structured.normalizedText) },
+    };
+    processingRevisionId = identifyKnowledgeProcessing(snapshot.documentVersionId, recipe);
+    const locate = (piece: { start: number; end: number }) => ({ coordinateSystem: 'normalized-text-utf16' as const, start: piece.start, end: piece.end });
+    const parentChunks = structured.parents.map((piece, index) => ({ content: piece.content,
+      evidence: createVersionedKnowledgeEvidence({ scope, documentVersionId: snapshot.documentVersionId,
+        processingRevisionId: processingRevisionId!, ordinal: pieces.length + index, content: piece.content,
+        sourceLocation: locate(piece), headingPath: piece.headingPath }) }));
+    evidence = pieces.map((piece, ordinal) => createVersionedKnowledgeEvidence({ scope,
+      documentVersionId: snapshot.documentVersionId, processingRevisionId: processingRevisionId!, ordinal, content: piece.content,
+      sourceLocation: locate(piece), headingPath: piece.headingPath,
+      parentChunkId: piece.parentIndex === undefined ? undefined : parentChunks[piece.parentIndex].evidence.chunkId }));
+    const store = openKnowledgeEvidence(dataDir);
+    try {
+      expectedGeneration = input.expectedGeneration ?? store.getHead(scope).generation;
+      const previous = store.getBatch(scope, processingRevisionId);
+      store.putBatch({ ...scope, documentVersionId: snapshot.documentVersionId, processingRevisionId,
+        ...(previous ? { documentTitle: previous.documentTitle, source: previous.source } : { documentTitle, source: input.source }),
+        sourceHash: snapshot.file.sha256, recipe, parentChunks,
+        chunks: pieces.map((piece, index) => ({ evidence: evidence![index], content: piece.content })) });
+    } finally { store.close(); }
+  }
   const vectors = await embedTexts(embed, pieces.map((item) => item.content));
   const createdAt = Date.now();
   const rows: LocalChunk[] = pieces.map((piece, index) => ({
-    id: crypto.randomUUID(),
+    id: evidence?.[index].chunkId || crypto.randomUUID(),
     documentId,
     documentTitle,
     title: piece.title,
@@ -367,14 +450,24 @@ export async function ingestLocalKnowledge(input: {
     vector: vectors[index],
     createdAt,
   }));
-  const usedLance = await tryLanceUpsert(dataDir, rows);
+  const usedLance = await tryLanceUpsert(dataDir, rows, Boolean(snapshot));
+  if (snapshot && !usedLance) throw new Error('知识入库未完成：检索数据写入失败，原文已保留，请重试。');
   if (!usedLance) {
     const existing = readFileStore(dataDir).map((row) => normalizeLocalChunk(row));
     writeFileStore(dataDir, [...rows, ...existing].slice(0, 20_000));
   }
+  if (processingRevisionId !== undefined && expectedGeneration !== undefined) {
+    const store = openKnowledgeEvidence(dataDir);
+    try { store.activate(scope, processingRevisionId, expectedGeneration); } finally { store.close(); }
+  } else {
+    const store = openKnowledgeEvidence(dataDir);
+    try { store.indexLegacyChunks(rows.map(({ id, documentId, title, content, source }) => ({ id, documentId, title, content, source }))); }
+    finally { store.close(); }
+  }
   return {
     ok: true as const,
     documentId,
+    ...(processingRevisionId ? { processingRevisionId } : {}),
     chunks: rows.length,
     backend: usedLance ? 'lancedb' : 'file-fallback',
     dataDir,
@@ -407,6 +500,8 @@ function requireBailianAuth(kb: KnowledgeBaseRuntime) {
 
 export async function ingestKnowledge(input: {
   kb: KnowledgeBaseRuntime;
+  documentId?: string;
+  sourceSnapshot?: KnowledgeSourceSnapshot;
   title: string;
   content?: string;
   fileBase64?: string;
@@ -415,22 +510,37 @@ export async function ingestKnowledge(input: {
   model?: ModelConfig;
 }) {
   if (input.kb.provider === 'lancedb') {
+    let expectedGeneration: number | undefined;
+    if (input.sourceSnapshot) {
+      const snapshot = KnowledgeSourceSnapshotSchema.parse(input.sourceSnapshot);
+      if (snapshot.documentId !== input.documentId || snapshot.knowledgeBaseId !== input.kb.id || snapshot.provider !== input.kb.provider) {
+        throw new Error('Source snapshot does not match the knowledge document.');
+      }
+      const store = openKnowledgeEvidence(resolveKnowledgeDataDir(input.kb));
+      try { expectedGeneration = store.getHead({ provider: 'lancedb', knowledgeBaseId: input.kb.id, documentId: snapshot.documentId }).generation; }
+      finally { store.close(); }
+    }
+    let parserId = 'text-utf8-v1';
     let content = String(input.content || '').trim();
     if (!content && input.fileBase64?.trim()) {
       const fileName = String(input.fileName || '').trim();
       if (!fileName) throw new Error('Local document ingest requires a file name.');
       const parsed = await readDocument({
         fileName,
-        bytes: Buffer.from(input.fileBase64.trim(), 'base64'),
-        allowEnhanced:true,
+        bytes: Buffer.from(input.fileBase64.trim(), 'base64'), allowEnhanced: true,
       });
-      if(!parsed.ok)throw new Error(parsed.message);
-      if(parsed.info.truncated)throw new Error('文档超出单次读取范围，正文存在截断；请拆分后重新导入，避免知识库只保存部分内容。');
+      if (!parsed.ok) throw new Error(parsed.message);
+      if (parsed.info.truncated) throw new Error('文档正文存在截断，请拆分后重新导入。');
       content = parsed.text;
+      parserId = `${parsed.info.parser}-document-v1`;
     }
     if (!content) throw new Error('Local knowledge ingest requires text content or a supported PDF/DOCX file.');
     return ingestLocalKnowledge({
       kb: input.kb,
+      documentId: input.documentId,
+      sourceSnapshot: input.sourceSnapshot,
+      parserId,
+      expectedGeneration,
       title: input.title,
       content,
       source: input.source,
@@ -566,7 +676,7 @@ export async function listLocalKnowledgeChunks(input: {
   filtered = [...filtered].sort((a, b) => b.createdAt - a.createdAt);
   const offset = Math.max(0, Math.round(Number(input.offset) || 0));
   const limit = Math.min(100, Math.max(1, Math.round(Number(input.limit) || 40)));
-  const page = filtered.slice(offset, offset + limit).map((row): KnowledgeChunkSummary => ({
+  const page = withCurrentEvidence(dataDir, input.kb.id, filtered.slice(offset, offset + limit)).map((row): KnowledgeChunkSummary => ({
     id: row.id,
     documentId: row.documentId,
     documentTitle: row.documentTitle,
@@ -574,6 +684,7 @@ export async function listLocalKnowledgeChunks(input: {
     content: row.content,
     source: row.source,
     createdAt: row.createdAt,
+    evidence: row.evidence,
   }));
   return {
     ok: true as const,
@@ -606,6 +717,9 @@ export async function deleteLocalKnowledgeDocument(kb: KnowledgeBaseRuntime, doc
   const keep = rows.filter((row) => row.documentId !== id);
   const removed = rows.length - keep.length;
   if (!removed) throw new Error('Document not found.');
+  const store = openKnowledgeEvidence(dataDir);
+  try { store.suppressChunks(rows.filter((row) => row.documentId === id).map((row) => row.id),
+    { provider: 'lancedb', knowledgeBaseId: kb.id, documentId: id }); } finally { store.close(); }
   if (backend === 'lancedb') {
     const ids = rows.filter((row) => row.documentId === id).map((row) => row.id);
     const ok = await tryLanceDeleteByIds(dataDir, ids);
@@ -636,6 +750,8 @@ export async function deleteLocalKnowledgeChunk(kb: KnowledgeBaseRuntime, chunkI
   const { rows, backend } = await loadAllLocalChunks(dataDir);
   const keep = rows.filter((row) => row.id !== id);
   if (keep.length === rows.length) throw new Error('Chunk not found.');
+  const store = openKnowledgeEvidence(dataDir);
+  try { store.suppressChunks([id]); } finally { store.close(); }
   if (backend === 'lancedb') {
     const ok = await tryLanceDeleteByIds(dataDir, [id]);
     if (!ok) await persistLocalChunks(dataDir, keep, false);
@@ -664,22 +780,82 @@ export async function getKnowledgeJobStatus(kb: KnowledgeBaseRuntime, jobId: str
 }
 
 async function searchLocal(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig): Promise<KnowledgeHit[]> {
-  const embed = resolveEmbedConfig(kb, model);
-  if (!embed) throw new Error('Local knowledge search requires an embedding model.');
-  const [vector] = await embedTexts(embed, [query]);
+  if (!query.trim()) return [];
   const dataDir = resolveKnowledgeDataDir(kb);
-  const lanceHits = await tryLanceSearch(dataDir, vector, topK);
-  const rows = lanceHits ?? readFileStore(dataDir)
-    .map((row) => ({ ...row, score: cosine(vector, row.vector) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map((row) => ({ id: row.id, title: row.title, content: row.content, score: row.score, source: row.source }));
-  return rows.map((row) => ({
-    ...row,
+  await ensureLegacyKeywords(dataDir);
+  const count = Math.min(100, Math.max(20, topK * 4));
+  const store = openKnowledgeEvidence(dataDir);
+  let keywords: import('@workmate/contracts').KnowledgeKeywordHit[];
+  try { keywords = store.searchKeywords(query, count); } finally { store.close(); }
+  const embed = resolveEmbedConfig(kb, model);
+  let vectors: Array<{ id: string; documentId: string; title: string; content: string; source?: string; score: number }> = [];
+  let degraded = !embed;
+  if (embed) {
+    let vector: number[] | undefined;
+    try { [vector] = await embedTexts(embed, [query]); }
+    catch (error) { if (!keywords.length) throw error; degraded = true; }
+    if (vector) {
+      const visibility = readVisibility(dataDir);
+      const lanceHits = await tryLanceSearch(dataDir, vector, count, visibilitySql(visibility));
+      const fileHits = readFileStore(dataDir).map((row) => normalizeLocalChunk(row)).filter(visiblePredicate(visibility))
+        .map((row) => ({ ...row, score: 1 / (1 + Math.max(0, 1 - cosine(vector!, row.vector))) }));
+      degraded = lanceHits === null;
+      const merged = new Map([...fileHits, ...(lanceHits || [])].map((row) => [row.id, row]));
+      vectors = [...merged.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, count);
+    }
+  }
+  const rows = withCurrentEvidence(dataDir, kb.id, fuseKnowledgeRanks(keywords, vectors, degraded)).slice(0, topK);
+  return restoreKnowledgeContexts(rows.map((row) => ({
+    id: row.id, title: row.title, content: row.content, score: row.score, source: row.source, evidence: row.evidence, retrieval: row.retrieval,
     knowledgeBaseId: kb.id,
     knowledgeBaseName: kb.name,
     provider: kb.provider,
-  }));
+  })), [kb]);
+}
+
+/** Final synchronous publication check and global context budget, including cross-KB tool results. */
+function restoreKnowledgeContexts(hits: KnowledgeHit[], bases: KnowledgeBaseRuntime[]): KnowledgeHit[] {
+  const clean = hits.map(({ context: _previous, ...hit }) => hit as KnowledgeHit);
+  const checked = new Map<string, KnowledgeHit>();
+  const wikiCurrent = new Map<string, Set<string>>();
+  for (const kb of bases.filter((base) => base.provider === 'lancedb')) {
+    const wikiRefs = clean.filter(hit => hit.knowledgeBaseId === kb.id && hit.wiki).map(hit => hit.wiki!);
+    if (wikiRefs.length) wikiCurrent.set(kb.id, currentWikiRevisions(kb, resolveKnowledgeDataDir(kb), wikiRefs));
+    const rows = clean.filter((hit) => hit.knowledgeBaseId === kb.id && !hit.wiki)
+      .map((hit) => ({ ...hit, documentId: hit.evidence?.documentId ?? '' }));
+    if (!rows.length) continue;
+    for (const { documentId: _document, ...hit } of withCurrentEvidence(resolveKnowledgeDataDir(kb), kb.id, rows)) {
+      checked.set(`${kb.id}:${hit.id}`, hit);
+    }
+  }
+  let remaining = 7200;
+  const attached = new Map<string, KnowledgeParentContext>();
+  const results: KnowledgeHit[] = [];
+  for (const original of clean) {
+    if (original.wiki) {
+      if (wikiCurrent.get(original.knowledgeBaseId)?.has(`${original.wiki.pageId}:${original.wiki.revisionId}`)) results.push(original);
+      continue;
+    }
+    const kb = bases.find((base) => base.id === original.knowledgeBaseId && base.provider === 'lancedb');
+    if (!kb) { results.push(original); continue; }
+    const hit = checked.get(`${kb.id}:${original.id}`);
+    if (!hit) continue;
+    if (hit.evidence?.verification === 'versioned' && hit.evidence.parentChunkId) {
+      const store = openKnowledgeEvidence(resolveKnowledgeDataDir(kb));
+      try {
+        const context = store.getParentContext(hit.id);
+        if (context) {
+          const key = `${kb.id}:${context.evidence.chunkId}`, existing = attached.get(key);
+          if (existing) existing.matchedChunkIds.push(hit.id);
+          else if (context.content.length <= remaining) {
+            hit.context = context; attached.set(key, context); remaining -= context.content.length;
+          }
+        }
+      } finally { store.close(); }
+    }
+    results.push(hit);
+  }
+  return results;
 }
 
 async function readJsonOrThrow(response: Response, label: string) {
@@ -1095,7 +1271,7 @@ async function searchPinecone(kb: KnowledgeBaseRuntime, query: string, topK: num
   }).filter((item: KnowledgeHit) => item.content);
 }
 
-export async function searchKnowledgeBase(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig) {
+async function searchRawKnowledgeBase(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig) {
   switch (kb.provider) {
     case 'lancedb':
       return searchLocal(kb, query, topK, model);
@@ -1112,10 +1288,27 @@ export async function searchKnowledgeBase(kb: KnowledgeBaseRuntime, query: strin
   }
 }
 
+function fuseWikiResults(kb: KnowledgeBaseRuntime, query: string, raw: KnowledgeHit[], topK: number): KnowledgeHit[] {
+  if (kb.provider !== 'lancedb' || kb.wikiRetrievalEnabled !== true || !query.trim()) return raw.slice(0, topK);
+  const wiki: KnowledgeHit[] = recallWiki(kb, resolveKnowledgeDataDir(kb), query, 20).map(hit => ({
+    id: `wiki:${hit.pageId}`, title: hit.title, content: hit.snippet, score: 0,
+    knowledgeBaseId: kb.id, knowledgeBaseName: kb.name, provider: kb.provider, wiki: hit.wiki,
+  }));
+  if (!wiki.length) return raw.slice(0, topK);
+  // Rank the two result families, not their incomparable score magnitudes. Pages remain derived sources.
+  const ranked = [raw, wiki].flatMap(rows => rows.map((hit, index) => ({ ...hit, score: 61 / (2 * (61 + index)) })));
+  ranked.sort((a, b) => b.score - a.score || Number(Boolean(a.wiki)) - Number(Boolean(b.wiki)) || a.id.localeCompare(b.id));
+  return restoreKnowledgeContexts(ranked.slice(0, topK), [kb]);
+}
+
+export async function searchKnowledgeBase(kb: KnowledgeBaseRuntime, query: string, topK: number, model?: ModelConfig) {
+  return fuseWikiResults(kb, query, await searchRawKnowledgeBase(kb, query, topK, model), topK);
+}
+
 export type HybridKnowledgeSearchResult = {
   query: string;
   plan: OntologyQueryPlan;
-  strategy: 'vector-only' | 'ontology-enhanced';
+  strategy: 'vector-only' | 'hybrid' | 'ontology-enhanced';
   results: KnowledgeHit[];
 };
 
@@ -1236,10 +1429,10 @@ export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, quer
     }
   }
   const enhancedQuery = [query, ...plan.expandedTerms, ...plan.relatedNodes.map((node) => node.name)].filter(Boolean).join(' ');
-  const rawPromise = searchKnowledgeBase(kb, query, Math.min(8, Math.max(topK, topK * 2)), model);
+  const rawPromise = searchRawKnowledgeBase(kb, query, Math.min(8, Math.max(topK, topK * 2)), model);
   const enhancedPromise = enhancedQuery === query
     ? Promise.resolve([] as KnowledgeHit[])
-    : searchKnowledgeBase(kb, enhancedQuery.slice(0, 800), Math.min(8, Math.max(topK, topK * 2)), model);
+    : searchRawKnowledgeBase(kb, enhancedQuery.slice(0, 800), Math.min(8, Math.max(topK, topK * 2)), model);
   const evidencePromise = plan.evidenceRefs.length ? recallOntologyEvidence(kb, plan) : Promise.resolve([] as KnowledgeHit[]);
   const [raw, enhanced, evidence] = await Promise.all([rawPromise, enhancedPromise, evidencePromise]);
   const hints = graphDocumentHints(plan).map((value) => value.toLocaleLowerCase());
@@ -1257,7 +1450,7 @@ export async function searchKnowledgeWithOntology(kb: KnowledgeBaseRuntime, quer
     }
   }
   const results = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, topK).map(({ routes, ...hit }) => ({ ...hit, retrievalRoutes: [...routes] as KnowledgeHit['retrievalRoutes'] }));
-  return { query, plan, strategy: plan.matchedNodes.length ? 'ontology-enhanced' : 'vector-only', results };
+  return { query, plan, strategy: plan.matchedNodes.length ? 'ontology-enhanced' : kb.provider === 'lancedb' ? 'hybrid' : 'vector-only', results: fuseWikiResults(kb, query, restoreKnowledgeContexts(results, [kb]), topK) };
 }
 
 export function createKnowledgeTools(input: {
@@ -1271,7 +1464,7 @@ export function createKnowledgeTools(input: {
   return [
     defineAgentTool({
       name: 'kb_search',
-      description: `Search authorized private knowledge bases. Available: ${catalog}. Prefer kb_search for internal docs; use web_search only for public internet facts. Cite returned sources; never invent passages.`,
+      description: `Search authorized private knowledge bases. Local retrieval uses keyword/BM25 and vector RRF. Results with wiki are published derived pages with source references, not independent evidence. Scores are ranks, not probabilities; retrieval.degraded indicates unavailable vector recall. Available: ${catalog}. Prefer kb_search for internal docs; use web_search only for public internet facts. Cite returned sources; never invent passages.`,
       parameters: Type.Object({
         query: Type.String({ minLength: 2, maxLength: 800 }),
         knowledgeBaseId: Type.Optional(Type.String({ description: 'Optional specific knowledge base id; omit to search all authorized bases.' })),
@@ -1291,7 +1484,7 @@ export function createKnowledgeTools(input: {
           if (kb.ontologyEnabled === false) {
             try {
               hits.push(...await searchKnowledgeBase(kb, query, topK, input.model));
-              strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 });
+              strategies.push({ knowledgeBaseId: kb.id, strategy: kb.provider === 'lancedb' ? 'hybrid' : 'vector-only', matchedEntities: 0 });
             } catch (error) {
               errors.push(`${kb.name}: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -1304,12 +1497,12 @@ export function createKnowledgeTools(input: {
           } catch (error) {
             // Ontology is an enhancement, never a hard dependency. A damaged or
             // unavailable graph must not hide otherwise valid private knowledge.
-            try { hits.push(...await searchKnowledgeBase(kb, query, topK, input.model)); strategies.push({ knowledgeBaseId: kb.id, strategy: 'vector-only', matchedEntities: 0 }); }
+            try { hits.push(...await searchKnowledgeBase(kb, query, topK, input.model)); strategies.push({ knowledgeBaseId: kb.id, strategy: kb.provider === 'lancedb' ? 'hybrid' : 'vector-only', matchedEntities: 0 }); }
             catch (fallbackError) { errors.push(`${kb.name}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`); }
           }
         }
         hits.sort((a, b) => b.score - a.score);
-        const selected = hits.slice(0, topK);
+        const selected = restoreKnowledgeContexts(hits.slice(0, topK), targets);
         return {
           ok: selected.length > 0 || errors.length === 0,
           query,

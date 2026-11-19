@@ -21,7 +21,7 @@ onMounted(reload);
     <p v-if="!records.length&&!busy" class="empty">暂无匹配的运行记录。先在任务管理中创建并运行任务。</p>
     <button v-for="item in records" :key="`${item.taskId}:${item.run.id}`" class="run-card" @click="selectRecord(item)"><strong>{{item.taskName}}</strong><span>{{item.mode==='direct'?'直接创建':'应用任务'}} · {{item.run.trigger==='scheduled'?'自动触发':'手动触发'}} · {{date(item.run.startedAt)}} · {{label(item.run.status)}}</span><small>{{item.run.error||'查看监控 · 报告与 result-json →'}}</small></button>
     <div class="filters"><span>共 {{total}} 条 · 第 {{Math.floor(offset/30)+1}} 页</span><button :disabled="busy||offset===0" @click="paginate(Math.max(0,offset-30))">上一页</button><button :disabled="busy||nextOffset===null" @click="paginate(nextOffset!)">下一页</button></div>
-    <TaskRunMonitor v-if="selected" :key="`${selected.taskId}:${selected.run.id}`" :task-id="selected.taskId" :run-id="selected.run.id" :task-name="selected.taskName" @close="selected=null" @open-conversation="id=>emit('open-conversation',id)" />
+    <TaskRunMonitor v-if="selected" :key="`${selected.taskId}:${selected.run.id}`" :task-id="selected.taskId" :run-id="selected.run.id" :task-name="selected.taskName" @close="selected=null" />
   </section>
 </template>
 <style scoped>

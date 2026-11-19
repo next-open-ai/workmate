@@ -4,7 +4,7 @@ import type {TemplateTaskRun} from '@workmate/contracts';
 import {templateTasksApi as api} from '../../services/template-tasks';
 import {getRunRecord,type ServerRunRecord} from '../../services/orchestration';
 const props=defineProps<{taskId:string;runId:string;taskName:string;requestError?:string}>();
-const emit=defineEmits<{'close':[];'open-conversation':[id:string]}>();
+const emit=defineEmits<{'close':[]}>();
 const run=ref<TemplateTaskRun|null>(null),agent=ref<ServerRunRecord|null>(null),connectionError=ref(''),clock=ref(Date.now()),openedAt=ref(Date.now()),lastSync=ref<number|null>(null),reading=ref(false);
 const tab=ref<'logs'|'report'|'json'>('logs'),reportHtml=ref(''),reportError=ref(''),reportLoading=ref(false),reportWarning=ref('');
 let reportController:AbortController|undefined,reportEpoch=0;
@@ -148,7 +148,7 @@ onBeforeUnmount(()=>{disposed=true;epoch++;reportEpoch++;controller?.abort();rep
           </section>
         </main>
       </div>
-      <footer class="mission-footer"><span><i class="connection-dot"></i>{{terminal?'运行已结束':'只读监控'}} · 关闭窗口不会停止任务</span><div><button v-if="run?.sessionId" @click="emit('open-conversation',run.sessionId)">{{phase==='等待审批'?'处理审批 ↗':'执行对话 ↗'}}</button><button v-if="run?.result" class="report-button" @click="loadReport">查看结果 ↗</button><button v-if="run" @click="tab='json'">result-json</button><button @click="emit('close')">关闭窗口</button></div></footer>
+      <footer class="mission-footer"><span><i class="connection-dot"></i>{{terminal?'运行已结束':'只读监控'}} · 关闭窗口不会停止任务</span><div><button v-if="run?.result" class="report-button" @click="loadReport">查看结果 ↗</button><button v-if="run" @click="tab='json'">result-json</button><button @click="emit('close')">关闭窗口</button></div></footer>
     </section>
   </div></Teleport>
 </template>

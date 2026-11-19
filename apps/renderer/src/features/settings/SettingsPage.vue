@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { isQwenPromptAudioModel } from '@workmate/contracts';
 import { useI18n, localeOptions, type Locale } from '../../app/i18n';
 import ExperienceSettingsCard from './ExperienceSettingsCard.vue';
 import { themeOptions, type ThemePreference, useTheme } from '../../app/theme';
-import { applyRecommendedProviderSetup, resolveDecisionRuntime, useModelConfig, type ModelSettings, type ProviderInstance } from '../../app/model-config';
+import { applyRecommendedProviderSetup, bindSpecialistModel, qwenNextNeedsWorkspace, resolveDecisionRuntime, useModelConfig, type ModelSettings, type ProviderInstance } from '../../app/model-config';
 import type { Employee, EmployeeId } from '../../app/workspace';
 import type { AuthUser } from '../../services/auth';
 import { employeeDisplayName } from '../../app/employees';
@@ -314,6 +315,20 @@ async function saveModelConfig() {
   }
 }
 
+async function activateAudioModel(modelId: string) {
+  const model = settings.value.models.find((item) => item.id === modelId);
+  const provider = model && settings.value.providerInstances.find((item) => item.id === model.providerInstanceId);
+  if (!model || model.capability !== 'tts' || !provider || !isQwenPromptAudioModel(provider.type, model.modelId)) return;
+  if (qwenNextNeedsWorkspace(provider, [model])) {
+    notify.error(new Error(t('settings.nextWorkspaceRequired')), 'notify.saveFailed');
+    tab.value = 'providers';
+    return;
+  }
+  settings.value.capabilityBindings = bindSpecialistModel(settings.value.capabilityBindings, model, true);
+  onDirty();
+  await saveModelConfig();
+}
+
 async function autoConfigureProvider(instance: ProviderInstance) {
   try {
     const result = applyRecommendedProviderSetup(settings.value, instance, [props.defaultEmployeeId]);
@@ -326,6 +341,9 @@ async function autoConfigureProvider(instance: ProviderInstance) {
     dirty.value = false;
     const capabilities = result.configured.map((item) => t(`settings.capability.${item}`)).join('、');
     autoConfigSummary.value = t('settings.providerAutoConfigured', { count: result.addedModels, capabilities });
+    if (qwenNextNeedsWorkspace(instance, result.settings.models)) {
+      autoConfigSummary.value += ' ' + t('settings.nextWorkspaceRequired');
+    }
     notify.success('notify.saved', autoConfigSummary.value);
   } catch (cause) {
     notify.error(cause, 'notify.saveFailed');
@@ -655,6 +673,7 @@ function handleDefaultEmployeeChange(event: Event) {
           @update:capability-bindings="settings.capabilityBindings = $event"
           @configure-provider="tab = 'providers'"
           @test-realtime="realtimeTestRequest += 1"
+          @activate-audio="activateAudioModel"
           @dirty="onDirty"
         />
       </div>
@@ -685,7 +704,8 @@ function handleDefaultEmployeeChange(event: Event) {
             <span class="text-xs text-[var(--muted)]">{{ provider.id === 'aliyun' ? t('settings.searchAliyunHint') : t('settings.searchEndpointHint') }}</span>
           </div>
           <div class="mt-3 grid gap-2 sm:grid-cols-[1fr_1.25fr_auto]">
-            <input v-model="provider.apiKey" type="password" autocomplete="off" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm" :placeholder="t('settings.apiKey')" @input="onDirty" />
+            <p v-if="provider.id === 'deepseek' && provider.providerInstanceId" class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)]">已关联 DeepSeek Provider · 无需重复填写 Key。<span v-if="!provider.apiKey">连接已移除或凭据不可用，请检查 Provider。</span></p>
+            <input v-else v-model="provider.apiKey" type="password" autocomplete="off" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm" :placeholder="t('settings.apiKey')" @input="onDirty" />
             <input v-model="provider.baseUrl" class="rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2 text-sm" placeholder="Endpoint" @input="onDirty" />
             <button class="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold" type="button" @click="resetSearchEndpoint(provider.id)">{{ t('settings.searchReset') }}</button>
           </div>

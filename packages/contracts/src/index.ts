@@ -1,5 +1,10 @@
 import { z } from 'zod';
+export * from './deepseek-search.js';
 export * from './task-templates.js';
+export * from './knowledge-evidence.js';
+export * from './knowledge-wiki.js';
+export * from './wiki-generation.js';
+export * from './retrieval-evaluation.js';
 export * from './task-applications.js';
 export * from './workspace-write.js';
 
@@ -271,6 +276,11 @@ export const DecisionRuntimeConfigSchema = DecisionGuardPolicySchema.extend({
 });
 export type DecisionRuntimeConfig = z.infer<typeof DecisionRuntimeConfigSchema>;
 
+/** This AudioGen model uses a sound-scene prompt, not text + a system voice ID. */
+export function isQwenPromptAudioModel(provider: string, modelId: string): boolean {
+  return provider === 'qwen' && modelId.trim().toLowerCase() === 'qwen-audio-3.1-tts-next';
+}
+
 /** Curated suggestions, not an exhaustive allowlist. Keep custom/clone voices valid. */
 export function suggestedSpeechVoices(provider: string, modelId: string): string[] {
   if (provider === 'volcengine' && /^(?:1\.2\.6\.1|seedduplex|realtime)/i.test(modelId.trim())) {
@@ -400,7 +410,7 @@ export const ModelConfigSchema = z.object({
 }).refine((value) => value.provider === 'ollama' || value.provider === 'openai-compatible' || value.apiKey.trim().length > 0, { message: 'API key is required for this provider.' });
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
-export const SearchProviderIdSchema = z.enum(['bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun']);
+export const SearchProviderIdSchema = z.enum(['bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun', 'deepseek']);
 export type SearchProviderId = z.infer<typeof SearchProviderIdSchema>;
 export const SearchProviderRuntimeSchema = z.object({
   id: SearchProviderIdSchema,
@@ -464,6 +474,9 @@ export const KnowledgeBaseRuntimeSchema = z.object({
   enabled: z.boolean().default(true),
   /** Use a published ontology to expand and rerank retrieval. Falls back to vector search on failure. */
   ontologyEnabled: z.boolean().optional(),
+  wikiRetrievalEnabled: z.boolean().optional(),
+  /** Trusted host-only context. HTTP handlers replace this value. */
+  wikiAccess: z.object({orgId:z.string().min(1),userId:z.string().min(1),sourceRoot:z.string().min(1)}).strict().optional(),
   description: z.string().max(500).optional(),
   /** Local LanceDB directory (absolute). */
   dataDir: z.string().max(1000).optional(),
@@ -493,6 +506,8 @@ export const KnowledgeBaseRuntimeSchema = z.object({
 export type KnowledgeBaseRuntime = z.infer<typeof KnowledgeBaseRuntimeSchema>;
 
 /** Allows an 8 MB source file after Base64 expansion, plus a small safety margin. */
+export const MAX_LOCAL_KNOWLEDGE_FILE_BYTES = 8_000_000;
+export const MAX_BAILIAN_KNOWLEDGE_FILE_BYTES = 8_000_000;
 export const MAX_KNOWLEDGE_FILE_BASE64_CHARS = 12_000_000;
 
 export const KnowledgeIngestRequestSchema = z.object({
@@ -711,7 +726,7 @@ export const ChatRequestSchema = z.object({
   messages: z.array(ChatModelMessageSchema).min(1),
   model: ModelConfigSchema,
   skills: z.array(AgentSkillRuntimeSchema).max(24).default([]),
-  searchProviders: z.array(SearchProviderRuntimeSchema).max(6).default([]),
+  searchProviders: z.array(SearchProviderRuntimeSchema).max(7).default([]),
   mcpConnections: z.array(McpConnectionRuntimeSchema).max(12).default([]),
   knowledgeBases: z.array(KnowledgeBaseRuntimeSchema).max(12).default([]),
   /** Authorized specialist models. Disabled assignments are omitted before prompt construction. */

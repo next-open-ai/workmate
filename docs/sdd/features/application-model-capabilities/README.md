@@ -9,6 +9,8 @@
 
 近期增量：
 
+- [阿里提示词音频生成](prompt-audio-generation.md)——在现有 TTS 应用模型入口支持 Qwen Audio Next 的声音创作提示词和音频成果，不替换默认语音模型。
+
 - [Provider 自动配置](provider-auto-configuration.md)——新增连接时生成推荐模型、缺失 binding 和默认员工按需授权，同时保留完整手动调整能力。
 - [首次使用验证与模型健康状态](provider-first-use-health.md)——以真实应用模型调用结果更新可用性与诊断，不额外发起付费探测。
 - [多模态输入与应用模型用量](composer-ux-and-usage.md)——输入框附件交互专业化，应用模型Token按实际Provider/模型/能力独立归属。

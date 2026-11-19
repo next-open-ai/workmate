@@ -107,7 +107,8 @@ function normalizeOne(value: unknown): EmployeeRuntimePrefs {
     searchMode === 'brave' ||
     searchMode === 'exa' ||
     searchMode === 'zhipu' ||
-    searchMode === 'aliyun';
+    searchMode === 'aliyun' ||
+    searchMode === 'deepseek';
   const knowledgeBaseIds = Array.isArray(raw.knowledgeBaseIds)
     ? raw.knowledgeBaseIds.map((id) => String(id)).filter(Boolean).slice(0, 24)
     : [];

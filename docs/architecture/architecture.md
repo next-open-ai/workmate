@@ -1,5 +1,7 @@
 # Workmate 项目架构、模块与主要逻辑（当前权威）
 
+2026-10-21 KH-T5～T8：[Wiki阶段/显式续跑/主题合并与离线报告](../sdd/features/knowledge-hybrid-v1/optimizations.md)增量同步。私有检查点由storage保存、orchestrator恢复，API核对版本；合并仅创建草稿。报告只在renderer按需处理手动快照，无在线查询钩子或模型调用。沿用各产品引擎、授权与运行路径，不新增数据库表。
+
 > 状态：随实现演进维护；与 `README(.zh-CN)`、`docs/architecture/gateway-m*.md` 保持一致。
 > 目标读者：新成员快速建立全局观、评审人核对模块边界与数据流。
 > 2026-10-13 产品能力快照见 [`docs/current-state.md`](../current-state.md)。
@@ -79,6 +81,8 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 
 ## 4. 模块与边界（packages）
 
+KH-v1：本地知识库的原文快照、版本证据、全文FTS5与Wiki修订存储在 storage；agent-core 负责结构化分块、向量/BM25 RRF、可选Wiki召回和模型生成；orchestrator负责生成任务调度与检查点；API从保存的库配置及认证身份组装可信上下文。不引入外部搜索服务，不迁入本体增强或Wiki关联扩展。详见[三路知识迁移](../sdd/features/knowledge-hybrid-v1/README.md)。
+
 | 包 | 职责 | 说明 |
 | --- | --- | --- |
 | `contracts` | Zod 契约与 `AgentEvent` 事件并集 | 单一事实源 |
@@ -87,7 +91,8 @@ Workmate 是**本地优先的数字员工工作台**：不是单一聊天工具�
 | `tools` | `OpcaiTool{id,risk,inputSchema,execute}` + `ToolPolicy` | 契约层 |
 | `orchestrator` | **编排核心**（见 §5）：含 **Session Rolling Memory** | 纯 Node，测试友好（runner 可注入） |
 | `channel` | 通道协议与核心 | 传输无关 |
-| `storage` / `ui-kit` | 占位 | 待接入 |
+| `storage` | 原文归档、版本证据、SQLite FTS5、Wiki修订和迁移 | KH-v1 |
+| `ui-kit` | 占位 | 待接入 |
 
 ### 4.1 通用资源访问边界
 
@@ -291,5 +296,5 @@ API：
 
 - 网关对 IM/中继的会话回复目前为**确定性轮询取终态**；SSE 直播（先订后发问题）待迭代。
 - 中继为**纯转发最小实现**：无订阅/广播/离线队列；外部终端 Web 控制台与设备配对 UI 待做。
-- `packages/storage`、`packages/ui-kit` 仍为占位；部分旧文档（`docs/architecture/overview.md`、`docs/sdd/*`）为早期描述，以本文档与 `docs/architecture/*` 为准。
+- `packages/ui-kit` 仍为占位；storage 已承载 KH-v1 知识存储。部分旧文档（`docs/architecture/overview.md`、`docs/sdd/*`）为早期描述，以本文档与 `docs/architecture/*` 为准。
 - 本地用户/组织身份已实现；跨用户数据委托、服务账号及企业级行列权限不在当前首期范围，通道白名单不能代替它们。

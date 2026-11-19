@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import {linkDeepSeekSearchSettings,resolveLinkedSearchSettings} from '@workmate/contracts';
 
 /**
  * Parent-process secrets channel (M0 keyring).
@@ -21,7 +22,7 @@ let cache: OpcaiSecrets | null = null;
 let requested = false;
 
 export function getSecrets(): OpcaiSecrets {
-  return cache ?? {};
+  return cache ? { ...cache, search: resolveLinkedSearchSettings(linkDeepSeekSearchSettings(cache.search, cache.model), cache.model) } : {};
 }
 
 /** True when the keyring has a usable chat model snapshot (v2 instances or legacy providers). */

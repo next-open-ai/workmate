@@ -26,6 +26,20 @@ async function json(url: string, init: RequestInit) {
 async function search(provider: SearchProviderRuntime, query: string, count: number, freshness?: string): Promise<SearchResult[]> {
   const endpoint = provider.baseUrl?.replace(/\/$/, '');
   switch (provider.id) {
+    case 'deepseek': {
+      const days = ({ oneDay: 1, oneWeek: 7, oneMonth: 30, oneYear: 365 } as Record<string, number>)[freshness || ''];
+      const datedQuery = days && !/(?:^|\s)after:/i.test(query)
+        ? `${query} after:${new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)}` : query;
+      if (Array.from(datedQuery).length > 128) throw new Error('DeepSeek 搜索查询（含时间条件）不能超过128个Unicode字符，请精简后重试。');
+      const data = await json(endpoint || 'https://api.deepseek.com/v1/tools/search', {
+        method: 'POST', headers: { authorization: `Bearer ${provider.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ query: datedQuery, count, need_content: false }),
+      });
+      if (!Array.isArray(data?.results)) throw new Error('DeepSeek 搜索返回格式无效。');
+      return take(data.results.map((item: any) => ({ title: text(item?.title), url: text(item?.url),
+        snippet: text(item?.summary) || text(item?.snippet), publishedDate: text(item?.date),
+        source: text(item?.site_name) || 'DeepSeek' })), count);
+    }
     case 'bocha': {
       const data = await json(endpoint || 'https://api.bochaai.com/v1/web-search', { method: 'POST', headers: { authorization: `Bearer ${provider.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ query, count, summary: true, ...(freshness ? { freshness } : {}) }) });
       const rows = list(data?.data?.webPages?.value ?? data?.data?.value ?? data?.webPages?.value ?? data?.data);
@@ -57,7 +71,7 @@ async function search(provider: SearchProviderRuntime, query: string, count: num
   }
 }
 
-const ProviderChoice = StringEnum(['auto', 'bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun'] as const);
+const ProviderChoice = StringEnum(['auto', 'bocha', 'tavily', 'brave', 'exa', 'zhipu', 'aliyun', 'deepseek'] as const);
 const FreshnessChoice = StringEnum(['oneDay', 'oneWeek', 'oneMonth', 'oneYear', 'noLimit'] as const);
 
 export function createWebSearchTools(providers: SearchProviderRuntime[]): AgentTool[] {

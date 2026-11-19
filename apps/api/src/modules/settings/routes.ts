@@ -9,7 +9,7 @@ import { authenticateRequest, requireAuth, requireAdmin, sendAuthError } from '.
 import { executeStorageCleanup, scanStorageCleanup } from './storage-cleanup.js';
 import { publicRealtimeVoiceSettings, saveRealtimeVoiceSettings } from '../voice/settings.js';
 import { publicVoiceInputSettings, saveVoiceInputSettings } from '../voice/asr-settings.js';
-import {KnowledgeBaseRuntimeSchema} from '@workmate/contracts';
+import {KnowledgeBaseRuntimeSchema,linkDeepSeekSearchSettings,resolveLinkedSearchSettings,stripLinkedSearchSecrets} from '@workmate/contracts';
 import { legacyRealtimeMigrationSource, publicRealtimeConversationSettings, saveRealtimeConversationSettings } from '../voice/realtime-settings.js';
 import { readVoicePreferences, saveVoicePreferences } from '../voice/voice-preferences.js';
 
@@ -297,10 +297,11 @@ function splitSearchSettings(value: unknown): SettingsEnvelope {
         label: String(provider.label || provider.id || ''),
         baseUrl: String(provider.baseUrl || ''),
         enabled: Boolean(provider.enabled),
+        ...(provider.providerInstanceId ? { providerInstanceId: String(provider.providerInstanceId) } : {}),
       })),
     },
     secrets: {
-      providers: Object.fromEntries(providers.map((provider) => [String(provider.id || ''), { apiKey: String(provider.apiKey || '') }])),
+      providers: Object.fromEntries(providers.map((provider) => [String(provider.id || ''), { apiKey: provider.id === 'deepseek' && provider.providerInstanceId ? '' : String(provider.apiKey || '') }])),
     },
   };
 }
@@ -398,6 +399,7 @@ function splitKnowledgeBases(value: unknown): SettingsEnvelope {
             },
           }
         : {}),
+      wikiRetrievalEnabled: item.wikiRetrievalEnabled === true,
       documentCount: Number(item.documentCount) || 0,
       updatedAt: Number(item.updatedAt) || Date.now(),
     })),
@@ -533,10 +535,14 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   };
 
   app.get('/settings/model', async () => mergeModelSettings(readJson('model-settings')));
-  app.put('/settings/model', async (request) => mergeModelSettings(writeJson('model-settings', splitModelSettings(request.body ?? {}))));
+  app.put('/settings/model', async (request) => {
+    const model=mergeModelSettings(writeJson('model-settings', splitModelSettings(request.body ?? {})));
+    writeJson('search-settings',splitSearchSettings(linkDeepSeekSearchSettings(mergeSearchSettings(readJson('search-settings')),model)));
+    return model;
+  });
 
-  app.get('/settings/search', async () => mergeSearchSettings(readJson('search-settings')));
-  app.put('/settings/search', async (request) => mergeSearchSettings(writeJson('search-settings', splitSearchSettings(request.body ?? {}))));
+  app.get('/settings/search', async () => resolveLinkedSearchSettings(mergeSearchSettings(readJson('search-settings')),mergeModelSettings(readJson('model-settings'))));
+  app.put('/settings/search', async (request) => resolveLinkedSearchSettings(mergeSearchSettings(writeJson('search-settings', splitSearchSettings(stripLinkedSearchSecrets(request.body ?? {})))),mergeModelSettings(readJson('model-settings'))));
 
   app.get('/settings/knowledge/providers', async () => mergeKnowledgeProviders(readJson('knowledge-providers')));
   app.put('/settings/knowledge/providers', async (request) => mergeKnowledgeProviders(writeJson('knowledge-providers', splitKnowledgeProviders(request.body ?? {}))));

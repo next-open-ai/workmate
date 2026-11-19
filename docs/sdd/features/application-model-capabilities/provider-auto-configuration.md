@@ -15,6 +15,8 @@
 
 ## 默认策略
 
+2026-11-05 AUTO-R9 / AUTO-T7：阿里连接自动配置同时登记 `qwen-audio-3.1-tts-next` 作为额外 TTS 音频创作选项；原默认仍为 Flash，已有绑定、音色与员工模式不覆盖。旧连接主动重新自动配置即可补齐，重复运行不重复登记；仅语言/仅实时服务不添加。Workspace 留空也先登记，实际使用 Next 前须补齐。验证入口：`node scripts/prompt-audio-regression.mjs`（AT5）。
+
 2026-10-14 UPC-R18 增量取代下方同日早期图片推荐：自动图片生成改为`qwen-image-2.0` + `dashscope-multimodal`，图片识别改为`qwen-vl-plus`。公共DashScope端点无需Workspace；用户显式填写的Workspace仍尊重，不清除存量配置。来源：[千问图像API](https://help.aliyun.com/zh/model-studio/qwen-image-api)（说明原共享域名仍可用）、[Qwen-VL官方公共端点示例](https://help.aliyun.com/zh/model-studio/get-temporary-file-url/)。仅更新推荐及候选顺序，不更改已有默认绑定，用户重新自动配置后需主动选用新模型。
 
 每种能力取内置推荐列表第一项；对话模型同时声明其已知视觉能力。非chat能力生成全局binding；仅为当前默认员工补齐缺失的`auto`授权，不批量改动其他员工。已经存在的全局能力binding优先于新Provider推荐。

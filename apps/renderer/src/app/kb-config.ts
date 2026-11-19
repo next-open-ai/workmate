@@ -17,6 +17,7 @@ export interface KnowledgeBase {
   provider: KnowledgeProviderId;
   enabled: boolean;
   ontologyEnabled: boolean;
+  wikiRetrievalEnabled?: boolean;
   description?: string;
   /** Absolute or app-relative data dir for LanceDB */
   dataDir?: string;
@@ -147,6 +148,7 @@ function normalizeOne(value: unknown): KnowledgeBase | null {
     provider: provider as KnowledgeProviderId,
     enabled: raw.enabled !== false,
     ontologyEnabled: raw.ontologyEnabled !== false,
+    wikiRetrievalEnabled: raw.wikiRetrievalEnabled === true,
     description: raw.description ? String(raw.description) : '',
     dataDir: raw.dataDir ? String(raw.dataDir) : '',
     baseUrl: raw.baseUrl ? String(raw.baseUrl).trim() : '',
@@ -269,6 +271,7 @@ function toRuntime(item: KnowledgeBase) {
     provider: item.provider,
     enabled: true as const,
     ontologyEnabled: item.ontologyEnabled !== false,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled === true,
     description: item.description || undefined,
     dataDir: item.dataDir?.trim() || undefined,
     baseUrl: creds.baseUrl,
@@ -406,6 +409,7 @@ export function useKnowledgeConfig() {
       provider,
       enabled: input.enabled !== false,
       ontologyEnabled: input.ontologyEnabled !== false,
+      wikiRetrievalEnabled: input.wikiRetrievalEnabled === true,
       description: String(input.description || '').trim(),
       dataDir: String(input.dataDir || '').trim(),
       // Keep per-base overrides empty when using shared provider credentials.

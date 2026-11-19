@@ -636,7 +636,7 @@ function yieldArtifactEvents(
   if (toolName === 'write_workspace_file' || toolName === 'finish_workspace_write' || toolName === 'register_deliverable' || toolName === 'commit_artifact') {
     if (value.deliverable === true && typeof value.path === 'string') pushDeliverable(value.path);
   }
-  if (toolName === 'model_generate_image' || toolName === 'model_generate_video' || toolName === 'model_transcribe_audio' || toolName === 'model_synthesize_speech') {
+  if (toolName === 'model_generate_image' || toolName === 'model_generate_video' || toolName === 'model_transcribe_audio' || toolName === 'model_synthesize_speech' || toolName === 'model_generate_audio') {
     if (value.deliverable === true && typeof value.path === 'string') pushDeliverable(value.path);
   }
   if (toolName === 'publish_to_project') {

@@ -163,7 +163,7 @@ onBeforeUnmount(() => window.removeEventListener('message', receive));
 
 <template>
   <div class="task-pilot">
-    <TaskRunMonitor v-if="monitorTarget" :key="monitorTarget.runId" v-bind="monitorTarget" :request-error="monitorError" @close="monitorTarget=null" @open-conversation="id=>emit('open-conversation',id)" />
+    <TaskRunMonitor v-if="monitorTarget" :key="monitorTarget.runId" v-bind="monitorTarget" :request-error="monitorError" @close="monitorTarget=null" />
     <p class="intro">管理已保存的任务：修改配置、再次运行或删除。运行完成不会移除任务，历次结果独立保存。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>

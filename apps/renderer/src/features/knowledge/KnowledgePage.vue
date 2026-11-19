@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from '../../app/i18n';
 import {
   knowledgeProviderIds,
@@ -11,6 +11,9 @@ import {
 import { resolveActiveEmbeddingConfig, resolveEmbeddingConfigById, toModelPayload, useModelConfig } from '../../app/model-config';
 import { useNotify } from '../../app/notify';
 import OntologyWorkbench from './OntologyWorkbench.vue';
+import WikiWorkbench from './WikiWorkbench.vue';
+const RetrievalEvaluationPanel = defineAsyncComponent(() => import('./RetrievalEvaluationPanel.vue'));
+const evaluationOpen = ref(false);
 import {
   deleteKnowledgeChunk,
   deleteKnowledgeDocument,
@@ -35,7 +38,7 @@ const notify = useNotify();
 const { bases, load, upsert, remove, setEnabled, setDocumentCount, setIndexState, isReady, enabledProviders, isProviderEnabled, providerDefaults, resolveCredentials } = useKnowledgeConfig();
 const { activeConfig, configured, settings: modelSettings, load: loadModels } = useModelConfig();
 
-type DetailTab = 'documents' | 'chunks' | 'search' | 'ontology' | 'settings';
+type DetailTab = 'documents' | 'chunks' | 'search' | 'ontology' | 'wiki' | 'settings';
 type ProviderFilter = 'all' | KnowledgeProviderId;
 
 const providerFilter = ref<ProviderFilter>('all');
@@ -62,11 +65,24 @@ const chunkQuery = ref('');
 const chunkDocumentId = ref('');
 const searchQuery = ref('');
 const searching = ref(false);
+const searchError = ref('');
+const searchCompleted = ref(false);
+watch(selectedId, () => { evaluationOpen.value = false; });
+let searchRequestId = 0;
+function invalidateSearch() {
+  searchCompleted.value = false;
+  searchRequestId += 1;
+  searching.value = false;
+  searchHits.value = [];
+  searchError.value = '';
+}
+watch([selectedId, searchQuery], invalidateSearch, { flush: 'sync' });
+onBeforeUnmount(invalidateSearch);
 const documents = ref<KnowledgeDocumentRow[]>([]);
 const chunks = ref<KnowledgeChunkRow[]>([]);
 const chunkTotal = ref(0);
 const docStats = ref({ documentCount: 0, chunkCount: 0, backend: '' });
-const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string }>>([]);
+const searchHits = ref<Array<{ id: string; title: string; content: string; score: number; source?: string; wiki?: import('@workmate/contracts').WikiRecall; retrieval?: import('@workmate/contracts').KnowledgeRetrieval }>>([]);
 const selectedChunk = ref<KnowledgeChunkRow | null>(null);
 
 const draft = ref({
@@ -74,6 +90,7 @@ const draft = ref({
   provider: 'lancedb' as KnowledgeProviderId,
   enabled: true,
   ontologyEnabled: true,
+    wikiRetrievalEnabled: false,
   description: '',
   baseUrl: '',
   apiKey: '',
@@ -122,7 +139,7 @@ const embeddingModels = computed(() => modelSettings.value.models
 const supportsManage = computed(() => selected.value?.provider === 'lancedb' || selected.value?.provider === 'bailian');
 const detailTabs = computed((): DetailTab[] => (
   supportsManage.value
-    ? ['documents', 'chunks', 'search', 'ontology', 'settings']
+    ? ['documents', ...(selected.value?.provider === 'lancedb' ? ['wiki' as const] : []), 'chunks', 'search', 'ontology', 'settings']
     : ['search', 'settings']
 ));
 const ingestFileBase64 = ref('');
@@ -178,6 +195,7 @@ function toPayload(item: KnowledgeBase): KnowledgeBasePayload {
   return {
     id: item.id,
     name: item.name,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled,
     provider: item.provider,
     enabled: item.enabled,
     description: item.description || undefined,
@@ -231,6 +249,7 @@ function resetDraft() {
     provider: 'lancedb',
     enabled: true,
     ontologyEnabled: true,
+    wikiRetrievalEnabled: false,
     description: '',
     baseUrl: '',
     apiKey: '',
@@ -278,6 +297,7 @@ function openEdit(item: KnowledgeBase) {
     provider: item.provider,
     enabled: item.enabled,
     ontologyEnabled: item.ontologyEnabled !== false,
+    wikiRetrievalEnabled: item.wikiRetrievalEnabled === true,
     description: item.description || '',
     baseUrl: item.baseUrl || '',
     apiKey: item.apiKey || '',
@@ -317,6 +337,7 @@ async function save() {
       provider: draft.value.provider,
       enabled: draft.value.enabled,
       ontologyEnabled: draft.value.ontologyEnabled,
+      wikiRetrievalEnabled: draft.value.provider === 'lancedb' && draft.value.wikiRetrievalEnabled,
       description: draft.value.description,
       baseUrl: draft.value.baseUrl,
       apiKey: draft.value.apiKey,
@@ -734,6 +755,10 @@ async function createBailianRemote() {
 
 async function runSearch() {
   if (!selected.value || searchQuery.value.trim().length < 2) return;
+  const requestId = ++searchRequestId;
+  searchCompleted.value = false;
+  searchError.value = '';
+  searchHits.value = [];
   searching.value = true;
   try {
     const result = await searchKnowledge({
@@ -742,11 +767,14 @@ async function runSearch() {
       topK: 6,
       model: configured.value ? toModelPayload(activeConfig.value) : undefined,
     });
-    searchHits.value = result.results;
+    if (requestId === searchRequestId) { searchHits.value = result.results; searchCompleted.value = true; }
   } catch (cause) {
-    notify.error(cause, 'notify.saveFailed');
+    if (requestId === searchRequestId) {
+      searchError.value = cause instanceof Error ? cause.message : '检索失败，请重试。';
+      notify.error(cause, 'notify.saveFailed');
+    }
   } finally {
-    searching.value = false;
+    if (requestId === searchRequestId) searching.value = false;
   }
 }
 
@@ -895,7 +923,7 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
               :class="['rounded-lg px-3 py-2 text-xs font-semibold transition', detailTab === tab ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--surface-muted)]']"
               @click="detailTab = tab"
             >
-              {{ tab === 'ontology' ? '本体与审核' : t(`knowledge.tab.${tab}`) }}
+              {{ tab === 'wiki' ? 'Wiki' : tab === 'ontology' ? '本体与审核' : t(`knowledge.tab.${tab}`) }}
             </button>
           </div>
         </article>
@@ -969,23 +997,32 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
         </article>
 
         <article v-if="detailTab === 'search'" class="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
+          <details class="mb-4 text-xs" @toggle="evaluationOpen ||= ($event.target as HTMLDetailsElement).open">
+            <summary class="cursor-pointer py-2 font-semibold">离线评测报告</summary>
+            <RetrievalEvaluationPanel v-if="evaluationOpen" :key="selected.id" :knowledge-base-id="selected.id" :query="searchQuery" :hits="searchHits" :ready="searchCompleted && !searching && !searchError" />
+          </details>
           <h3 class="text-base font-bold">{{ t('knowledge.searchTitle') }}</h3>
+          <p v-if="selected?.provider === 'lancedb'" class="mt-1 text-xs text-[var(--muted)]">全文 BM25 + 向量融合；开启 Wiki 后加入已发布内容。排序分不是可信度。</p>
           <p class="mt-1 text-xs text-[var(--muted)]">{{ t('knowledge.searchHelp') }}</p>
           <div class="mt-4 flex flex-wrap gap-2">
             <input v-model="searchQuery" class="min-w-[240px] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] px-3 py-2.5 text-sm" :placeholder="t('knowledge.searchPlaceholder')" @keydown.enter.prevent="runSearch" />
             <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2.5 text-xs font-semibold text-white" :disabled="searching" @click="runSearch">{{ searching ? t('knowledge.searching') : t('knowledge.runSearch') }}</button>
           </div>
+          <p v-if="searchError" role="alert" class="mt-3 text-sm text-red-600">{{ searchError }}</p>
           <ul class="mt-5 space-y-3">
             <li v-for="hit in searchHits" :key="hit.id" class="rounded-xl border border-[var(--border)] px-4 py-3">
               <div class="flex items-center justify-between gap-3">
                 <p class="font-semibold">{{ hit.title }}</p>
-                <span class="text-[11px] text-[var(--muted)]">{{ (hit.score * 100).toFixed(1) }}%</span>
+                <span class="text-[11px] text-[var(--muted)]">排序分 {{ hit.score.toFixed(3) }}</span>
               </div>
+              <p class="mt-1 text-xs text-[var(--muted)]">{{ hit.wiki ? 'Wiki · 已发布派生内容（非独立证据）' : hit.retrieval?.channels.map(c => c === 'keyword' ? '全文' : '向量').join(' + ') || '知识检索' }}<span v-if="hit.retrieval?.degraded"> · 向量降级</span></p>
               <p class="mt-2 text-sm leading-relaxed text-[var(--muted)]">{{ hit.content }}</p>
             </li>
           </ul>
-          <p v-if="!searchHits.length && !searching" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
+          <p v-if="!searchHits.length && !searching && !searchError" class="mt-8 text-center text-sm text-[var(--muted)]">{{ t('knowledge.searchEmpty') }}</p>
         </article>
+
+        <WikiWorkbench v-if="detailTab === 'wiki' && selected" :key="selected.id" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" />
 
         <OntologyWorkbench v-if="detailTab === 'ontology' && selected" :knowledge-base="toPayload(selected)" :model="configured ? toModelPayload(activeConfig) : undefined" :is-admin="isAdmin" />
 
@@ -1102,6 +1139,10 @@ function resolvedEmbeddingFor(item: KnowledgeBase) {
           </div>
           <div class="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]/45 p-3">
             <label class="flex items-center gap-2 text-xs font-semibold"><input v-model="draft.enabled" type="checkbox" />{{ t('knowledge.enabled') }}</label>
+            <label v-if="draft.provider === 'lancedb'" class="flex items-start gap-2 text-xs font-semibold">
+              <input v-model="draft.wikiRetrievalEnabled" type="checkbox" />
+              <span>启用 Wiki 融合召回<span class="block font-normal text-[var(--muted)]">将已发布且来源有效的 Wiki 与全文、向量结果融合；Wiki 为派生内容，默认关闭。</span></span>
+            </label>
             <label class="flex items-start gap-2 text-xs font-semibold">
               <input v-model="draft.ontologyEnabled" class="mt-0.5" type="checkbox" />
               <span><strong class="block text-[var(--text)]">启用本体增强检索</strong><span class="mt-0.5 block font-normal text-[var(--muted)]">默认开启。Agent 会自动使用已发布本体扩展与重排结果；不可用时自动退回普通检索。</span></span>

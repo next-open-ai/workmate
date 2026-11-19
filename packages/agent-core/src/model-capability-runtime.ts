@@ -5,11 +5,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { promisify } from 'node:util';
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import type { ImageGenerationProtocol, ModelCapabilityRuntime } from '@workmate/contracts';
-import { suggestedSpeechVoices } from '@workmate/contracts';
+import { isQwenPromptAudioModel, suggestedSpeechVoices } from '@workmate/contracts';
 import { embedOpenAiCompatible } from './embedding-http.js';
 import { materializeAudioInput } from './audio-input.js';
 import { createVisionCapabilityTool, type VisionToolContext } from './vision-capability.js';
-import { SpeechNetworkError } from './speech-http.js';
+import { SpeechNetworkError, type SpeechConnectionDiagnostics } from './speech-http.js';
 import { uploadDashScopeAudio } from './speech-provider-adapters.js';
 import { Type, defineAgentTool } from './pi-tools.js';
 import { createUnifiedToolSession, registrationsFromTools, type UnifiedToolSession } from './unified-tool-runtime.js';
@@ -23,6 +23,7 @@ export const MODEL_CAPABILITY_BY_TOOL = {
   model_embed_text: 'embedding',
   model_transcribe_audio: 'asr',
   model_synthesize_speech: 'tts',
+  model_generate_audio: 'tts',
 } as const;
 
 function endpoint(baseUrl: string, suffix: string) {
@@ -493,25 +494,32 @@ export function createModelCapabilityTools(input: { configs?: ModelCapabilityRun
   }));
 
   const tts = configFor(configs, 'tts');
+  const promptAudio = !!tts && isQwenPromptAudioModel(tts.provider, tts.modelId);
   const defaultVoice = tts?.voice?.trim() || (tts ? suggestedSpeechVoices(tts.provider, tts.modelId)[0] : undefined)
     || (tts && !['qwen', 'volcengine'].includes(tts.provider) ? 'alloy' : '');
   let ttsBlocked: { ok: false; error: string; retryable: false; modelId: string; voice: string; status: number; requestId?: string } | undefined;
+  let ttsNetworkFailure: { ok: false; error: string; code: 'AUDIO_NETWORK_UNCONFIRMED'; retryable: false; retryScope: 'current_run'; canRetryInNewRun: true; fallbackAllowed: false; modelId: string; endpoint: string; method: string; submissionState: 'unknown' | 'generated_download_failed'; connection?: SpeechConnectionDiagnostics } | undefined;
   if (tts) tools.push(defineAgentTool({
-    name: 'model_synthesize_speech',
-    description: `Synthesize non-realtime speech and save audio in the run workspace. Model: ${tts.modelId}. Default voice: ${defaultVoice || 'not configured'}. Omit voice unless the user requests a specific compatible voice ID. Never guess OpenAI or other model voices. If retryable=false, stop TTS calls for this run and report the configuration error; do not claim a service outage.`,
+    name: promptAudio ? 'model_generate_audio' : 'model_synthesize_speech',
+    label: promptAudio ? '音频创作' : '语音合成',
+    description: promptAudio
+      ? `Current configured audio-generation model: ${tts.modelId}. Readiness: configured, not tested in this run. A previous turn's network error is not a current-run result and does not disable this freshly created tool; only a failure returned in THIS run can block further calls in this run. This is a prompt-based AudioGen model, not conventional text-only TTS. For a matching sound/song creation task, use the current tool result rather than historical guesses before claiming inability or selecting a different production method; respect an explicit user request for offline/algorithmic synthesis. Generate an audio file from a complete creative text prompt. For a requested song, explicitly direct a lead vocal to SING the supplied original lyrics intelligibly with melody and accompaniment, not speak the request or only hum vowels. Put style, vocal direction and the full lyrics in text. Do not promise full-song quality or exact duration. No voice IDs. Prompt max 3000 characters; non-podcast audio up to 120 seconds per provider limits. The successful output is the original provider audio saved without ffmpeg processing. Only claim a provider-generated song after a successful result. On failure, report it and ask before using any alternative; do not silently use Python/numpy oscillators, formants, vowel humming, or a different model as a substitute for sung lyrics. If retryable=false, stop calls for this run; user may explicitly retry in a new turn.`
+      : `Synthesize non-realtime speech and save audio in the run workspace. Model: ${tts.modelId}. Default voice: ${defaultVoice || 'not configured'}. Omit voice unless the user requests a specific compatible voice ID. Never guess OpenAI or other model voices. If retryable=false, stop TTS calls for this run and report the configuration error; do not claim a service outage.`,
     parameters: Type.Object({
-      text: Type.String({ minLength: 1, maxLength: 12_000 }),
-      voice: Type.Optional(Type.String({ maxLength: 240, description: 'Optional compatible voice ID. Omit to use the model-specific configured default.' })),
-      format: Type.Optional(Type.Union([Type.Literal('mp3'), Type.Literal('wav'), Type.Literal('aac'), Type.Literal('flac'), Type.Literal('opus'), Type.Literal('pcm')])),
-      speed: Type.Optional(Type.Number({ minimum: 0.25, maximum: 4 })),
+      text: Type.String({ minLength: 1, maxLength: promptAudio ? 3000 : 12_000, description: promptAudio ? 'Complete audio creation prompt, including sound/style/vocal direction and optional original lyrics.' : 'Text to speak.' }),
+      voice: Type.Optional(Type.String({ maxLength: 240, description: promptAudio ? 'Unsupported by this model. Do not pass; describe vocal character in text.' : 'Optional compatible voice ID. Omit to use the model-specific configured default.' })),
+      format: Type.Optional(promptAudio ? Type.Union([Type.Literal('mp3'), Type.Literal('wav'), Type.Literal('pcm')]) : Type.Union([Type.Literal('mp3'), Type.Literal('wav'), Type.Literal('aac'), Type.Literal('flac'), Type.Literal('opus'), Type.Literal('pcm')])),
+      speed: Type.Optional(Type.Number({ minimum: promptAudio ? 0.5 : 0.25, maximum: promptAudio ? 2 : 4 })),
     }),
     execute: async ({ text, voice, format, speed }, { signal, reportProgress }) => {
+      if (ttsNetworkFailure) return ttsNetworkFailure;
       if (ttsBlocked) return { ...ttsBlocked, error: `${ttsBlocked.error} 本次运行已停止 TTS 请求，请先修正模型/音色配置后新建一轮重试。` };
       const extension = format || 'mp3';
       const url = endpoint(tts.baseUrl, '/audio/speech');
-      reportProgress({ summary: '正在提交语音合成请求…', progress: 10 });
-      const selectedVoice = voice?.trim() || defaultVoice;
-      if (!selectedVoice) return { ok: false, retryable: false, modelId: tts.modelId, error: '请在此 TTS 模型中配置兼容的默认音色 ID，当前模型没有已确认的默认音色。' };
+      reportProgress({ summary: promptAudio ? '正在提交提示词音频生成请求…' : '正在提交语音合成请求…', progress: 10 });
+      if (promptAudio && voice?.trim()) return { ok: false, retryable: false, modelId: tts.modelId, error: '该音频生成模型不支持 voice 音色 ID，请在 text 提示词中描述人声。' };
+      const selectedVoice = promptAudio ? '' : voice?.trim() || defaultVoice;
+      if (!promptAudio && !selectedVoice) return { ok: false, retryable: false, modelId: tts.modelId, error: '请在此 TTS 模型中配置兼容的默认音色 ID，当前模型没有已确认的默认音色。' };
       try {
       let bytes: Uint8Array;
       let contentType = '';
@@ -534,12 +542,23 @@ export function createModelCapabilityTools(input: { configs?: ModelCapabilityRun
       if (contentType && !contentType.startsWith('audio/') && contentType !== 'application/octet-stream') throw new Error(`TTS provider returned unsupported content type: ${contentType}.`);
       if (!bytes.byteLength) throw new Error('TTS provider returned an empty audio file.');
       if (bytes.byteLength > MAX_AUDIO_OUTPUT_BYTES) throw new Error('TTS output exceeds the 25 MB limit.');
-      reportProgress({ summary: '语音合成完成，正在保存到运行工作区…', progress: 90 });
+      reportProgress({ summary: promptAudio ? '音频生成完成，正在保存成果文件…' : '语音合成完成，正在保存到运行工作区…', progress: 90 });
       return { ok: true, capability: 'tts', modelId: tts.modelId, path: await writeOutput(input.workspaceRoot, extension, bytes), mimeType: contentType || audioMime(extension), format: extension, bytes: bytes.byteLength, deliverable: true };
       } catch (error) {
+        if (error instanceof SpeechNetworkError) {
+          const submissionState = error.method === 'POST' ? 'unknown' : 'generated_download_failed';
+          ttsNetworkFailure = {
+            ok: false, code: 'AUDIO_NETWORK_UNCONFIRMED', retryable: false, retryScope: 'current_run', canRetryInNewRun: true, fallbackAllowed: false,
+            modelId: tts.modelId, endpoint: error.endpoint, method: error.method, submissionState,
+            ...(error.connection ? { connection: error.connection } : {}),
+            error: `${error.message} [model=${tts.modelId}] ${submissionState === 'unknown' ? '未收到生成成功响应，提交结果未知。' : '已取得生成链接，但音频尚未成功下载。'} 本次未交付可用音频；本轮停止重发请求，用户明确要求时可在新一轮重试。不能据此断言服务宕机或内容无关。未经用户同意，不得改用算法合成/哼鸣/其他模型冒充带歌词的歌曲。`,
+          };
+          reportProgress({ summary: '音频请求未确认，未交付文件；本轮停止重复提交。' });
+          return ttsNetworkFailure;
+        }
         if (error instanceof SpeechProviderHttpError && !error.retryable) {
           ttsBlocked = { ok: false, retryable: false, modelId: tts.modelId, voice: selectedVoice, status: error.status, requestId: error.requestId,
-            error: `${error.message} [model=${tts.modelId}, voice=${selectedVoice}] 请检查模型对应的音色、参数与访问权限；411 请优先核对模型与音色匹配，不能据此判断服务暂时不可用。停止更换文本/音色进行盲目重试。` };
+            error: promptAudio ? `${error.message} [model=${tts.modelId}] 请检查业务空间、模型开通权限和提示词参数；本次运行停止盲目重试，不切换模型。` : `${error.message} [model=${tts.modelId}, voice=${selectedVoice}] 请检查模型对应的音色、参数与访问权限；411 请优先核对模型与音色匹配，不能据此判断服务暂时不可用。停止更换文本/音色进行盲目重试。` };
           return ttsBlocked;
         }
         throw error;

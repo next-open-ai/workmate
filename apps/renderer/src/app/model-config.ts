@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue';
+import {useSearchConfig} from './search-config';
 import { DEFAULT_EMBEDDING_META, resolveProviderServiceEndpoint, suggestedSpeechVoices } from '@workmate/contracts';
 import type { AgentCapabilityAssignment, AgentCapabilityMode, CapabilityBinding, DecisionGuardPolicy, DecisionProtocol, DecisionRuntimeConfig, ImageGenerationProtocol, ModelCapability, ProviderEndpointKind, ProviderEndpointOverrides, ProviderService } from '@workmate/contracts';
 import { getServerModelConfig, saveServerModelConfig, setCapabilityHealthObserver, type CapabilityHealthObservation } from '../services/api.js';
@@ -163,7 +164,7 @@ export const providerSuggestedByCapability: Partial<Record<ProviderId, Partial<R
     image: ['qwen-image-2.0', 'qwen-image-3.0-pro', 'qwen-image-3.0', 'qwen-image', 'wan2.7-image-pro', 'wan2.7-image', 'wan2.6-t2i', 'wan2.5-t2i-preview', 'wan2.2-t2i-flash'],
     embedding: ['text-embedding-v4', 'text-embedding-v3'],
     asr: ['qwen-audio-3.1-asr-flash-filetrans', 'qwen-audio-3.0-asr-flash-filetrans', 'paraformer-v2', 'paraformer-8k-v2'],
-    tts: ['qwen-audio-3.1-tts-flash', 'qwen-audio-3.0-tts-flash', 'cosyvoice-v3-flash', 'cosyvoice-v2'],
+    tts: ['qwen-audio-3.1-tts-flash', 'qwen-audio-3.1-tts-next', 'qwen-audio-3.0-tts-flash', 'cosyvoice-v3-flash', 'cosyvoice-v2'],
     realtime: ['qwen-audio-3.1-realtime-plus', 'qwen3.8-omni-flash-realtime'],
   },
   volcengine: { chat: providerSuggestedChatModels.volcengine, asr: ['bigmodel'], tts: ['volc-tts'], realtime: ['1.2.6.1'] },
@@ -208,6 +209,16 @@ export function migrateLegacyRealtimeProvider(current: ModelSettings, legacy: { 
 }
 
 export const MODEL_HEALTH_FRESH_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Registration is not readiness: Next requires an explicit workspace endpoint. */
+export function qwenNextNeedsWorkspace(instance: ProviderInstance, models: ConfiguredModel[]) {
+  if (instance.type !== 'qwen' || instance.workspaceId?.trim()) return false;
+  const endpoint = instance.endpoints?.tts || instance.baseUrl;
+  try {
+    if (/^[^.]+\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$/.test(new URL(endpoint).hostname)) return false;
+  } catch { /* Keep the setup guidance visible for an incomplete URL. */ }
+  return models.some((model) => model.providerInstanceId === instance.id && model.capability === 'tts' && model.modelId === 'qwen-audio-3.1-tts-next');
+}
 
 export function modelHealthIsStale(model: ConfiguredModel, now = Date.now()) {
   if (!model.health?.checkedAt) return false;
@@ -281,6 +292,12 @@ export function applyRecommendedProviderSetup(
       settingsValue.agentCapabilityAssignments.push({ agentId, capability, mode: 'auto', updatedAt: new Date().toISOString() });
     }
     configured.push(capability);
+  }
+  // AudioGen is an additional choice, not a replacement for the default speech binding.
+  const promptAudioModelId = 'qwen-audio-3.1-tts-next';
+  if (instance.type === 'qwen' && profile.tts && !settingsValue.models.some((item) => item.providerInstanceId === instance.id && item.capability === 'tts' && item.modelId === promptAudioModelId)) {
+    settingsValue.models.push({ id: newId(), providerInstanceId: instance.id, capability: 'tts', modelId: promptAudioModelId, label: '提示词音频创作' });
+    addedModels += 1;
   }
   return {
     settings: sanitizeModelSettings(settingsValue), configured: [...new Set(configured)], addedModels,
@@ -554,6 +571,15 @@ export function endpointKindForCapability(capability: ModelCapability): Provider
   if (capability === 'tts') return 'tts';
   if (capability === 'realtime') return 'realtime';
   return 'chat';
+}
+
+/** Registration alone is not a binding. Preserve explicit choices, including disabled bindings. */
+export function bindSpecialistModel(bindings: CapabilityBinding[], model: ConfiguredModel, replace = false): CapabilityBinding[] {
+  if (model.capability === 'chat' || (!replace && bindings.some((item) => item.capability === model.capability))) return bindings;
+  return [
+    ...bindings.filter((item) => item.capability !== model.capability),
+    { capability: model.capability, modelId: model.id, enabled: true, updatedAt: new Date().toISOString() },
+  ];
 }
 
 export function effectiveProviderBaseUrl(instance: ProviderInstance, capability: ModelCapability = 'chat') {
@@ -1086,6 +1112,9 @@ export function useModelConfig() {
     settings.value = plainSettings;
     if (window.workmateDesktop) await window.workmateDesktop.saveModelConfig(plainSettings);
     else await saveServerModelConfig(plainSettings);
+    if (plainSettings.providerInstances.some(item => item.type === 'deepseek') || useSearchConfig().settings.value.providers.some(item => item.providerInstanceId)) {
+      await useSearchConfig().syncFromModelSettings(plainSettings);
+    }
   };
 
   const selectChatEndpoint = async (token: string) => {

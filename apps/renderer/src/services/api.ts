@@ -468,6 +468,7 @@ export type McpConnectionPayload =
   | { id: string; name: string; transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string>; cwd?: string; enabled: boolean; description?: string };
 
 export type KnowledgeBasePayload = {
+  wikiRetrievalEnabled?: boolean;
   id: string;
   name: string;
   provider: 'lancedb' | 'bailian' | 'dify' | 'qdrant' | 'pinecone';
@@ -506,7 +507,7 @@ export type StreamChatInput = {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   model: { provider: string; baseUrl?: string; chatModel: string; imageModel?: string; embeddingModel?: string; apiKey: string; disableThinking?: boolean; enableSearch?: boolean };
   skills?: RuntimeSkill[];
-  searchProviders?: Array<{ id: 'bocha' | 'tavily' | 'brave' | 'exa' | 'zhipu' | 'aliyun'; label: string; apiKey: string; baseUrl?: string; enabled: boolean; preferred: boolean }>;
+  searchProviders?: Array<{ id: 'bocha' | 'tavily' | 'brave' | 'exa' | 'zhipu' | 'aliyun' | 'deepseek'; label: string; apiKey: string; baseUrl?: string; enabled: boolean; preferred: boolean }>;
   mcpConnections?: McpConnectionPayload[];
   knowledgeBases?: KnowledgeBasePayload[];
   modelCapabilities?: import('@workmate/contracts').ModelCapabilityRuntime[];
@@ -802,7 +803,7 @@ export type OntologyQueryPlanPayload = {
 export type OntologyHybridSearchPayload = {
   ok: true;
   query: string;
-  strategy: 'vector-only' | 'ontology-enhanced';
+  strategy: 'vector-only' | 'hybrid' | 'ontology-enhanced';
   plan: OntologyQueryPlanPayload;
   results: Array<{ id: string; title: string; content: string; score: number; source?: string; url?: string; knowledgeBaseId?: string; knowledgeBaseName?: string; provider?: string; retrievalRoutes?: Array<'raw-vector' | 'ontology-vector' | 'ontology-evidence'> }>;
 };
