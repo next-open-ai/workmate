@@ -18,6 +18,26 @@ test('REL-RUNNER AT1: workflow runners and basic Actions are supported', () => {
   }
 });
 
+test('REL-RUNNER AT2: Node setup does not require pnpm before Corepack activation', () => {
+  let checked = 0;
+  for (const name of readdirSync(directory).filter((file) => /\.ya?ml$/.test(file))) {
+    const source = activeLines(read(name));
+    const steps = source.split(/(?=^      - )/m);
+    for (let index = 0; index < steps.length; index += 1) {
+      if (!steps[index].includes('uses: actions/setup-node@')) continue;
+      checked += 1;
+      assert.match(steps[index], /package-manager-cache: false\s/, name);
+      assert.doesNotMatch(steps[index], /^\s+cache:\s*pnpm\b/m, name);
+      const following = steps.slice(index + 1).join('');
+      const enable = following.indexOf('run: corepack enable');
+      const verify = following.indexOf('run: pnpm --version');
+      const install = following.indexOf('run: pnpm install --frozen-lockfile');
+      assert.ok(enable >= 0 && verify > enable && install > verify, `${name}: Corepack must precede pnpm`);
+    }
+  }
+  assert.equal(checked, 5, 'cover CI, Release, npm publish and concurrency workflow');
+});
+
 test('REL-RUNNER AT1: CI and Release preserve native targets and package budgets', () => {
   for (const name of ['ci.yml', 'release.yml']) {
     const source = activeLines(read(name));
